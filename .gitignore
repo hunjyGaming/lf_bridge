@@ -1,0 +1,8 @@
+node_modules/
+.env
+config.json
+data/
+*.log
+*.tmp
+inspect-report.json
+.DS_Store

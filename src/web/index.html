@@ -1,0 +1,196 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <meta name="color-scheme" content="dark" />
+  <title>LF Live — Konsole</title>
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%230a0a0e'/%3E%3Crect x='9' y='9' width='14' height='14' rx='3' fill='%23ffb020'/%3E%3C/svg%3E" />
+  <link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+
+<header class="app">
+  <div class="brand-row">
+    <div class="wordmark">LF&nbsp;<b>LIVE</b></div>
+    <div class="chips">
+      <span class="chip" id="chip-lf"><i class="led"></i>Laserforce</span>
+      <span class="chip" id="chip-clients"><i class="led"></i>0&nbsp;Clients</span>
+      <span class="chip" id="chip-outputs"><i class="led"></i>0/0&nbsp;Ziele</span>
+    </div>
+  </div>
+
+  <!-- signal flow — data path, visible end to end -->
+  <section class="flow" id="flow" aria-label="Signalfluss">
+    <div class="node" id="node-in">
+      <span class="node-eyebrow">Eingang</span>
+      <span class="node-title">Laserforce</span>
+      <span class="node-sub" id="in-sub">:9000</span>
+    </div>
+    <div class="wire" id="wire-a"><span class="pulse"></span></div>
+    <div class="node" id="node-engine">
+      <span class="node-eyebrow">Verarbeitung</span>
+      <span class="node-title" id="engine-state">Leerlauf</span>
+      <span class="node-sub" id="engine-sub">kein Match</span>
+    </div>
+    <div class="wire" id="wire-b"><span class="pulse"></span></div>
+    <div class="node node-out" id="node-out">
+      <span class="node-eyebrow">Ausgänge</span>
+      <span class="node-title" id="out-count">0 aktiv</span>
+      <ul class="out-mini" id="out-mini"></ul>
+    </div>
+  </section>
+</header>
+
+<nav class="tabs">
+  <button data-tab="live" class="active">Live</button>
+  <button data-tab="outputs">Ausgänge</button>
+  <button data-tab="stats">Statistik</button>
+  <button data-tab="settings">Einstellungen</button>
+  <button data-tab="log">Log</button>
+</nav>
+
+<div id="conn-hint" class="hint" hidden></div>
+
+<main>
+  <!-- LIVE -->
+  <section id="tab-live" class="tab active">
+    <div class="scorebar">
+      <div class="side" id="side-a"><span class="sname">—</span><span class="sscore">0</span></div>
+      <div class="mid"><span class="clock" id="clock">0:00</span><span class="mid-label" id="mid-label">kein Match</span></div>
+      <div class="side rev" id="side-b"><span class="sscore">0</span><span class="sname">—</span></div>
+    </div>
+    <div class="stat-cols" id="stat-cols"></div>
+    <div class="feed-wrap">
+      <span class="eyebrow">Ereignisse</span>
+      <div class="feed" id="feed"></div>
+    </div>
+  </section>
+
+  <!-- OUTPUTS -->
+  <section id="tab-outputs" class="tab">
+    <div class="sec-head"><h2>Ausgehende Ziele</h2><button id="add-output">Ziel hinzufügen</button></div>
+    <p class="lead">Match-Daten an eine IP:Port im lokalen Netz schicken — als HTTP-Webhook, als offene TCP-Verbindung oder als UDP-Pakete. Jedes Ziel sendet dieselben JSON-Nachrichten wie der Live-Stream (<code>{"type":"event"|"state", …}</code>).</p>
+    <div id="output-form" hidden></div>
+    <div id="output-list" class="cards"></div>
+
+    <div class="sec-head mt"><h2>Offene Kanäle</h2></div>
+    <p class="lead">Hier fragen andere Programme die Daten selbst ab.</p>
+
+    <div class="channel">
+      <div class="channel-top"><span class="badge">REST</span><code id="ch-rest">http://…/api</code><button class="ghost mini" data-copy="ch-rest">Kopieren</button></div>
+      <p class="channel-note"><code>/api/state</code> · <code>/api/teams</code> · <code>/api/players</code> · <code>/api/events?since=&amp;limit=</code> · <code>/api/status</code></p>
+    </div>
+    <div class="channel">
+      <div class="channel-top"><span class="badge">WebSocket</span><code id="ch-ws">ws://…/ws</code><button class="ghost mini" data-copy="ch-ws">Kopieren</button></div>
+      <p class="channel-note">Sendet <code>hello</code>, dann <code>state</code> + <code>event</code>. Für Browser-Overlays.</p>
+    </div>
+    <div class="channel">
+      <div class="channel-top">
+        <span class="badge amber">Raw&nbsp;TCP</span>
+        <label class="switch"><input type="checkbox" id="stream-enabled" /><span></span></label>
+        <span class="channel-label">Stream-Server</span>
+        <input class="port-inp" id="stream-host" placeholder="127.0.0.1" />
+        <input class="port-inp" id="stream-port" type="number" min="1" max="65535" />
+      </div>
+      <p class="channel-note" id="stream-note">Aus. Für Tools, die eine Socket-Verbindung aufmachen statt HTTP.</p>
+    </div>
+  </section>
+
+  <!-- STATS -->
+  <section id="tab-stats" class="tab">
+    <div class="panel">
+      <span class="eyebrow">Aufzeichnung</span>
+      <label class="row-chk" style="margin-top:12px"><input id="s-csv-enabled" type="checkbox" /> Statistiken als CSV speichern</label>
+      <p class="channel-note">Ordner auf diesem PC: <code id="csv-dir">…</code></p>
+      <label style="max-width:300px">Trennzeichen
+        <select id="s-csv-delim">
+          <option value=";">Semikolon ;&nbsp;&nbsp;(Excel DE)</option>
+          <option value=",">Komma ,</option>
+          <option value="	">Tab</option>
+        </select>
+      </label>
+      <div class="row" style="margin-top:16px">
+        <label class="row-chk inline"><input id="s-csv-events" type="checkbox" /> Event-Log mitschreiben</label>
+        <label class="row-chk inline"><input id="s-csv-live" type="checkbox" /> Match-CSV live aktualisieren</label>
+      </div>
+    </div>
+
+    <div class="sec-head"><h2>Gesamtwertung</h2><button class="ghost" id="totals-refresh">Aktualisieren</button></div>
+    <p class="lead">Summe über alle aufgezeichneten Matches, aus <code>totals.csv</code>.</p>
+    <div class="tablewrap"><table class="stat big" id="totals-table"></table></div>
+
+    <div class="sec-head mt"><h2>Dateien</h2></div>
+    <p class="lead">Alle CSV-Dateien im Statistik-Ordner. Klicken zum Herunterladen.</p>
+    <div id="stats-files" class="cards"></div>
+  </section>
+
+  <!-- SETTINGS -->
+  <section id="tab-settings" class="tab">
+    <div class="panel">
+      <span class="eyebrow">Netzwerk · Ports</span>
+      <p class="channel-note" id="reach-line">…</p>
+      <div class="grid2">
+        <label>Laserforce-Port (Log-Stream rein)<input id="s-tcp-port" type="number" min="1" max="65535" /><small>Hier verbindet sich das Laserforce-System.</small></label>
+        <label>Laserforce-Bind<input id="s-tcp-host" /><small>0.0.0.0 = alle Netzwerkkarten · 127.0.0.1 = nur dieser PC.</small></label>
+        <label>Web/API-Port (Konsole + API)<input id="s-http-port" type="number" min="1" max="65535" /><small>Änderung wirkt erst nach Neustart.</small></label>
+        <label>Web/API-Bind<input id="s-http-host" /><small>0.0.0.0 = im ganzen LAN erreichbar.</small></label>
+      </div>
+    </div>
+
+    <div class="panel">
+      <span class="eyebrow">Zugang &amp; Sicherheit</span>
+      <label>Zugriffs-Token<input id="s-token" type="password" placeholder="leer = offen im LAN" /><small>Wenn gesetzt: API und diese Konsole brauchen <code>Authorization: Bearer &lt;token&gt;</code> bzw. <code>?token=</code>. Empfohlen, sobald das Netz nicht komplett vertrauenswürdig ist.</small></label>
+      <label>Erlaubte Browser-Origins (CORS, eine pro Zeile)<textarea id="s-cors" rows="2" placeholder="*"></textarea><small><code>*</code> = beliebige Website darf die API im Browser abfragen (nur GET). Leer = keine. Für nicht-Browser-Clients (curl, Server) irrelevant.</small></label>
+      <label style="max-width:320px">Rate-Limit (Anfragen/Minute je IP)<input id="s-rate" type="number" min="0" /><small>0 = aus.</small></label>
+    </div>
+
+    <div class="panel">
+      <span class="eyebrow">Match</span>
+      <label>Standard-Matchdauer (ms)<input id="s-duration" type="number" min="1000" /><small>Fallback, bis Laserforce die echte Dauer meldet.</small></label>
+    </div>
+
+    <div class="panel">
+      <span class="eyebrow">Namensliste (optional)</span>
+      <p class="channel-note">Eine CSV, die du selbst pflegst — <code>id,name,team</code> pro Zeile. Ersetzt die
+      Namen aus dem Laserforce-Stream. Ohne Liste werden die Namen genutzt, die Laserforce meldet.</p>
+      <label class="row-chk" style="margin-top:12px"><input id="s-roster-enabled" type="checkbox" /> Namensliste verwenden</label>
+      <label>Datei (relativ zum Programmordner)<input id="s-roster-file" placeholder="data/roster.csv" /></label>
+      <div class="row" style="margin-top:12px"><button class="ghost" id="roster-reload">Liste neu laden</button><span class="muted" id="roster-status"></span></div>
+    </div>
+
+    <div class="panel">
+      <span class="eyebrow">Sonstiges</span>
+      <label style="max-width:300px">Log-Level<select id="s-loglevel"><option>debug</option><option>info</option><option>warn</option><option>error</option></select></label>
+    </div>
+  </section>
+
+  <!-- LOG -->
+  <section id="tab-log" class="tab">
+    <div class="row">
+      <label class="row-chk inline"><input id="log-auto" type="checkbox" checked /> Auto-Scroll</label>
+      <button class="ghost" id="log-clear">Leeren</button>
+    </div>
+    <pre id="log" class="log"></pre>
+  </section>
+</main>
+
+<footer class="footbar">
+  <button id="save">Änderungen speichern</button>
+  <span id="note" class="muted"></span>
+</footer>
+
+<dialog id="token-dialog">
+  <form method="dialog">
+    <span class="eyebrow">Zugriff</span>
+    <h3>Token eingeben</h3>
+    <p class="muted">Diese Instanz ist geschützt.</p>
+    <input id="token-input" type="password" placeholder="Token" />
+    <div class="row end"><button value="ok">Weiter</button></div>
+  </form>
+</dialog>
+
+<div id="toast" class="toast" hidden></div>
+<script src="app.js"></script>
+</body>
+</html>

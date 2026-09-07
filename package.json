@@ -1,0 +1,20 @@
+{
+  "name": "lf-live",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Laserforce live-data bridge for the laser tag hall PC: reads the Laserforce TCP log stream, keeps match state, and serves it on the local network as a JSON + WebSocket API with a small web console.",
+  "main": "src/index.js",
+  "type": "commonjs",
+  "scripts": {
+    "start": "node src/index.js",
+    "check": "node scripts/check.js",
+    "itest": "node scripts/itest.js",
+    "inspect": "node scripts/inspect.js"
+  },
+  "dependencies": {
+    "ws": "^8.21.0"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}
