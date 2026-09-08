@@ -20,6 +20,8 @@ async function api(path, { method = 'GET', body } = {}) {
   const headers = {};
   if (body) headers['Content-Type'] = 'application/json';
   if (token) headers['Authorization'] = 'Bearer ' + token;
+  // marks a mutating request as coming from this console (CSRF gate, see SECURITY.md)
+  if (method !== 'GET' && method !== 'HEAD') headers['X-LF-Console'] = '1';
   const res = await fetch(path, { method, headers, body: body ? JSON.stringify(body) : undefined });
   if (res.status === 401) { await askToken(); return api(path, { method, body }); }
   const data = await res.json().catch(() => null);
@@ -201,9 +203,10 @@ function pushFeed(evt) {
 // ---------------- settings ----------------
 const PIN_MAP = {
   'logLevel': 's-loglevel',
-  'http.host': 's-http-host', 'http.port': 's-http-port',
+  'http.host': 's-http-host', 'http.port': 's-http-port', 'http.trustProxy': 's-trust-proxy',
   'tcp.host': 's-tcp-host', 'tcp.port': 's-tcp-port',
   'apiToken': 's-token', 'cors': 's-cors', 'rateLimitPerMin': 's-rate',
+  'outputAllow': 's-output-allow', 'stateTickMs': 's-state-tick',
   'streamServer.enabled': 'stream-enabled', 'streamServer.host': 'stream-host', 'streamServer.port': 'stream-port',
   'match.defaultDurationMs': 's-duration',
   'csv.enabled': 's-csv-enabled', 'csv.delimiter': 's-csv-delim', 'csv.writeEvents': 's-csv-events', 'csv.writeLive': 's-csv-live',
@@ -220,6 +223,7 @@ function applyPins(pins) {
     if (on && inp.title !== 'aus .env') inp.title = 'per .env festgelegt — hier nicht änderbar';
     if (!on) inp.removeAttribute('title');
   }
+  if (set.has('apiToken')) $('s-token-clear').disabled = true;
 }
 
 async function loadConfig() {
@@ -230,9 +234,16 @@ async function loadConfig() {
 
   $('s-tcp-port').value = cfg.tcp.port; $('s-tcp-host').value = cfg.tcp.host;
   $('s-http-port').value = cfg.http.port; $('s-http-host').value = cfg.http.host;
-  $('s-token').value = cfg.apiToken || '';
+  // the server never returns the token itself — an empty field keeps what is stored
+  $('s-token').value = '';
+  $('s-token').placeholder = cfg.apiTokenSet ? 'gesetzt — leer lassen behält ihn' : 'leer = offen im LAN';
+  $('s-token-clear').checked = false;
+  $('s-token-clear').disabled = !cfg.apiTokenSet;
   $('s-cors').value = (cfg.cors || []).join('\n');
   $('s-rate').value = cfg.rateLimitPerMin ?? 0;
+  $('s-trust-proxy').checked = !!cfg.http.trustProxy;
+  $('s-output-allow').value = (cfg.outputAllow || []).join(', ');
+  $('s-state-tick').value = cfg.stateTickMs ?? 200;
   $('s-duration').value = cfg.match.defaultDurationMs;
   $('s-loglevel').value = cfg.logLevel;
 
@@ -270,11 +281,14 @@ function streamNote() {
 function collectConfig() {
   return {
     logLevel: $('s-loglevel').value,
-    http: { host: $('s-http-host').value.trim(), port: +$('s-http-port').value },
+    http: { host: $('s-http-host').value.trim(), port: +$('s-http-port').value, trustProxy: $('s-trust-proxy').checked },
     tcp: { host: $('s-tcp-host').value.trim(), port: +$('s-tcp-port').value },
     apiToken: $('s-token').value.trim(),
+    apiTokenClear: $('s-token-clear').checked,
     cors: $('s-cors').value.split('\n').map((s) => s.trim()).filter(Boolean),
     rateLimitPerMin: Math.max(0, +$('s-rate').value || 0),
+    outputAllow: $('s-output-allow').value.split(',').map((s) => s.trim()).filter(Boolean),
+    stateTickMs: Math.min(5000, Math.max(50, +$('s-state-tick').value || 200)),
     match: { defaultDurationMs: +$('s-duration').value },
     csv: {
       enabled: $('s-csv-enabled').checked,
@@ -291,8 +305,11 @@ $('save').addEventListener('click', async () => {
   $('save').disabled = true;
   try {
     const nt = $('s-token').value.trim();
+    const cleared = $('s-token-clear').checked;
     await api('/api/config', { method: 'POST', body: collectConfig() });
-    if (nt !== token) { token = nt; localStorage.setItem('lf_token', token); }
+    // an empty field means "unchanged" now, so only touch the stored token deliberately
+    if (cleared) { token = ''; localStorage.setItem('lf_token', ''); }
+    else if (nt && nt !== token) { token = nt; localStorage.setItem('lf_token', token); }
     await loadConfig();
     note('Gespeichert');
     refreshStatus();
@@ -476,7 +493,8 @@ function openForm(o) {
 $('add-output').addEventListener('click', () => openForm(null));
 
 async function quickSave() {
-  try { await api('/api/config', { method: 'POST', body: collectConfig() }); await loadConfig(); refreshStatus(); }
+  // outputs-only save: never touch the access token from here
+  try { await api('/api/config', { method: 'POST', body: { ...collectConfig(), apiToken: '', apiTokenClear: false } }); await loadConfig(); refreshStatus(); }
   catch (err) { toast('Speichern fehlgeschlagen: ' + err.message, true); }
 }
 function ghost(label, fn) { const b = el('button', { className: 'ghost mini' }, label); b.addEventListener('click', () => fn(b)); return b; }

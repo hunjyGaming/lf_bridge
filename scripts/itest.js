@@ -74,11 +74,22 @@ function done(code) { for (const p of procs) try { p.kill('SIGKILL'); } catch {}
   await fetch(`${BASE}/api/config`, { method: 'POST', headers: { ...AUTH, 'Content-Type': 'application/json' }, body: JSON.stringify(cfg) });
   await sleep(400); // let the tcp output connect + stream server bind
 
-  // raw TCP stream consumer
+  // raw TCP stream: without the token line the server must drop us
+  await new Promise((resolve, reject) => {
+    const bad = net.connect(STREAM_PORT, '127.0.0.1');
+    let got = '';
+    bad.on('data', (d) => { got += d; });
+    bad.on('close', () => { try { assert.strictEqual(got, '', 'unauthenticated stream client gets nothing'); resolve(); } catch (e) { reject(e); } });
+    bad.on('error', () => resolve());
+  });
+  console.log('raw stream auth OK  unauthenticated client dropped');
+
+  // raw TCP stream consumer (token line first)
   const streamMsgs = [];
   const sc = net.connect(STREAM_PORT, '127.0.0.1');
   { let b = ''; sc.on('data', (d) => { b += d; let i; while ((i = b.indexOf('\n')) >= 0) { try { streamMsgs.push(JSON.parse(b.slice(0, i))); } catch {} b = b.slice(i + 1); } }); }
   await new Promise((r) => sc.on('connect', r));
+  sc.write(JSON.stringify({ token: TOKEN }) + '\n');
 
   // WS consumer
   const msgs = [];

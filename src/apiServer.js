@@ -10,6 +10,18 @@ const WEB_DIR = path.join(__dirname, 'web');
 const MIME = { '.html': 'text/html; charset=utf-8', '.js': 'text/javascript; charset=utf-8', '.css': 'text/css; charset=utf-8', '.json': 'application/json; charset=utf-8', '.svg': 'image/svg+xml', '.ico': 'image/x-icon' };
 const CSP = "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self'; connect-src 'self' ws: wss:; base-uri 'none'; form-action 'none'; frame-ancestors 'none'";
 
+// The console is exactly three files — nothing else under src/web/ is servable.
+const STATIC_ALLOW = new Map([
+  ['/', 'index.html'],
+  ['/index.html', 'index.html'],
+  ['/styles.css', 'styles.css'],
+  ['/app.js', 'app.js'],
+]);
+
+// What a set secret looks like on the wire; posting it back keeps the stored value.
+const SECRET_MASK = '••••••';
+const WS_PING_MS = 30000;
+
 /**
  * The one thing the hall LAN talks to: JSON API + WebSocket + the web console,
  * all on a single HTTP port (config.http). Endpoints — docs/API.md.
@@ -17,13 +29,16 @@ const CSP = "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inl
  * Security model (docs/SECURITY.md):
  *   - optional access token (config.apiToken / LF_API_TOKEN): when set, every
  *     /api/* except /api/health and the WebSocket require it (constant-time compare)
- *   - CORS: only origins in config.cors get Access-Control-Allow-Origin, and
- *     cross-origin requests can only ever be GET (Allow-Methods: GET, OPTIONS)
- *   - mutating POST on a token-less instance requires a same-origin request
- *     (Sec-Fetch-Site / Origin) — blocks drive-by CSRF from a page the operator visits
- *   - per-IP rate limit (config.rateLimitPerMin)
- *   - static console served with a strict CSP, nosniff, DENY framing
- *   - request body capped at 512 KiB; static paths are traversal-guarded
+ *   - CORS: only origins in config.cors get Access-Control-Allow-Origin (default:
+ *     none), and cross-origin requests can only ever be GET (Allow-Methods: GET, OPTIONS)
+ *   - mutating requests without a valid bearer token need Sec-Fetch-Site: same-origin
+ *     or the X-LF-Console: 1 header — blocks drive-by CSRF from a page the operator visits
+ *   - per-IP rate limit (config.rateLimitPerMin); the client IP comes from the
+ *     socket unless config.http.trustProxy is on (then X-Forwarded-For, left-most)
+ *   - GET /api/config never returns the access token or an output secret
+ *   - every accepted config change is logged at warn level (who + which keys)
+ *   - static console: fixed 3-file allowlist, strict CSP, nosniff, DENY framing
+ *   - request body capped at 512 KiB; header/request/keep-alive timeouts set
  */
 class ApiServer {
   constructor({ logger, config, engine, getStatus, roster, stats, outputs, onConfigChange }) {
@@ -38,8 +53,8 @@ class ApiServer {
     this.server = null;
     this.wss = null;
     this.clients = new Set();
-    this._dirty = false;
-    this._flush = null;
+    this.stateDirty = false;
+    this._reaper = null;
     this._rate = new Map();
   }
 
@@ -55,6 +70,10 @@ class ApiServer {
         this.log.error('http', `unhandled: ${err.stack}`);
         if (!res.headersSent) this._json(res, 500, { error: 'internal' });
       }));
+      // slow-loris / idle-socket budget
+      server.requestTimeout = 15000;
+      server.headersTimeout = 10000;
+      server.keepAliveTimeout = 5000;
       const wss = new WebSocketServer({ noServer: true });
 
       server.on('upgrade', (req, socket, head) => {
@@ -68,8 +87,10 @@ class ApiServer {
       });
 
       server.on('error', (err) => { this.log.error('http', `server error: ${err.message}`); reject(err); });
+      server.on('close', () => this._stopReaper());
       server.listen(port, host, () => {
         this.server = server; this.wss = wss;
+        this._startReaper();
         this.log.info('http', `web console + API on http://${host}:${port}  (ws://${host}:${port}/ws)`);
         if (host === '0.0.0.0' && !this.cfg.apiToken) {
           this.log.warn('http', 'reachable from the whole LAN and no access token set — fine on a trusted event network, otherwise set LF_API_TOKEN');
@@ -80,12 +101,33 @@ class ApiServer {
   }
 
   stop() {
-    if (this._flush) clearInterval(this._flush);
-    this._flush = null;
+    this._stopReaper();
     for (const ws of this.clients) { try { ws.close(1001); } catch {} }
     this.clients.clear();
     if (this.wss) { try { this.wss.close(); } catch {} this.wss = null; }
     if (this.server) { try { this.server.close(); } catch {} this.server = null; }
+  }
+
+  /** Drop WebSocket clients whose peer vanished without a FIN (dead NAT, sleeping laptop). */
+  _startReaper() {
+    this._stopReaper();
+    this._reaper = setInterval(() => {
+      for (const ws of this.clients) {
+        if (ws.isAlive === false) {
+          this.clients.delete(ws);
+          try { ws.terminate(); } catch {}
+          this.log.info('ws', `client timed out (${this.clientCount})`);
+          continue;
+        }
+        ws.isAlive = false;
+        try { ws.ping(); } catch {}
+      }
+    }, WS_PING_MS);
+    this._reaper.unref?.();
+  }
+  _stopReaper() {
+    if (this._reaper) clearInterval(this._reaper);
+    this._reaper = null;
   }
 
   // ---- auth / origin ----
@@ -101,12 +143,33 @@ class ApiServer {
     const exp = Buffer.from(want);
     return got.length === exp.length && crypto.timingSafeEqual(got, exp);
   }
+  /** True only if the request itself carries a valid bearer/query token. */
+  _hasToken(req, url) {
+    const want = this.cfg.apiToken || '';
+    return !!want && this._authed(req, url);
+  }
+  /**
+   * CSRF gate for mutating requests that bring no token. A browser either marks
+   * the request same-origin itself, or it is our console (which sets X-LF-Console).
+   * "same-site"/"none" are NOT accepted — a sibling host must not reconfigure us.
+   */
   _sameOrigin(req) {
-    const site = req.headers['sec-fetch-site'];
-    if (site) return site === 'same-origin' || site === 'same-site' || site === 'none';
-    const origin = req.headers.origin;
-    if (!origin) return true; // non-browser client (curl, a server-side proxy)
-    try { return new URL(origin).host === req.headers.host; } catch { return false; }
+    if (req.headers['x-lf-console'] === '1') return true;
+    return req.headers['sec-fetch-site'] === 'same-origin';
+  }
+  /**
+   * Client IP. Only trusts X-Forwarded-For when config.http.trustProxy is on —
+   * otherwise the header is a free-form, spoofable string and is ignored.
+   */
+  _clientIp(req) {
+    if (this.cfg.http?.trustProxy) {
+      const xff = req.headers['x-forwarded-for'];
+      if (xff) {
+        const first = String(Array.isArray(xff) ? xff[0] : xff).split(',')[0].trim();
+        if (first) return first;
+      }
+    }
+    return req.socket?.remoteAddress || '?';
   }
   _rateOk(ip) {
     const limit = this.cfg.rateLimitPerMin;
@@ -153,7 +216,7 @@ class ApiServer {
   async _route(req, res) {
     const url = new URL(req.url, 'http://localhost');
     const p = url.pathname;
-    const ip = req.socket.remoteAddress || '?';
+    const ip = this._clientIp(req);
 
     this._cors(req, res);
     if (req.method === 'OPTIONS') { res.writeHead(204); return res.end(); }
@@ -169,11 +232,20 @@ class ApiServer {
     if (!this._authed(req, url)) return this._json(res, 401, { error: 'unauthorized', hint: 'send Authorization: Bearer <token>' });
 
     if (req.method === 'GET') return this._get(p, url, res);
+
+    // Mutating methods: a request without a valid token must prove it is not a
+    // cross-site drive-by (browser-set Sec-Fetch-Site, or our own console header).
+    if (['POST', 'PUT', 'PATCH', 'DELETE'].includes(req.method)) {
+      if (!this._hasToken(req, url) && !this._sameOrigin(req)) {
+        this.log.warn('http', `cross-origin ${req.method} ${p} blocked from ${ip}`);
+        return this._json(res, 403, { error: 'cross_origin_blocked' });
+      }
+    }
+
     if (req.method === 'POST') {
-      if (!this.cfg.apiToken && !this._sameOrigin(req)) return this._json(res, 403, { error: 'cross_origin_blocked' });
       const body = await this._readBody(req);
       if (body === null) return this._json(res, 400, { error: 'bad_json' });
-      return this._post(p, body, res);
+      return this._post(p, body, res, ip);
     }
     return this._json(res, 405, { error: 'method_not_allowed' });
   }
@@ -192,7 +264,7 @@ class ApiServer {
       const n = Math.min(500, Math.max(1, parseInt(url.searchParams.get('limit') || '200', 10) || 200));
       return this._json(res, 200, { data: this.log.tail(n) });
     }
-    if (p === '/api/config') return this._json(res, 200, { data: this.cfg, envPins: this.config.envPins });
+    if (p === '/api/config') return this._json(res, 200, { data: this._redactedConfig(), envPins: this.config.envPins });
     if (p === '/api/stats/totals') return this._json(res, 200, { data: this.stats.totalsJson() });
     if (p === '/api/stats/files') return this._json(res, 200, { data: this.stats.listFiles() });
     if (p === '/api/stats/file') {
@@ -211,13 +283,60 @@ class ApiServer {
     return this._json(res, 404, { error: 'not_found' });
   }
 
-  async _post(p, body, res) {
+  // ---- config: never hand out secrets, never lose them on the way back ----
+  /** Deep copy of the running config with the token and every output secret removed. */
+  _redactedConfig() {
+    const c = structuredClone(this.cfg);
+    c.apiTokenSet = !!c.apiToken;
+    c.apiToken = '';
+    for (const o of c.outputs || []) if (o.secret) o.secret = SECRET_MASK;
+    return c;
+  }
+  /**
+   * A console that was handed the redacted config posts it straight back. Restore
+   * what it could not know: an empty token means "unchanged" (unless the client
+   * asks for apiTokenClear), and the mask means "keep the stored secret".
+   */
+  _unredactPatch(body) {
+    const patch = structuredClone(body && typeof body === 'object' ? body : {});
+    delete patch.apiTokenSet;
+    const clear = patch.apiTokenClear === true;
+    delete patch.apiTokenClear;
+    if ('apiToken' in patch && patch.apiToken === '' && !clear) delete patch.apiToken;
+    if (Array.isArray(patch.outputs)) {
+      const stored = this.cfg.outputs || [];
+      patch.outputs.forEach((o, i) => {
+        if (!o || typeof o !== 'object' || o.secret !== SECRET_MASK) return;
+        const prev = (o.id && stored.find((x) => x.id === o.id)) || stored[i];
+        o.secret = (prev && prev.secret) || '';
+      });
+    }
+    return patch;
+  }
+  /** Same restore, for a single output posted to /api/outputs/test. */
+  _unredactOutput(o) {
+    if (!o || typeof o !== 'object' || o.secret !== SECRET_MASK) return o;
+    const stored = this.cfg.outputs || [];
+    const prev = stored.find((x) => x.id === o.id);
+    return { ...o, secret: (prev && prev.secret) || '' };
+  }
+  /** Top-level keys whose serialized value differs. Never carries a value. */
+  _changedKeys(before, after) {
+    const keys = new Set([...Object.keys(before), ...Object.keys(after)]);
+    return [...keys].filter((k) => JSON.stringify(before[k]) !== JSON.stringify(after[k]));
+  }
+
+  async _post(p, body, res, ip = '?') {
     if (p === '/api/config') {
-      const before = JSON.stringify(this.cfg);
-      this.config.update(body);
+      const before = structuredClone(this.cfg);
+      this.config.update(this._unredactPatch(body));
       this.log.setLevel(this.cfg.logLevel);
-      if (before !== JSON.stringify(this.cfg)) await this.onConfigChange();
-      return this._json(res, 200, { data: this.cfg, envPins: this.config.envPins });
+      const changed = this._changedKeys(before, this.cfg);
+      if (changed.length) {
+        this.log.warn('audit', `config changed by ${ip}: ${changed.join(', ')}`);
+        await this.onConfigChange();
+      }
+      return this._json(res, 200, { data: this._redactedConfig(), envPins: this.config.envPins });
     }
     if (p === '/api/roster/reload') {
       this.roster.load();
@@ -225,8 +344,9 @@ class ApiServer {
       return this._json(res, 200, { data: this.roster.status() });
     }
     if (p === '/api/outputs/test') {
-      const o = body.output || body.webhook;
+      const o = this._unredactOutput(body.output || body.webhook);
       if (!o || typeof o !== 'object') return this._json(res, 400, { error: 'missing output' });
+      this.log.warn('audit', `output test by ${ip}: ${o.kind || '?'} "${o.name || o.id || '?'}"`);
       try { return this._json(res, 200, { data: await this.outputs.test(o) }); }
       catch (err) { return this._json(res, 200, { data: { ok: false, error: err.message } }); }
     }
@@ -234,12 +354,11 @@ class ApiServer {
   }
 
   _static(p, res) {
-    const rel = p === '/' ? 'index.html' : p.replace(/^\/+/, '');
-    const full = path.join(WEB_DIR, rel);
-    if (full !== path.join(WEB_DIR, 'index.html') && !full.startsWith(WEB_DIR + path.sep)) return this._json(res, 403, { error: 'forbidden' });
-    fs.readFile(full, (err, buf) => {
-      if (err) { fs.readFile(path.join(WEB_DIR, 'index.html'), (e2, idx) => e2 ? this._json(res, 404, { error: 'not_found' }) : this._sendFile(res, '.html', idx)); return; }
-      this._sendFile(res, path.extname(full), buf);
+    const rel = STATIC_ALLOW.get(p);
+    if (!rel) return this._json(res, 404, { error: 'not_found' });
+    fs.readFile(path.join(WEB_DIR, rel), (err, buf) => {
+      if (err) return this._json(res, 404, { error: 'not_found' });
+      this._sendFile(res, path.extname(rel), buf);
     });
   }
   _sendFile(res, ext, buf) {
@@ -263,26 +382,23 @@ class ApiServer {
     ws.on('error', () => {});
     ws.on('close', () => { this.clients.delete(ws); this.log.info('ws', `client disconnected (${this.clientCount})`); });
 
+    // Immediate opener so a fresh client has state before the next shared tick.
     this._safe(ws, { type: 'hello', service: 'lf-live', ts: Date.now() });
     this._safe(ws, { type: 'state', data: this.engine.snapshot() });
-
-    if (!this._flush) {
-      this._flush = setInterval(() => this._flushState(), 150);
-      this._flush.unref?.();
-    }
   }
   _safe(ws, obj) { if (ws.readyState === ws.OPEN) { try { ws.send(JSON.stringify(obj)); } catch {} } }
 
-  markDirty() { this._dirty = true; }
+  markDirty() { this.stateDirty = true; }
   broadcastEvent(evt) {
     const payload = JSON.stringify({ type: 'event', data: evt });
     for (const ws of this.clients) if (ws.readyState === ws.OPEN) { try { ws.send(payload); } catch {} }
   }
-  _flushState() {
-    if (!this._dirty || this.clients.size === 0) return;
-    this._dirty = false;
-    const payload = JSON.stringify({ type: 'state', data: this.engine.snapshot() });
-    for (const ws of this.clients) if (ws.readyState === ws.OPEN) { try { ws.send(payload); } catch {} }
+  /** Fan a pre-serialized {type:'state',...} string out to every WS client. */
+  pushState(str) {
+    if (!this.stateDirty) return;
+    this.stateDirty = false;
+    if (this.clients.size === 0) return;
+    for (const ws of this.clients) if (ws.readyState === ws.OPEN) { try { ws.send(str); } catch {} }
   }
 }
 

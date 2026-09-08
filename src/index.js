@@ -35,10 +35,26 @@ tcp.on('line', (line) => {
   try { engine.processLogLine(line); }
   catch (err) { logger.error('engine', `parse error: ${err.message} :: ${line.slice(0, 160)}`); }
 });
-engine.on('change', () => { api.markDirty(); streamServer.markDirty(); outputs.onStateChange(); stats.onChange(engine.snapshot()); });
+// Hot path: a `change` only flips dirty flags + hands stats a live reference.
+// The actual snapshot()+JSON.stringify happens once per tick below, shared by all
+// three push consumers. Event broadcasts stay immediate (see 'event' below).
+engine.on('change', () => { api.markDirty(); streamServer.markDirty(); outputs.markDirty(); stats.onChange(engine.gameState); });
 engine.on('event', (evt) => { api.broadcastEvent(evt); streamServer.broadcastEvent(evt); outputs.onEvent(evt); stats.onEvent(evt); });
 engine.on('match_start', () => stats.onMatchStart(engine.snapshot()));
 engine.on('match_end', () => stats.onMatchEnd(engine.snapshot()));
+
+// ---- one shared state tick ----
+// If any consumer is dirty, serialize the state exactly once and hand the same
+// pre-serialized string to every consumer.
+const stateTick = setInterval(() => {
+  if (!api.stateDirty && !streamServer.stateDirty && !outputs.stateDirty) return;
+  const snapshot = engine.snapshot();
+  const str = JSON.stringify({ type: 'state', data: snapshot });
+  api.pushState(str);
+  streamServer.pushState(str);
+  outputs.pushState(snapshot, str);
+}, config.data.stateTickMs);
+stateTick.unref?.();
 
 function getStatus() {
   const s = engine.snapshot();
@@ -46,10 +62,12 @@ function getStatus() {
     service: 'lf-live',
     lan: lanAddress(),
     http: { ...config.data.http, clients: api.clientCount, tokenSet: !!config.data.apiToken, cors: config.data.cors, rateLimitPerMin: config.data.rateLimitPerMin },
+    stateTickMs: config.data.stateTickMs,
     tcp: { ...tcp.stats },
     csv: stats.status(),
     localRoster: roster.status(),
     outputs: outputs.statusList(),
+    outputAllow: config.data.outputAllow,
     streamServer: { enabled: config.data.streamServer.enabled, host: streamServer.host, port: streamServer.port, clients: streamServer.clientCount },
     envPins: config.envPins,
     match: {
@@ -120,6 +138,7 @@ function lanAddress() {
 // ---- shutdown ----
 function shutdown() {
   logger.info('lf-live', 'shutting down');
+  clearInterval(stateTick);
   tcp.stop(); outputs.stop(); streamServer.stop(); api.stop();
   setTimeout(() => process.exit(0), 200);
 }

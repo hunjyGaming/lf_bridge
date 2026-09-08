@@ -136,12 +136,15 @@
         <label>Web/API-Port (Konsole + API)<input id="s-http-port" type="number" min="1" max="65535" /><small>Änderung wirkt erst nach Neustart.</small></label>
         <label>Web/API-Bind<input id="s-http-host" /><small>0.0.0.0 = im ganzen LAN erreichbar.</small></label>
       </div>
+      <label class="row-chk inline" style="margin-top:16px"><input id="s-trust-proxy" type="checkbox" /> Hinter eigenem Reverse-Proxy — Client-IP aus <code>X-Forwarded-For</code></label>
+      <label>Erlaubte Ausgangs-Ziele (Kommaliste, leer = alle)<input id="s-output-allow" placeholder="192.168.10.50:7000, *.regie.lan" /><small><code>host</code> oder <code>host:port</code>, <code>*.suffix</code> möglich. Begrenzt, wohin Webhook-/TCP-/UDP-Ausgänge senden dürfen — auch beim „Test"-Knopf.</small></label>
     </div>
 
     <div class="panel">
       <span class="eyebrow">Zugang &amp; Sicherheit</span>
-      <label>Zugriffs-Token<input id="s-token" type="password" placeholder="leer = offen im LAN" /><small>Wenn gesetzt: API und diese Konsole brauchen <code>Authorization: Bearer &lt;token&gt;</code> bzw. <code>?token=</code>. Empfohlen, sobald das Netz nicht komplett vertrauenswürdig ist.</small></label>
-      <label>Erlaubte Browser-Origins (CORS, eine pro Zeile)<textarea id="s-cors" rows="2" placeholder="*"></textarea><small><code>*</code> = beliebige Website darf die API im Browser abfragen (nur GET). Leer = keine. Für nicht-Browser-Clients (curl, Server) irrelevant.</small></label>
+      <label>Zugriffs-Token<input id="s-token" type="password" placeholder="leer = offen im LAN" /><small>Wenn gesetzt: API und diese Konsole brauchen <code>Authorization: Bearer &lt;token&gt;</code> bzw. <code>?token=</code>. Empfohlen, sobald das Netz nicht komplett vertrauenswürdig ist. Ein gesetzter Token wird nie zurück angezeigt — leer lassen behält ihn.</small></label>
+      <label class="row-chk inline"><input id="s-token-clear" type="checkbox" /> Token entfernen (offen im LAN)</label>
+      <label>Erlaubte Browser-Origins (CORS, eine pro Zeile)<textarea id="s-cors" rows="2" placeholder="leer = keine"></textarea><small>Leer = keine (Standard) — die Konsole selbst ist same-origin und braucht keinen Eintrag. Eine Zeile je Origin, z. B. <code>https://regie.hallen.lan</code>. <code>*</code> = beliebige Website darf die API im Browser abfragen (nur GET). Für nicht-Browser-Clients (curl, Server) irrelevant.</small></label>
       <label style="max-width:320px">Rate-Limit (Anfragen/Minute je IP)<input id="s-rate" type="number" min="0" /><small>0 = aus.</small></label>
     </div>
 
@@ -157,6 +160,11 @@
       <label class="row-chk" style="margin-top:12px"><input id="s-roster-enabled" type="checkbox" /> Namensliste verwenden</label>
       <label>Datei (relativ zum Programmordner)<input id="s-roster-file" placeholder="data/roster.csv" /></label>
       <div class="row" style="margin-top:12px"><button class="ghost" id="roster-reload">Liste neu laden</button><span class="muted" id="roster-status"></span></div>
+    </div>
+
+    <div class="panel">
+      <span class="eyebrow">Leistung</span>
+      <label style="max-width:320px">State-Push-Takt (ms)<input id="s-state-tick" type="number" min="50" max="5000" /><small>Wie oft der gemeinsame State-Snapshot an WebSocket, Raw-Stream und Ausgänge geht. Kleiner = flüssiger, mehr Last. Ereignisse gehen immer sofort raus. Wirkt erst nach Neustart. 50–5000.</small></label>
     </div>
 
     <div class="panel">

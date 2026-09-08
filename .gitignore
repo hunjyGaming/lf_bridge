@@ -6,3 +6,6 @@ data/
 *.tmp
 inspect-report.json
 .DS_Store
+
+# graphify knowledge graph output
+graphify-out/

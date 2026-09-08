@@ -43,6 +43,8 @@ class Engine extends EventEmitter {
     this.playerStatusMap = {};
     this._eventSeq = 0;
     this._dirty = false;
+    this._teamNamesDirty = false;
+    this._teamNamesScheduled = false;
   }
 
   setRoster(map) {
@@ -51,7 +53,27 @@ class Engine extends EventEmitter {
 
   /** Snapshot for API consumers. */
   snapshot() {
+    // resolveTeamNames() is debounced off the per-login hot path; make sure any
+    // pending resolution is applied before an external observer reads the state.
+    if (this._teamNamesDirty) this._flushTeamNames();
     return this.gameState;
+  }
+
+  /** Run a pending debounced team-name resolution now. */
+  _flushTeamNames() {
+    this._teamNamesDirty = false;
+    this.resolveTeamNames();
+  }
+
+  /** Mark team names for (coalesced) re-resolution after a burst of logins. */
+  _scheduleTeamNames() {
+    this._teamNamesDirty = true;
+    if (this._teamNamesScheduled) return;
+    this._teamNamesScheduled = true;
+    setImmediate(() => {
+      this._teamNamesScheduled = false;
+      if (this._teamNamesDirty) this._flushTeamNames();
+    });
   }
 
   _touch() {
@@ -176,6 +198,12 @@ class Engine extends EventEmitter {
     if (type === '2') {
       const teamIndex = cols[1];
 
+      // Bounds guard only: real Laserforce uses team indices 0-7, so this never
+      // fires for a legitimate feed. Keeps a hostile :9000 feed from growing
+      // gameState.teams / .scores without limit. Parsing below is unchanged.
+      const teamIndexNum = parseInt(teamIndex, 10);
+      if (!Number.isInteger(teamIndexNum) || teamIndexNum < 0 || teamIndexNum > 31) return;
+
       // hex color always starts with '#'
       const hexIndex = cols.findIndex((c) => String(c).startsWith('#'));
       const color = hexIndex !== -1 ? cols[hexIndex] : '#9ca3af';
@@ -223,7 +251,7 @@ class Engine extends EventEmitter {
             passesDone: 0, passesReceived: 0,
           };
           this.playerStatusMap[id] = 0;
-          this.resolveTeamNames();
+          this._scheduleTeamNames();
           this._pushEvent({ type: 'player_join', actorId: id, actorName: finalName, teamId, text: `${finalName} joined team ${teamId}` });
           this._touch();
         }

@@ -41,9 +41,12 @@ class StatsWriter {
   constructor({ logger, getConfig }) {
     this.log = logger;
     this.getConfig = getConfig;
-    this._snap = null;      // deep copy of the latest engine state
+    this._snap = null;      // live reference to the latest engine state (NOT a clone)
+    this._prev = null;      // cheap shallow capture, enough to finalize an abandoned match
     this._match = null;     // { matchId, stamp, startedAt, events: [], finalized }
     this._liveTimer = null;
+    this._totals = new Map(); // playerKey -> aggregate row, kept incrementally
+    this._loadTotals();      // seed once from all_players.csv if it exists
   }
 
   get cfg() { return this.getConfig().csv; }
@@ -51,7 +54,21 @@ class StatsWriter {
 
   // ---- engine hooks ----
   onChange(state) {
-    this._snap = structuredClone(state);
+    // Hot path: no deep clone. Keep a live reference for the live writer, plus a
+    // cheap shallow capture of the parts a match_start reset would detach (players,
+    // events) or zero in place (scores) — so an abandoned previous match can still
+    // be finalized from the last state we saw. The deep clone is deferred to
+    // _finalize(), which runs at most once per match.
+    this._snap = state;
+    this._prev = {
+      matchId: state.matchId,
+      elapsedTime: state.elapsedTime,
+      duration: state.duration,
+      teams: state.teams,
+      players: state.players,
+      events: state.events,
+      scores: { ...(state.scores || {}) },
+    };
     if (this.cfg.enabled && this.cfg.writeLive && this._match && !this._liveTimer) {
       this._liveTimer = setTimeout(() => { this._liveTimer = null; this._writeMatchPlayers(this._snap, false); }, 1500);
     }
@@ -63,9 +80,9 @@ class StatsWriter {
 
   onMatchStart(state) {
     // finalize a previous match that never got an explicit end
-    if (this._match && !this._match.finalized && this._snap) {
+    if (this._match && !this._match.finalized && this._prev) {
       this.log.info('stats', `finalizing previous match ${this._match.matchId} (no end event)`);
-      this._finalize(this._snap);
+      this._finalize(this._prev);
     }
     const now = new Date();
     this._match = {
@@ -83,19 +100,23 @@ class StatsWriter {
       // an end without a start we saw — synthesize a context
       this.onMatchStart(state);
     }
-    this._finalize(structuredClone(state));
+    this._finalize(state);
   }
 
   // ---- finalize ----
-  _finalize(state) {
+  _finalize(rawState) {
     if (!this.cfg.enabled) { this._match = null; return; }
+    // The one place a stable deep copy is actually needed: from here on the rows
+    // are derived and written synchronously, so a snapshot taken now is enough.
+    const state = structuredClone(rawState);
     try {
       fs.mkdirSync(path.join(this.dir(), 'matches'), { recursive: true });
       const rows = this._playerRows(state);
       this._writeMatchPlayers(state, true, rows);
       if (this.cfg.writeEvents) this._writeMatchEvents();
       this._appendAll(rows);
-      this._rebuildTotals();
+      this._accumulateTotals(rows);
+      this._writeTotals();
       this.log.info('stats', `match ${this._match.matchId}: wrote ${rows.length} player rows`);
     } catch (err) {
       this.log.error('stats', `finalize failed: ${err.stack}`);
@@ -153,7 +174,8 @@ class StatsWriter {
     this._writeCsv(file, PLAYER_COLS, rows, true);
   }
 
-  _rebuildTotals() {
+  /** Seed the in-memory totals once at startup from an existing all_players.csv. */
+  _loadTotals() {
     const file = path.join(this.dir(), 'all_players.csv');
     let text = '';
     try { text = fs.readFileSync(file, 'utf8'); } catch { return; }
@@ -162,20 +184,35 @@ class StatsWriter {
     if (lines.length < 2) return;
     const header = splitCsv(lines[0], delim);
     const idx = (k) => header.indexOf(k);
-    const agg = new Map();
     for (const line of lines.slice(1)) {
       const c = splitCsv(line, delim);
       const id = c[idx('player_id')];
       if (!id) continue;
-      let a = agg.get(id);
-      if (!a) { a = { player_id: id, name: c[idx('name')], matches: 0, wins: 0, losses: 0, draws: 0 }; STAT_KEYS.forEach((k) => (a[k] = 0)); agg.set(id, a); }
-      a.name = c[idx('name')] || a.name;
-      a.matches++;
-      const r = c[idx('result')];
-      if (r === 'win') a.wins++; else if (r === 'loss') a.losses++; else a.draws++;
-      STAT_KEYS.forEach((k) => { a[k] += num(c[idx(k)]); });
+      this._addToTotals(id, c[idx('name')], c[idx('result')], (k) => num(c[idx(k)]));
     }
-    const rows = [...agg.values()]
+  }
+
+  /** Fold one finalized match's player rows into the in-memory totals. */
+  _accumulateTotals(rows) {
+    for (const r of rows) {
+      const id = r.player_id == null ? '' : String(r.player_id);
+      if (!id) continue;
+      this._addToTotals(id, r.name, r.result, (k) => num(r[k]));
+    }
+  }
+
+  _addToTotals(id, name, result, statOf) {
+    let a = this._totals.get(id);
+    if (!a) { a = { player_id: id, name, matches: 0, wins: 0, losses: 0, draws: 0 }; STAT_KEYS.forEach((k) => (a[k] = 0)); this._totals.set(id, a); }
+    a.name = name || a.name;
+    a.matches++;
+    if (result === 'win') a.wins++; else if (result === 'loss') a.losses++; else a.draws++;
+    STAT_KEYS.forEach((k) => { a[k] += statOf(k); });
+  }
+
+  /** Write totals.csv from the in-memory Map (byte-identical to the old rebuild). */
+  _writeTotals() {
+    const rows = [...this._totals.values()]
       .map((a) => ({ ...a, goals_per_match: a.matches ? +(a.goals / a.matches).toFixed(2) : 0 }))
       .sort((x, y) => y.goals - x.goals || y.assists - x.assists);
     this._writeCsv(path.join(this.dir(), 'totals.csv'), TOTAL_COLS, rows, false);

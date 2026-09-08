@@ -13,10 +13,13 @@ Authorization: Bearer <token>
 Antworten sind JSON. Weitere Regeln (siehe [SECURITY.md](SECURITY.md)):
 
 - **CORS**: nur Origins aus `config.cors` bekommen `Access-Control-Allow-Origin`
-  (`*` per Default). Cross-Origin geht **nur GET**.
+  (per Default **leer** = keine). Cross-Origin geht **nur GET**.
 - **Rate-Limit**: `config.rateLimitPerMin` je IP → sonst `429` mit `Retry-After`.
-- **POST ohne Token**: nur von gleicher Herkunft (`Sec-Fetch-Site` / `Origin`),
-  sonst `403 cross_origin_blocked`.
+  IP = Socket-Adresse, außer `http.trustProxy` ist an (dann der linkeste
+  `X-Forwarded-For`-Eintrag).
+- **Mutierende Anfrage ohne gültiges Token** (`POST/PUT/PATCH/DELETE`): braucht
+  `Sec-Fetch-Site: same-origin` **oder** den Header `X-LF-Console: 1`, sonst
+  `403 cross_origin_blocked`. Skripte/curl schicken also `X-LF-Console: 1`.
 
 ---
 
@@ -57,16 +60,33 @@ Für Polling: den höchsten `id`-Wert merken und als `since` mitgeben.
 
 ### `GET /api/status`
 
-Dienst-Status: `lan` (LAN-IP), Ports, Laserforce-Verbindung, CSV-Status,
-Ausgangs-Zustände (`outputs[]` mit `last`/`connected`), Stream-Server,
-`envPins`, Match-Kurzinfo. Für Monitoring.
+Dienst-Status: `lan` (LAN-IP), Ports (`http` inkl. `trustProxy`, `cors`,
+`rateLimitPerMin`, `clients`, `tokenSet`), `stateTickMs`, Laserforce-Verbindung,
+CSV-Status, Ausgangs-Zustände (`outputs[]` mit `last`/`connected`), `outputAllow`,
+Stream-Server, `envPins`, Match-Kurzinfo. Für Monitoring.
 
 ### `GET /api/config` · `POST /api/config`
 
 `{ data: <config.json>, envPins: [...] }`. `envPins` sind die per `.env`
 festgelegten Felder (in der Konsole nur lesbar). `POST` mit einem Teil-Objekt
 ändert die Konfiguration und übernimmt sie sofort (CSV, Ausgänge, Namensliste,
-TCP-Bind, Stream-Server, CORS, Rate-Limit). Env-Pins bleiben unverändert.
+TCP-Bind, Stream-Server, CORS, Rate-Limit, `outputAllow`, `trustProxy`). Ein
+geänderter `http.port` oder `stateTickMs` greift **erst nach einem Neustart**.
+Env-Pins bleiben unverändert.
+
+**Secrets:** `GET` liefert nie Klartext — `apiToken` ist immer `""`, dazu kommt
+`apiTokenSet: true|false`; jedes gesetzte `outputs[].secret` erscheint als
+`"••••••"`. Beim `POST` gilt deshalb:
+
+| gesendet | Wirkung |
+|---|---|
+| `apiToken: ""` | gespeicherter Token bleibt |
+| `apiToken: ""` + `apiTokenClear: true` | Token wird gelöscht |
+| `apiToken: "neu"` | Token wird gesetzt |
+| `outputs[].secret: "••••••"` | gespeichertes Secret bleibt (Zuordnung über `id`, sonst Position) |
+
+Jede angenommene Änderung erzeugt eine `warn`-Logzeile im Scope `audit` mit
+Client-IP und den geänderten Top-Level-Schlüsseln (nie mit Werten).
 
 ### `POST /api/outputs/test`
 
@@ -99,7 +119,7 @@ Einweg-Stream (eingehende Nachrichten werden ignoriert):
 
 ```jsonc
 { "type": "hello", "service": "lf-live", "ts": 1699999999999 }
-{ "type": "state", "data": { …kompletter Snapshot… } }   // bei Verbindung + danach gedrosselt ~6/s
+{ "type": "state", "data": { …kompletter Snapshot… } }   // bei Verbindung + danach im Takt LF_STATE_TICK_MS (Default 200 ms ≈ 5/s), nur wenn sich etwas geändert hat
 { "type": "event", "data": { …ein Event… } }             // sofort pro Ereignis
 ```
 
@@ -178,6 +198,8 @@ gilt als Vorlage (genau wie im Originalsystem).
 | Status | Bedeutung |
 |---|---|
 | `401` | Token fehlt oder falsch |
-| `404` | unbekannte Route / (bei `/api/venues/...` gibt es hier nicht) |
+| `403` | mutierende Anfrage ohne Token und ohne `Sec-Fetch-Site: same-origin` / `X-LF-Console: 1` |
+| `429` | Rate-Limit erreicht (mit `Retry-After`) |
+| `404` | unbekannte Route oder Datei |
 | `400` | ungültiges JSON im POST-Body |
 | `500` | interner Fehler (wird geloggt) |

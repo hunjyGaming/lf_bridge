@@ -271,7 +271,7 @@ export function handleRegieEvent(ev: LiveEvent, api: RegieApi) {
 
 ## 5. Realtime-Muster (wichtig)
 
-**Uhr lokal weiterlaufen lassen.** `state` kommt gedrosselt (~5–6×/s). Für eine
+**Uhr lokal weiterlaufen lassen.** `state` kommt gedrosselt (Takt `LF_STATE_TICK_MS`, Default ~5×/s). Für eine
 flüssige Sekundenanzeige die Restzeit aus dem letzten `state` nehmen und lokal
 per `setInterval` runterzählen; bei jedem neuen `state` resynchronisieren.
 

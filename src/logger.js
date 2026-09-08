@@ -17,6 +17,11 @@ class Logger extends EventEmitter {
     this.level = LEVELS[level] || LEVELS.info;
     this.bufferSize = bufferSize;
     this.buffer = [];
+    // Async console mirror: coalesce lines into one write per stream per tick.
+    this._pendingOut = [];
+    this._pendingErr = [];
+    this._flushScheduled = false;
+    process.on('exit', () => this._flushWrites());
   }
 
   setLevel(level) {
@@ -33,11 +38,29 @@ class Logger extends EventEmitter {
     };
     this.buffer.push(entry);
     if (this.buffer.length > this.bufferSize) this.buffer.shift();
-    // Mirror to stdout for headless / dev runs.
-    const line = `[${new Date(entry.ts).toISOString()}] ${level.toUpperCase()} ${entry.scope}: ${entry.msg}`;
-    if (level === 'error' || level === 'warn') process.stderr.write(line + '\n');
-    else process.stdout.write(line + '\n');
+    // Mirror to stdout for headless / dev runs — buffered, flushed on setImmediate.
+    const line = `[${new Date(entry.ts).toISOString()}] ${level.toUpperCase()} ${entry.scope}: ${entry.msg}\n`;
+    if (level === 'error' || level === 'warn') this._pendingErr.push(line);
+    else this._pendingOut.push(line);
+    if (!this._flushScheduled) {
+      this._flushScheduled = true;
+      setImmediate(() => this._flushWrites());
+    }
     this.emit('line', entry);
+  }
+
+  _flushWrites() {
+    this._flushScheduled = false;
+    if (this._pendingOut.length) {
+      const s = this._pendingOut.join('');
+      this._pendingOut.length = 0;
+      try { process.stdout.write(s); } catch {}
+    }
+    if (this._pendingErr.length) {
+      const s = this._pendingErr.join('');
+      this._pendingErr.length = 0;
+      try { process.stderr.write(s); } catch {}
+    }
   }
 
   debug(scope, msg) { this._emit('debug', scope, msg); }

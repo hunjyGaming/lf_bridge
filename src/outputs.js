@@ -28,14 +28,39 @@ class Outputs {
     this._udp = dgram.createSocket('udp4');
     this._udp.on('error', (e) => this.log.warn('output', `udp socket: ${e.message}`));
     this._stateThrottle = new Map(); // id -> last sent ts
+    this._denyWarn = new Map();      // id -> last warn ts (keeps a blocked target from flooding the log)
+    this.stateDirty = false;
   }
 
   list() { return this.getConfig().outputs || []; }
   get(id) { return this.list().find((o) => o.id === id) || null; }
 
+  /**
+   * Optional egress allowlist (config.outputAllow / LF_OUTPUT_ALLOW).
+   * Empty list = allow everything (the historical behaviour).
+   */
+  allowed(o) {
+    const list = this.getConfig().outputAllow || [];
+    if (!list.length) return true;
+    const t = targetHostPort(o);
+    if (!t || !t.host) return false;
+    return list.some((entry) => entryMatches(entry, t));
+  }
+  _denied(o, label) {
+    const t = targetHostPort(o);
+    const where = t ? `${t.host}:${t.port || '?'}` : '?';
+    const now = Date.now();
+    if (now - (this._denyWarn.get(o.id) || 0) > 30000) {
+      this._denyWarn.set(o.id, now);
+      this.log.warn('output', `"${o.name}" -> ${where} blocked by outputAllow — not sending (${label})`);
+    }
+    this.status[o.id] = { ok: false, detail: 'blocked by outputAllow', at: now };
+  }
+
   /** Called once at boot and after every config change. */
   reconcile() {
-    const want = new Map(this.list().filter((o) => o.kind === 'tcp' && o.enabled).map((o) => [o.id, o]));
+    const want = new Map(this.list().filter((o) => o.kind === 'tcp' && o.enabled && this.allowed(o)).map((o) => [o.id, o]));
+    for (const o of this.list()) if (o.kind === 'tcp' && o.enabled && !this.allowed(o)) this._denied(o, 'connect');
     // drop TCP connections that are gone or disabled or changed target
     for (const [id, conn] of this._tcp) {
       const o = want.get(id);
@@ -74,17 +99,41 @@ class Outputs {
     }
   }
 
-  onStateChange() {
+  markDirty() { this.stateDirty = true; }
+
+  /**
+   * Shared state tick (src/index.js): `snapshot` is engine.snapshot() and `str`
+   * is the already-serialized {type:'state',data:snapshot}. Reuse `str` for the
+   * newline-delimited tcp/udp targets; the webhook path keeps its own envelope.
+   * Per-output 500 ms throttle (max 2/s) is unchanged.
+   */
+  pushState(snapshot, str) {
+    this.stateDirty = false;
     const now = Date.now();
+    const line = str + '\n';
     for (const o of this.list()) {
       if (!o.enabled || !o.sendState) continue;
       if (now - (this._stateThrottle.get(o.id) || 0) < 500) continue; // max 2/s per output
       this._stateThrottle.set(o.id, now);
-      this._send(o, { type: 'state', data: this.getState() }, 'state');
+      if (!this.allowed(o)) { this._denied(o, 'state'); continue; }
+      if (o.kind === 'webhook') { this._sendWebhook(o, snapshot, 'state'); continue; }
+      if (o.kind === 'udp') {
+        this._udp.send(Buffer.from(line), o.port, o.host, (err) => {
+          this.status[o.id] = err ? { ok: false, detail: err.message, at: Date.now() } : { ok: true, detail: 'state', at: Date.now() };
+        });
+        continue;
+      }
+      if (o.kind === 'tcp') {
+        const conn = this._tcp.get(o.id);
+        if (conn && conn.connected) { conn.socket.write(line); this.status[o.id] = { ok: true, detail: 'state', at: Date.now() }; }
+        else { this.status[o.id] = { ok: false, detail: 'not connected', at: Date.now() }; }
+        continue;
+      }
     }
   }
 
   _send(o, envelope, label) {
+    if (!this.allowed(o)) return this._denied(o, label);
     if (o.kind === 'webhook') return this._sendWebhook(o, envelope.data, label);
     const line = JSON.stringify(envelope) + '\n';
     if (o.kind === 'udp') {
@@ -177,6 +226,7 @@ class Outputs {
   // ---- test ----
   async test(o) {
     const evt = { id: 0, ts: Date.now(), type: 'test', text: 'lf-live test event', elapsedMs: 0 };
+    if (!this.allowed(o)) { this._denied(o, 'test'); return { ok: false, detail: 'blocked by outputAllow', at: Date.now() }; }
     if (o.kind === 'webhook') {
       await this._sendWebhook(o, evt, 'test');
       return this.status[o.id] || { ok: true, at: Date.now() };
@@ -206,5 +256,32 @@ class Outputs {
 }
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+/** { host, port } an output would talk to, lower-cased; null if it is unusable. */
+function targetHostPort(o) {
+  if (!o || typeof o !== 'object') return null;
+  if (o.kind === 'webhook') {
+    try {
+      const u = new URL(o.url);
+      return { host: u.hostname.toLowerCase(), port: u.port ? parseInt(u.port, 10) : (u.protocol === 'https:' ? 443 : 80) };
+    } catch { return null; }
+  }
+  return { host: String(o.host || '').trim().toLowerCase(), port: parseInt(o.port, 10) || 0 };
+}
+
+/** One allowlist entry: "host", "host:port", "*.suffix", "*.suffix:port". */
+function entryMatches(entry, t) {
+  let pat = String(entry || '').trim().toLowerCase();
+  if (!pat) return false;
+  let port = null;
+  const c = pat.lastIndexOf(':');
+  if (c > 0 && /^[0-9]+$/.test(pat.slice(c + 1)) && pat.indexOf(':') === c) {
+    port = parseInt(pat.slice(c + 1), 10);
+    pat = pat.slice(0, c);
+  }
+  if (port !== null && port !== t.port) return false;
+  if (pat.startsWith('*.')) return t.host.endsWith(pat.slice(1)); // "*.example.com" -> ".example.com"
+  return t.host === pat;
+}
 
 module.exports = { Outputs };

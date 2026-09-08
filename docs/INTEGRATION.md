@@ -40,7 +40,7 @@ ws.onmessage = (e) => {
   const msg = JSON.parse(e.data);
   switch (msg.type) {
     case "hello": break;
-    case "state":                       // kompletter Snapshot (Anschluss + ~6/s)
+    case "state":                       // kompletter Snapshot (Anschluss + im Takt LF_STATE_TICK_MS, Default ~5/s)
       updateScoreboard(msg.data.scores, msg.data.teams);
       break;
     case "event":                       // ein Ereignis
@@ -91,11 +91,24 @@ Dann verbindet sich das Tool auf `<host>:<port>` und bekommt sofort:
 {"type":"event","data":{…}}      ← eine Zeile pro Ereignis
 ```
 
-Read-only, kein Token. **Bindet per Default nur an `127.0.0.1`** — für Zugriff
-aus dem LAN den Host auf `0.0.0.0` stellen. Schnelltest:
+Read-only. **Bindet per Default nur an `127.0.0.1`** — für Zugriff aus dem LAN
+den Host auf `0.0.0.0` stellen. Schnelltest:
 
 ```bash
 nc 192.168.1.10 9100
+```
+
+Ist ein **Zugriffs-Token** gesetzt (`LF_API_TOKEN` / Konsole), muss der Client als
+**erste Zeile** innerhalb von 2 Sekunden
+
+```json
+{"token":"<token>"}
+```
+
+schicken — sonst wird die Verbindung getrennt. Mit `nc` also:
+
+```bash
+printf '{"token":"%s"}\n' "$LF_API_TOKEN" | nc 192.168.1.10 9100
 ```
 
 ---

@@ -50,9 +50,12 @@ Zwei Ebenen, die spätere gewinnt:
 |---|---|---|
 | `LF_HTTP_HOST` | `0.0.0.0` | Bind der Konsole/API · `127.0.0.1` = nur dieser PC |
 | `LF_HTTP_PORT` | `8080` | Konsole + API |
-| `LF_API_TOKEN` | *(leer)* | gesetzt → Bearer-Token für API + Konsole nötig |
-| `LF_CORS_ORIGINS` | `*` | Browser-Origins für die API (Komma-Liste) · leer = keine |
+| `LF_API_TOKEN` | *(leer)* | gesetzt → Bearer-Token für API + Konsole nötig (und Token-Zeile für den Raw-Stream) |
+| `LF_CORS_ORIGINS` | *(leer = keine)* | Browser-Origins für die API (Komma-Liste) · `*` = beliebige |
 | `LF_RATE_LIMIT_PER_MIN` | `600` | Anfragen/Minute je IP · `0` = aus |
+| `LF_STATE_TICK_MS` | `200` | Takt für den gemeinsamen State-Push an WebSocket, Raw-Stream und Ausgänge · min `50`, max `5000` |
+| `LF_TRUST_PROXY` | `false` | `X-Forwarded-For` auswerten — nur hinter eigenem Reverse-Proxy |
+| `LF_OUTPUT_ALLOW` | *(leer = alles)* | erlaubte Ausgangs-Ziele: `host` / `host:port` / `*.suffix` (Komma-Liste) |
 | `LF_TCP_HOST` | `0.0.0.0` | Bind für den Laserforce-Eingang |
 | `LF_TCP_PORT` | `9000` | Laserforce verbindet sich hierher |
 | `LF_STREAM_ENABLED` | `false` | roher TCP-Stream-Server an/aus |

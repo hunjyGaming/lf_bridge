@@ -32,10 +32,11 @@ function defaults() {
     logLevel: 'info',
 
     // Web console + JSON/WebSocket API
-    http: { host: '0.0.0.0', port: 8080 },
+    http: { host: '0.0.0.0', port: 8080, trustProxy: false },
     apiToken: '',                 // empty => open on the LAN; set => Bearer required
-    cors: ['*'],                  // browser origins allowed to call the read API; [] = none, ['*'] = any
+    cors: [],                     // browser origins allowed to call the read API; [] = none, ['*'] = any
     rateLimitPerMin: 600,         // per-IP request cap on the HTTP API; 0 = off
+    stateTickMs: 200,             // shared state-push cadence for WS / raw stream / outputs (ms)
 
     // Laserforce log stream comes IN here
     tcp: { host: '0.0.0.0', port: 9000 },
@@ -60,6 +61,9 @@ function defaults() {
 
     // Outbound targets — { id, name, kind:webhook|tcp|udp, enabled, events, sendEvents, sendState, ... }
     outputs: [],
+
+    // Optional allowlist for outbound targets: "host" or "host:port", "*.suffix" ok. [] = allow all
+    outputAllow: [],
   };
 }
 
@@ -74,6 +78,9 @@ function applyEnv(cfg, pins) {
   if (process.env.LF_API_TOKEN !== undefined) { cfg.apiToken = process.env.LF_API_TOKEN; P('apiToken', 1); }
   if (Ecsv('LF_CORS_ORIGINS') !== undefined) { cfg.cors = Ecsv('LF_CORS_ORIGINS'); P('cors', 1); }
   if (Ei('LF_RATE_LIMIT_PER_MIN') !== undefined) { cfg.rateLimitPerMin = Ei('LF_RATE_LIMIT_PER_MIN'); P('rateLimitPerMin', 1); }
+  if (Ei('LF_STATE_TICK_MS') !== undefined) { cfg.stateTickMs = Ei('LF_STATE_TICK_MS'); P('stateTickMs', 1); }
+  if (Eb('LF_TRUST_PROXY') !== undefined) { cfg.http.trustProxy = Eb('LF_TRUST_PROXY'); P('http.trustProxy', 1); }
+  if (Ecsv('LF_OUTPUT_ALLOW') !== undefined) { cfg.outputAllow = Ecsv('LF_OUTPUT_ALLOW'); P('outputAllow', 1); }
 
   if (E('LF_TCP_HOST')) { cfg.tcp.host = E('LF_TCP_HOST'); P('tcp.host', 1); }
   if (Ei('LF_TCP_PORT') !== undefined) { cfg.tcp.port = Ei('LF_TCP_PORT'); P('tcp.port', 1); }
@@ -146,9 +153,11 @@ function normalize(raw) {
 
   c.http.host = str(raw.http?.host, d.http.host).trim() || d.http.host;
   c.http.port = clampInt(raw.http?.port, d.http.port, 1, 65535);
+  c.http.trustProxy = bool(raw.http?.trustProxy, d.http.trustProxy);
   c.apiToken = str(raw.apiToken, d.apiToken);
   c.cors = Array.isArray(raw.cors) ? raw.cors.filter((s) => typeof s === 'string' && s.length < 300).slice(0, 30) : d.cors;
   c.rateLimitPerMin = clampInt(raw.rateLimitPerMin, d.rateLimitPerMin, 0, 100000);
+  c.stateTickMs = clampInt(raw.stateTickMs, d.stateTickMs, 50, 5000);
 
   c.tcp.host = str(raw.tcp?.host, d.tcp.host).trim() || d.tcp.host;
   c.tcp.port = clampInt(raw.tcp?.port, d.tcp.port, 1, 65535);
@@ -173,6 +182,10 @@ function normalize(raw) {
     : Array.isArray(raw.webhooks) ? raw.webhooks   // migrate legacy shape
     : [];
   c.outputs = rawOutputs.slice(0, 50).map(normalizeOutput);
+
+  c.outputAllow = Array.isArray(raw.outputAllow)
+    ? raw.outputAllow.filter((s) => typeof s === 'string' && s.length && s.length < 300).map((s) => s.trim().toLowerCase()).slice(0, 50)
+    : d.outputAllow;
 
   return c;
 }
