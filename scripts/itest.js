@@ -129,6 +129,8 @@ function done(code) { for (const p of procs) try { p.kill('SIGKILL'); } catch {}
   assert.ok(teams.teams['1'].color === '#3b82f6', 'teams endpoint');
   assert.strictEqual(players.length, 2, 'players endpoint');
   assert.ok(events.some((e) => e.type === 'goal') && events.some((e) => e.type === 'match_start'), 'events endpoint');
+  assert.ok(events.some((e) => e.type === 'goal' && e.category === 'score' && typeof e.phrase === 'string' && e.phrase), 'events carry enriched category + phrase');
+  assert.ok(events.some((e) => e.type === 'match_start' && e.code === '0100'), 'match_start enriched with code 0100');
   assert.ok(status.tcp.lines >= 8, 'status endpoint counts lines');
   console.log('/api/teams /players /events /status OK');
 
@@ -160,6 +162,16 @@ function done(code) { for (const p of procs) try { p.kill('SIGKILL'); } catch {}
   const dl = await fetch(`${BASE}/api/stats/file?name=totals.csv`, { headers: AUTH });
   assert.ok(dl.headers.get('content-type').includes('text/csv'), 'stats/file downloads as CSV');
   console.log('csv stats OK        all_players + totals written, downloadable');
+
+  // readable event-log file written under data/logs/
+  const logDir = path.join(dir, 'data', 'logs');
+  await waitFor(() => { try { return fs.readdirSync(logDir).some((f) => f.endsWith('.log')); } catch { return false; } });
+  const logFile = fs.readdirSync(logDir).find((f) => f.endsWith('.log'));
+  const logText = fs.readFileSync(path.join(logDir, logFile), 'utf8');
+  assert.ok(/^\d{4}-\d\d-\d\d \d\d:\d\d:\d\d {2}\+\d\d:\d\d\.\d{3} {2}\[\S+\] {2}\S/m.test(logText), 'event log has readable, columned lines');
+  assert.ok(/──── Match .+ ────/.test(logText), 'event log has a match header/footer');
+  assert.ok(/\bgoal\b|\bTor\b/.test(logText), 'event log recorded the goal');
+  console.log('event log OK        readable lines in', path.join('data', 'logs', logFile));
 
   ws.close(); wh.close(); sc.destroy(); tcpRecv.close();
   console.log('\nALL E2E CHECKS PASSED');

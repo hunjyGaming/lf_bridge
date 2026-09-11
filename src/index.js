@@ -5,6 +5,7 @@ const { Logger } = require('./logger');
 const { Engine } = require('./engine');
 const { LocalRoster } = require('./localRoster');
 const { StatsWriter } = require('./statsWriter');
+const { EventLog } = require('./eventLog');
 const { TcpIngest } = require('./tcpIngest');
 const { Outputs } = require('./outputs');
 const { StreamServer } = require('./streamServer');
@@ -17,15 +18,16 @@ const logger = new Logger({ level: config.data.logLevel });
 const getConfig = () => config.data;
 const getState = () => engine.snapshot();
 
-const engine = new Engine({ logger, defaultDurationMs: config.data.match.defaultDurationMs });
+const engine = new Engine({ logger, defaultDurationMs: config.data.match.defaultDurationMs, emitUnknownEvents: config.data.engine.emitUnknownEvents });
 const roster = new LocalRoster({ logger, getConfig });
 const stats = new StatsWriter({ logger, getConfig });
+const eventLog = new EventLog(config.data, logger);
 const tcp = new TcpIngest({ logger, getConfig });
 const outputs = new Outputs({ logger, getConfig, getState });
 const streamServer = new StreamServer({ logger, getConfig, getState });
 
 const api = new ApiServer({
-  logger, config, engine, roster, stats, outputs,
+  logger, config, engine, roster, stats, outputs, eventLog,
   getStatus,
   onConfigChange: reconcile,
 });
@@ -39,9 +41,9 @@ tcp.on('line', (line) => {
 // The actual snapshot()+JSON.stringify happens once per tick below, shared by all
 // three push consumers. Event broadcasts stay immediate (see 'event' below).
 engine.on('change', () => { api.markDirty(); streamServer.markDirty(); outputs.markDirty(); stats.onChange(engine.gameState); });
-engine.on('event', (evt) => { api.broadcastEvent(evt); streamServer.broadcastEvent(evt); outputs.onEvent(evt); stats.onEvent(evt); });
-engine.on('match_start', () => stats.onMatchStart(engine.snapshot()));
-engine.on('match_end', () => stats.onMatchEnd(engine.snapshot()));
+engine.on('event', (evt) => { api.broadcastEvent(evt); streamServer.broadcastEvent(evt); outputs.onEvent(evt); stats.onEvent(evt); eventLog.onEvent(evt); });
+engine.on('match_start', () => { const s = engine.snapshot(); stats.onMatchStart(s); eventLog.onMatchStart(s); });
+engine.on('match_end', () => { const s = engine.snapshot(); stats.onMatchEnd(s); eventLog.onMatchEnd(s); });
 
 // ---- one shared state tick ----
 // If any consumer is dirty, serialize the state exactly once and hand the same
@@ -65,6 +67,7 @@ function getStatus() {
     stateTickMs: config.data.stateTickMs,
     tcp: { ...tcp.stats },
     csv: stats.status(),
+    eventLog: eventLog.status(),
     localRoster: roster.status(),
     outputs: outputs.statusList(),
     outputAllow: config.data.outputAllow,
@@ -87,6 +90,7 @@ let lastHttp = JSON.stringify(config.data.http);
 let lastTcp = JSON.stringify(config.data.tcp);
 async function reconcile() {
   engine.defaultDurationMs = config.data.match.defaultDurationMs;
+  engine.emitUnknownEvents = config.data.engine.emitUnknownEvents !== false;
 
   if (JSON.stringify(config.data.tcp) !== lastTcp) {
     lastTcp = JSON.stringify(config.data.tcp);
@@ -140,6 +144,7 @@ function shutdown() {
   logger.info('lf-live', 'shutting down');
   clearInterval(stateTick);
   tcp.stop(); outputs.stop(); streamServer.stop(); api.stop();
+  eventLog.flush();
   setTimeout(() => process.exit(0), 200);
 }
 process.on('SIGINT', shutdown);

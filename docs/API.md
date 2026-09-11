@@ -106,6 +106,27 @@ Siehe [STATS.md](STATS.md).
 
 Die letzten Logzeilen (Ringpuffer), wie sie die Konsole zeigt.
 
+### `GET /api/logs/events`
+
+Listet die [Event-Log-Dateien](LOGGING.md) im aufgelösten `eventLog.dir`
+(nur Namen nach dem Muster `events*.log`), neueste zuerst:
+
+```json
+{ "ok": true,
+  "dir": "C:\\…\\lf_live\\data\\logs",
+  "current": "events-2026-09-10.log",
+  "files": [ { "name": "events-2026-09-10.log", "size": 20480, "mtime": 1757500000000 } ] }
+```
+
+Ist die Event-Log-Datei abgeschaltet oder der Ordner fehlt:
+`{ "ok": true, "dir": null, "current": null, "files": [] }`.
+
+### `GET /api/logs/events/file?name=<name>`
+
+Gibt genau eine Event-Log-Datei als `text/plain; charset=utf-8` aus. `name` muss
+ein reiner Dateiname nach dem Muster `events*.log` sein — `..`, Pfadtrenner oder
+absolute Pfade → `400`. Datei nicht vorhanden → `404`.
+
 ---
 
 ## WebSocket  `GET /ws`
@@ -167,6 +188,9 @@ zuerst wieder ein `state`.
   "elapsedMs": 123000,      // Spielzeit (ms)
   "type": "goal",
   "code": "1101",           // Laserforce-Rohcode, falls vorhanden
+  "category": "score",      // additiv: match·score·possession·combat·player·special·other
+  "label": "Tor",           // additiv: Kurzbezeichnung (aus eventCatalog / Title-Case des type)
+  "phrase": "Tor für Team 1 (0:1)",   // additiv: deutscher Klartext-Satz; nutze `phrase || text`
   "actorId": "2002", "actorName": "Tim", "actorTeamId": "1",
   "targetId": null, "targetName": null, "targetTeamId": null,
   "assistId": "2001", "assistName": "Lea",   // nur bei goal
@@ -187,6 +211,29 @@ zuerst wieder ein `state`.
 | `failed_clear` | fehlgeschlagener Clear (`110A`) |
 | `goal` | Tor (`1101` / `1102`) inkl. Assist-Berechnung + neuem Score |
 | `status` | Hardware-Status eines Spielers (Log-Typ 9) |
+| `round_start` | Laserball-Rundenstart (`1105`) |
+| `reset` | zusätzlich: explizite Reset-Codes `110B` / `110C` (neben dem aus `1104`+Status abgeleiteten Reset) |
+| `score` | Score-Zeile (Log-Typ 5): trägt `teamId`, `old`, `new`, `delta`. Rein informativ — `gameState.scores` wird weiterhin aus dem Tor-Pfad gezählt. |
+| `match_summary` | Entity-Ende / Abschluss-Zeile (Log-Typ 6): trägt `entityId`, `exitCode`, `score`, `cols` |
+| `miss`, `player_hit`, `player_deactivate`, `target_hit`, `target_destroy`, `warbot_deactivate`, `missile_lock`, `missile_miss`, `missile_hit`, `missile_destroy` | bislang ignorierte SM5-`02xx`/`03xx`-Codes, jetzt als Event ausgegeben |
+| `lf_event` | Sammel-Typ für jeden weiteren Typ-4-Code, den der Parser nicht auswertet (abschaltbar über `LF_EMIT_UNKNOWN_EVENTS`). Trägt `code`, `category`, `label`. |
+
+Die zusätzlich ausgegebenen Codes (`round_start`, `reset` via `110B`/`110C`,
+`score`, `match_summary`, die SM5-Codes, `lf_event`) sind **rein additiv**: sie
+verändern `gameState` nicht und lösen keinen State-Push aus.
+
+**Zusätzliche optionale Felder auf _jedem_ Event** (zentral in `engine._pushEvent`
+gestempelt, nur wenn nicht schon gesetzt — die Parser-Logik ändert sich dadurch
+nicht):
+
+| Feld | Inhalt |
+|---|---|
+| `code` | Hex-TDF-Rohcode, sofern für den `type` bekannt (`match_start`→`0100`, `pass`→`1100`, `goal`→`1101`, `steal`→`1103`, `block`→`1104`, `clear`→`1109`, …); `player_join`/`status` haben keinen Typ-4-Code und tragen keins |
+| `category` | `match`·`score`·`possession`·`combat`·`player`·`special`·`other` — aus `eventCatalog.describe(code)`, sonst aus einer `type`-Fallback-Tabelle |
+| `label` | Kurzbezeichnung aus `eventCatalog`, sonst Title-Case des `type` |
+| `phrase` | deutscher Klartext-Satz (`eventCatalog.phrase`); fällt auf `text` zurück, wenn kein besserer Satz ableitbar ist. Anzeige: `event.phrase \|\| event.text` |
+
+Alle vier sind optional und additiv — ältere Consumer können sie ignorieren.
 
 Die Assist-Logik: ein Pass/Clear an den Torschützen, der ≤ 10 s vor dem Tor lag,
 gilt als Vorlage (genau wie im Originalsystem).

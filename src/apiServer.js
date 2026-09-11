@@ -22,6 +22,31 @@ const STATIC_ALLOW = new Map([
 const SECRET_MASK = '••••••';
 const WS_PING_MS = 30000;
 
+// File-backed event-log endpoints (docs/LOGGING.md). Only files whose name looks
+// like an event-log file are ever listed or streamed.
+const EVENTLOG_RE = /^events[A-Za-z0-9._-]*\.log$/;
+/** True only for a bare event-log filename — no traversal, no separators, no absolute path. */
+function eventLogNameOk(name) {
+  return typeof name === 'string' && !!name
+    && !name.includes('..') && !/[\\/]/.test(name) && !path.isAbsolute(name)
+    && EVENTLOG_RE.test(name);
+}
+/** List `events*.log` files in `dir`, newest first. Never throws; missing dir -> []. */
+function listEventLogFiles(dir) {
+  if (!dir) return [];
+  try {
+    return fs.readdirSync(dir, { withFileTypes: true })
+      .filter((e) => e.isFile() && EVENTLOG_RE.test(e.name))
+      .map((e) => {
+        const st = fs.statSync(path.join(dir, e.name));
+        return { name: e.name, size: st.size, mtime: st.mtimeMs };
+      })
+      .sort((a, b) => b.mtime - a.mtime);
+  } catch {
+    return [];
+  }
+}
+
 /**
  * The one thing the hall LAN talks to: JSON API + WebSocket + the web console,
  * all on a single HTTP port (config.http). Endpoints — docs/API.md.
@@ -41,7 +66,7 @@ const WS_PING_MS = 30000;
  *   - request body capped at 512 KiB; header/request/keep-alive timeouts set
  */
 class ApiServer {
-  constructor({ logger, config, engine, getStatus, roster, stats, outputs, onConfigChange }) {
+  constructor({ logger, config, engine, getStatus, roster, stats, outputs, eventLog, onConfigChange }) {
     this.log = logger;
     this.config = config;
     this.engine = engine;
@@ -49,6 +74,7 @@ class ApiServer {
     this.roster = roster;
     this.stats = stats;
     this.outputs = outputs;
+    this.eventLog = eventLog || null;
     this.onConfigChange = onConfigChange;
     this.server = null;
     this.wss = null;
@@ -231,7 +257,9 @@ class ApiServer {
     if (!this._rateOk(ip)) { res.setHeader('Retry-After', '30'); return this._json(res, 429, { error: 'rate_limited' }); }
     if (!this._authed(req, url)) return this._json(res, 401, { error: 'unauthorized', hint: 'send Authorization: Bearer <token>' });
 
-    if (req.method === 'GET') return this._get(p, url, res);
+    // HEAD is answered like GET (Node drops the body itself) — the console probes
+    // HEAD /api/logs/events to decide whether to show the "Datei öffnen" link.
+    if (req.method === 'GET' || req.method === 'HEAD') return this._get(p, url, res);
 
     // Mutating methods: a request without a valid token must prove it is not a
     // cross-site drive-by (browser-set Sec-Fetch-Site, or our own console header).
@@ -250,6 +278,21 @@ class ApiServer {
     return this._json(res, 405, { error: 'method_not_allowed' });
   }
 
+  /** Resolved event-log location — same handle the engine service reports via getStatus(). */
+  _eventLogInfo() {
+    try {
+      const el = this.eventLog;
+      if (!el) return null;
+      return {
+        enabled: el.enabled !== false,
+        dir: el.dir ? path.resolve(el.dir) : null,
+        file: typeof el.currentFile === 'function' ? el.currentFile() : null,
+      };
+    } catch {
+      return null;
+    }
+  }
+
   _get(p, url, res) {
     if (p === '/api/state') return this._json(res, 200, { data: this.engine.snapshot() });
     if (p === '/api/teams') { const s = this.engine.snapshot(); return this._json(res, 200, { data: { teams: s.teams, scores: s.scores, missionActive: s.missionActive } }); }
@@ -260,6 +303,33 @@ class ApiServer {
       return this._json(res, 200, { data: this.engine.gameState.events.filter((e) => e.id > since).slice(-limit) });
     }
     if (p === '/api/status') return this._json(res, 200, { data: this.getStatus() });
+    if (p === '/api/logs/events') {
+      const info = this._eventLogInfo();
+      if (!info || !info.enabled || !info.dir) return this._json(res, 200, { ok: true, dir: null, current: null, files: [] });
+      const files = listEventLogFiles(info.dir);
+      const cur = info.file ? path.basename(info.file) : null;
+      return this._json(res, 200, { ok: true, dir: info.dir, current: (cur && EVENTLOG_RE.test(cur)) ? cur : null, files });
+    }
+    if (p === '/api/logs/events/file') {
+      const name = url.searchParams.get('name') || '';
+      if (!eventLogNameOk(name)) return this._json(res, 400, { error: 'bad_name' });
+      const info = this._eventLogInfo();
+      if (!info || !info.enabled || !info.dir) return this._json(res, 404, { error: 'not_found' });
+      const full = path.join(info.dir, name);
+      if (full !== path.join(info.dir, path.basename(name)) || !full.startsWith(info.dir + path.sep)) {
+        return this._json(res, 400, { error: 'bad_name' });
+      }
+      let buf;
+      try { buf = fs.readFileSync(full); }
+      catch { return this._json(res, 404, { error: 'not_found' }); }
+      res.writeHead(200, {
+        'Content-Type': 'text/plain; charset=utf-8',
+        'Content-Length': buf.length,
+        'Cache-Control': 'no-store',
+        'X-Content-Type-Options': 'nosniff',
+      });
+      return res.end(buf);
+    }
     if (p === '/api/logs') {
       const n = Math.min(500, Math.max(1, parseInt(url.searchParams.get('limit') || '200', 10) || 200));
       return this._json(res, 200, { data: this.log.tail(n) });
@@ -402,4 +472,4 @@ class ApiServer {
   }
 }
 
-module.exports = { ApiServer };
+module.exports = { ApiServer, listEventLogFiles, eventLogNameOk };

@@ -2,6 +2,7 @@
 
 const fs = require('fs');
 const path = require('path');
+const { readable } = require('./eventCatalog');
 
 /**
  * Match statistics -> CSV files on this PC. Nothing leaves the machine.
@@ -27,6 +28,7 @@ const PLAYER_COLS = [
 const EVENT_COLS = [
   'match_id', 'seq', 'elapsed_s', 'wall_time', 'type', 'code',
   'actor_id', 'actor', 'actor_team', 'target_id', 'target', 'target_team', 'assist', 'detail',
+  'text',
 ];
 const TOTAL_COLS = [
   'player_id', 'name', 'matches', 'wins', 'losses', 'draws',
@@ -165,6 +167,7 @@ class StatsWriter {
       actor_id: e.actorId || '', actor: e.actorName || '', actor_team: e.actorTeamId || '',
       target_id: e.targetId || '', target: e.targetName || '', target_team: e.targetTeamId || '',
       assist: e.assistName || '', detail: e.text || '',
+      text: (typeof e.phrase === 'string' && e.phrase.trim()) ? e.phrase : readable(e),
     }));
     this._writeCsv(file, EVENT_COLS, rows, false);
   }

@@ -44,6 +44,7 @@
 
 <nav class="tabs">
   <button data-tab="live" class="active">Live</button>
+  <button data-tab="events">Ereignisse</button>
   <button data-tab="outputs">Ausgänge</button>
   <button data-tab="stats">Statistik</button>
   <button data-tab="settings">Einstellungen</button>
@@ -57,14 +58,32 @@
   <section id="tab-live" class="tab active">
     <div class="scorebar">
       <div class="side" id="side-a"><span class="sname">—</span><span class="sscore">0</span></div>
-      <div class="mid"><span class="clock" id="clock">0:00</span><span class="mid-label" id="mid-label">kein Match</span></div>
+      <div class="mid">
+        <span class="clock" id="clock">0:00</span>
+        <span class="mid-label" id="mid-label">kein Match</span>
+        <span class="mid-prog" aria-hidden="true"><span id="mid-prog-fill"></span></span>
+      </div>
       <div class="side rev" id="side-b"><span class="sscore">0</span><span class="sname">—</span></div>
     </div>
     <div class="stat-cols" id="stat-cols"></div>
     <div class="feed-wrap">
-      <span class="eyebrow">Ereignisse</span>
+      <span class="eyebrow">Verlauf · letzte Ereignisse</span>
       <div class="feed" id="feed"></div>
     </div>
+  </section>
+
+  <!-- EVENTS -->
+  <section id="tab-events" class="tab">
+    <div class="ev-bar">
+      <div class="ev-filters" id="ev-filters" aria-label="Kategorien filtern"></div>
+      <div class="ev-tools">
+        <span class="muted" id="ev-count"></span>
+        <a class="ghost mini" id="ev-file" hidden>Datei öffnen</a>
+        <button class="ghost mini" id="ev-copy">Kopieren</button>
+        <button class="ghost mini" id="ev-pause">Pause</button>
+      </div>
+    </div>
+    <div class="ev-log" id="ev-log" role="log" aria-live="polite"></div>
   </section>
 
   <!-- OUTPUTS -->

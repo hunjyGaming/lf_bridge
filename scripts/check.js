@@ -137,5 +137,108 @@ try {
   console.log('  ok    engine.smoke');
 } catch (err) { failed++; console.error(`  FAIL  engine.smoke\n        ${err.stack}`); }
 
+try {
+  const { Engine } = require('../src/engine');
+  const evts = [];
+  const eng = new Engine({ logger: null });
+  eng.on('event', (e) => evts.push(e));
+  [
+    '1 0 0 0 720000 0', '2 0 Red 5 solid #ff0000', '2 1 Blue 5 solid #0000ff',
+    '4 100 0100',
+    '3 100 event @1 player A 0 3 1', '3 100 event @2 player B 1 3 1',
+    '4 200 1105',                 // laserball round start — was ignored
+    '4 300 0201 @1',              // SM5 miss — was ignored
+    '4 400 110C @1 @2',           // explicit reset code — was ignored
+    '4 450 0F00 @1',              // truly unknown type-4 code
+    '5 600 0 0 1 1',              // type-5 score line — was ignored
+    '6 700 1 02 5',               // type-6 entity-end / summary — was ignored
+    '4 800 1100 @1 @2',           // handled code: must NOT get a duplicate aux event
+  ].forEach((l) => eng.processLogLine(l));
+  const has = (t, code) => evts.some((e) => e.type === t && (code === undefined || e.code === code));
+  assert.ok(has('round_start', '1105'), 'emits round_start for 1105');
+  assert.ok(has('miss', '0201'), 'emits typed event for SM5 0201');
+  assert.ok(has('reset', '110C'), 'emits reset for explicit 110C');
+  assert.ok(has('lf_event', '0F00'), 'emits generic lf_event for an unknown code');
+  assert.ok(evts.some((e) => e.type === 'score' && e.delta === 1 && e.new === 1), 'emits score event from type-5');
+  assert.ok(has('match_summary', '6'), 'emits match_summary from type-6');
+  assert.strictEqual(evts.filter((e) => e.code === '1100').length, 1, 'handled code 1100 not double-emitted');
+  assert.ok(evts.every((e) => !/<\/?[a-z][\s\S]*>/i.test(e.text || '')), 'no HTML in aux event text');
+  // emitUnknownEvents:false suppresses only the generic fallback, not the mapped types
+  const eng2 = new Engine({ logger: null, emitUnknownEvents: false });
+  const e2 = []; eng2.on('event', (e) => e2.push(e));
+  ['1 0 0 0 720000 0', '2 0 Red 5 solid #ff0000', '4 100 0100',
+    '3 100 event @1 player A 0 3 1', '4 200 0F00 @1', '4 300 1105'].forEach((l) => eng2.processLogLine(l));
+  assert.ok(!e2.some((e) => e.type === 'lf_event'), 'emitUnknownEvents:false hides generic lf_event');
+  assert.ok(e2.some((e) => e.type === 'round_start'), 'emitUnknownEvents:false keeps mapped types');
+  console.log('  ok    engine.auxEvents');
+} catch (err) { failed++; console.error(`  FAIL  engine.auxEvents\n        ${err.stack}`); }
+
+try {
+  const { EventLog } = require('../src/eventLog');
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'lflog-'));
+  const cwd = process.cwd(); process.chdir(dir);
+  const el = new EventLog({ eventLog: { enabled: true, dir: 'data/logs', rotate: 'daily', filenamePrefix: 'events' } }, { warn() {} });
+  el.onMatchStart({ matchId: 'abc123', players: { 1: {}, 2: {} } });
+  el.onEvent({ id: 1, ts: Date.parse('2026-09-10T21:14:03Z'), elapsedMs: 432900, matchId: 'abc123', type: 'goal', code: '1101', actorName: 'Mara', actorTeamId: '0', scores: { 0: 3, 1: 2 }, text: 'Mara SCORED' });
+  el.onEvent({ id: 2, ts: Date.now(), elapsedMs: 5000, matchId: 'abc123', type: 'lf_event', code: '0F00', text: 'Event 0F00' });
+  el.onMatchEnd({ matchId: 'abc123', scores: { 0: 3, 1: 2 }, players: { 1: {}, 2: {} } });
+  el.flush();
+  const f = path.join(dir, 'data', 'logs', `events-${new Date().toISOString().slice(0, 10)}.log`);
+  const txt = fs.readFileSync(f, 'utf8');
+  assert.ok(/^\d{4}-\d\d-\d\d \d\d:\d\d:\d\d {2}\+\d\d:\d\d\.\d{3} {2}\[abc123\] {2}\S/m.test(txt), 'readable columned line');
+  assert.ok(/\+07:12\.900/.test(txt), 'elapsed formatted mm:ss.mmm');
+  assert.ok(/──── Match abc123 · 2 Spieler/.test(txt), 'match header line');
+  assert.ok(/Match abc123 beendet · Endstand 3:2/.test(txt), 'match footer with score');
+  process.chdir(cwd); fs.rmSync(dir, { recursive: true, force: true });
+  console.log('  ok    eventLog');
+} catch (err) { failed++; console.error(`  FAIL  eventLog\n        ${err.stack}`); }
+
+try {
+  const { Engine } = require('../src/engine');
+  const evts = [];
+  const eng = new Engine({ logger: null });
+  eng.on('event', (e) => evts.push(e));
+  [
+    '1 0 0 0 720000 0', '2 0 Red 5 solid #ff0000', '2 1 Blue 5 solid #0000ff',
+    '4 100 0100',
+    '3 100 event @1 player A 0 3 1', '3 100 event @2 player B 1 3 1',
+    '4 500 1100 @1 @2', '4 900 1101 @2',
+  ].forEach((l) => eng.processLogLine(l));
+
+  const goal = evts.find((e) => e.type === 'goal');
+  assert.ok(goal, 'goal event emitted');
+  assert.strictEqual(goal.category, 'score', 'goal enriched with category:score');
+  assert.strictEqual(goal.code, '1101', 'goal keeps its own code');
+  assert.ok(typeof goal.phrase === 'string' && goal.phrase.trim(), 'goal enriched with a phrase');
+  assert.ok(goal.text === 'B SCORED', 'goal.text unchanged by enrichment');
+
+  const ms = evts.find((e) => e.type === 'match_start');
+  assert.strictEqual(ms.code, '0100', 'match_start gets code 0100 from TYPE_TO_CODE');
+  assert.strictEqual(ms.category, 'match', 'match_start enriched category');
+
+  const pass = evts.find((e) => e.type === 'pass');
+  assert.strictEqual(pass.category, 'possession', 'pass category from catalog');
+  assert.ok(evts.find((e) => e.type === 'player_join') && evts.find((e) => e.type === 'player_join').code === undefined, 'player_join has no code (type-3 login)');
+  console.log('  ok    engine.enrich');
+} catch (err) { failed++; console.error(`  FAIL  engine.enrich\n        ${err.stack}`); }
+
+try {
+  const { listEventLogFiles, eventLogNameOk } = require('../src/apiServer');
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'lfevlog-'));
+  fs.writeFileSync(path.join(dir, 'events-2026-09-10.log'), 'line one\n');
+  fs.writeFileSync(path.join(dir, 'events.log'), 'x\n');
+  fs.writeFileSync(path.join(dir, 'notes.txt'), 'ignore me\n');
+  const files = listEventLogFiles(dir);
+  assert.strictEqual(files.length, 2, 'lists only events*.log files');
+  assert.ok(files.every((f) => typeof f.size === 'number' && typeof f.mtime === 'number' && typeof f.name === 'string'), 'entries carry name/size/mtime');
+  assert.deepStrictEqual(listEventLogFiles(path.join(dir, 'missing')), [], 'missing dir -> []');
+  assert.ok(eventLogNameOk('events-2026-09-10.log'), 'valid name accepted');
+  assert.ok(!eventLogNameOk('../secrets.log'), 'traversal rejected');
+  assert.ok(!eventLogNameOk('sub/events.log'), 'path separator rejected');
+  assert.ok(!eventLogNameOk('totals.csv'), 'non-events name rejected');
+  fs.rmSync(dir, { recursive: true, force: true });
+  console.log('  ok    apiServer.eventLogList');
+} catch (err) { failed++; console.error(`  FAIL  apiServer.eventLogList\n        ${err.stack}`); }
+
 console.log(failed ? `\n${failed} check(s) failed` : '\nAll checks passed');
 process.exit(failed ? 1 : 0);

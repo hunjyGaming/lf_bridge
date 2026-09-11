@@ -42,6 +42,10 @@ Dateirechten `0600` geschrieben.
 | `LF_CSV_BOM` | `true` | `csv.bom` | BOM voranstellen (Excel + Umlaute) |
 | `LF_CSV_EVENTS` | `true` | `csv.writeEvents` | zusätzlich Event-Log pro Match |
 | `LF_CSV_LIVE` | `false` | `csv.writeLive` | Match-CSV schon während des Matches aktualisieren |
+| `LF_EVENTLOG_ENABLED` | `true` | `eventLog.enabled` | lesbare Event-Log-Datei schreiben ([LOGGING.md](LOGGING.md)) |
+| `LF_EVENTLOG_DIR` | `data/logs` | `eventLog.dir` | Zielordner der Event-Log-Datei (relativ zum Programm) |
+| `LF_EVENTLOG_ROTATE` | `daily` | `eventLog.rotate` | `daily` = `events-YYYY-MM-DD.log` · `match` = `events-<matchId>.log` (neue Datei je Match) · `none` = `events.log` |
+| `LF_EMIT_UNKNOWN_EVENTS` | `true` | `engine.emitUnknownEvents` | zusätzlich ein generisches `lf_event` für jeden Typ-4-Code, den der Parser nicht auswertet. Konsolen-Änderung wirkt sofort. |
 | `LF_LOCAL_ROSTER_ENABLED` | `false` | `localRoster.enabled` | Namensliste nutzen |
 | `LF_LOCAL_ROSTER_FILE` | `data/roster.csv` | `localRoster.file` | deren Pfad (setzt automatisch `enabled=true`) |
 | `LF_MATCH_DURATION_MS` | `720000` | `match.defaultDurationMs` | Fallback bis Laserforce die Dauer meldet (Log-Typ 1) |
@@ -67,9 +71,15 @@ Leere Werte (`LF_API_TOKEN=`) zählen als „nicht gesetzt".
   "tcp": { "host": "0.0.0.0", "port": 9000 },
   "streamServer": { "enabled": false, "host": "127.0.0.1", "port": 9100 },
   "match": { "defaultDurationMs": 720000 },
+  "engine": { "emitUnknownEvents": true },   // generisches lf_event für nicht ausgewertete Typ-4-Codes
   "csv": {
     "enabled": true, "dir": "data/stats", "delimiter": ";",
     "bom": true, "writeEvents": true, "writeLive": false
+  },
+  "eventLog": {                              // lesbare Event-Log-Datei — Änderungen wirken erst nach Neustart
+    "enabled": true, "dir": "data/logs",
+    "rotate": "daily",                       // "daily" | "match" | "none"
+    "filenamePrefix": "events"
   },
   "localRoster": { "enabled": false, "file": "data/roster.csv" },
   "outputs": [

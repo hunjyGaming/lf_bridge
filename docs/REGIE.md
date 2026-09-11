@@ -92,8 +92,16 @@ export type MatchState = {
 export type LiveEvent = {
   id: number; ts: number; elapsedMs: number; matchId: string | null;
   type: "match_start" | "match_end" | "player_join" | "pass" | "clear"
-      | "steal" | "block" | "reset" | "failed_clear" | "goal" | "status";
-  code?: string;
+      | "steal" | "block" | "reset" | "failed_clear" | "goal" | "status"
+      // additiv — bislang ignorierte Codes, verändern den State nicht:
+      | "round_start" | "score" | "match_summary" | "lf_event"
+      | "miss" | "player_hit" | "player_deactivate" | "target_hit" | "target_destroy"
+      | "warbot_deactivate" | "missile_lock" | "missile_miss" | "missile_hit" | "missile_destroy"
+      | (string & {});
+  code?: string;                     // Hex-TDF-Code, sofern für den type bekannt
+  category?: string;                 // match·score·possession·combat·player·special·other
+  label?: string;                    // Kurzbezeichnung
+  phrase?: string;                   // deutscher Klartext-Satz — Anzeige: phrase ?? text
   actorId?: string; actorName?: string; actorTeamId?: string;
   targetId?: string | null; targetName?: string | null; targetTeamId?: string | null;
   assistId?: string | null; assistName?: string | null;
@@ -237,6 +245,11 @@ export default function RegieBoard() {
 
 Jedes `event` ist ein flaches Objekt (Feld-Liste siehe `LiveEvent` oben). `text`
 ist immer reiner Klartext (`"Tim SCORED"`), nie HTML.
+
+> Seit v1.1 trägt **jedes** Event zusätzlich die optionalen Felder `code`,
+> `category`, `label` und `phrase` (deutscher Satz). Sie sind rein additiv und
+> können gefahrlos ignoriert werden; für eine Anzeige ist `ev.phrase ?? ev.text`
+> die einfachste Wahl.
 
 | `type` | ausgelöst durch | typische Regie-Reaktion |
 |---|---|---|

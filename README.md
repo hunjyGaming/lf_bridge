@@ -67,6 +67,10 @@ Zwei Ebenen, die spätere gewinnt:
 | `LF_CSV_BOM` | `true` | BOM (Excel + Umlaute) |
 | `LF_CSV_EVENTS` | `true` | zusätzlich Event-Log pro Match |
 | `LF_CSV_LIVE` | `false` | Match-CSV schon während des Matches aktualisieren |
+| `LF_EVENTLOG_ENABLED` | `true` | lesbare Event-Log-Datei nach `data/logs/` schreiben ([docs/LOGGING.md](docs/LOGGING.md)) |
+| `LF_EVENTLOG_DIR` | `data/logs` | Zielordner der Event-Log-Datei |
+| `LF_EVENTLOG_ROTATE` | `daily` | `daily` (pro Tag) · `match` (pro Match) · `none` (eine Datei) |
+| `LF_EMIT_UNKNOWN_EVENTS` | `true` | zusätzlich ein generisches `lf_event` für jeden nicht ausgewerteten Typ-4-Code |
 | `LF_LOCAL_ROSTER_ENABLED` | `false` | eigene Namensliste nutzen |
 | `LF_LOCAL_ROSTER_FILE` | `data/roster.csv` | deren Pfad |
 | `LF_MATCH_DURATION_MS` | `720000` | Fallback bis Laserforce die Dauer meldet |
@@ -121,6 +125,8 @@ src/
   streamServer.js roher TCP-Stream raus
   outputs.js      ausgehende Ziele: webhook / tcp / udp
   statsWriter.js  Statistik → CSV
+  eventLog.js     lesbare Event-Log-Datei (data/logs/)
+  eventCatalog.js Event-Code-Nachschlagewerk (Label, Kategorie, Klartext)
   localRoster.js  optionale Namensliste (CSV)
   web/            die Konsole (statisch, kein Build)
 scripts/
@@ -135,6 +141,7 @@ docs/
   INTEGRATION.md  Fremdsoftware allgemein
   LASERFORCE.md   Anbindung, Log-Format, alle Event-Codes
   STATS.md        CSV-Dateien, Spalten, Auswertung
+  LOGGING.md      lesbare Event-Log-Datei: Zeilenformat, Rotation
 ```
 
 Der Test-Kit `../lf_simulate` (Match-Generator + Event-Monitor + E2E-Verify)

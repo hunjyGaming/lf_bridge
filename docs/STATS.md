@@ -7,6 +7,9 @@ Konsolen-Tab **Statistik**.
 Ordner (Standard): `data/stats/` neben dem Programm. Änderbar per `.env`
 (`LF_CSV_DIR`) oder in `config.json`.
 
+> Zusätzlich schreibt lf_live eine **lesbare Event-Log-Datei** nach `data/logs/`
+> (eine Zeile je Ereignis, zum Mitlesen/Grep). Eigene Doku: [LOGGING.md](LOGGING.md).
+
 ---
 
 ## Die Dateien
@@ -61,9 +64,14 @@ Stand fertiggeschrieben — es geht nichts verloren.
 ## Spalten: `events.csv`
 
 `match_id`, `seq`, `elapsed_s`, `wall_time`, `type`, `code`, `actor_id`, `actor`,
-`actor_team`, `target_id`, `target`, `target_team`, `assist`, `detail`.
+`actor_team`, `target_id`, `target`, `target_team`, `assist`, `detail`, `text`.
 `type` ist z. B. `goal`, `pass`, `block`, `steal`, `match_start` — siehe
 [API.md](API.md#event-objekt).
+
+- `detail` = der vom Parser gesetzte Roh-Text des Events (`evt.text`).
+- `text` = derselbe Vorgang als lesbarer deutscher Satz aus `eventCatalog.phrase()`
+  (fällt auf `detail` zurück, wenn der Code nur eine generische Bezeichnung hat).
+  Dieselbe Formulierung steht in der Event-Log-Datei — siehe [LOGGING.md](LOGGING.md).
 
 ---
 

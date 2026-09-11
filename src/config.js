@@ -46,6 +46,19 @@ function defaults() {
 
     match: { defaultDurationMs: 720000 },
 
+    // Match engine
+    engine: {
+      emitUnknownEvents: true,     // emit a generic lf_event for every type-4 code the parser does not act on
+    },
+
+    // Human-readable append-only event-log file (docs/LOGGING.md)
+    eventLog: {
+      enabled: true,
+      dir: 'data/logs',
+      rotate: 'daily',             // 'daily' | 'match' | 'none'
+      filenamePrefix: 'events',
+    },
+
     // Statistics -> CSV files on this PC (docs/STATS.md)
     csv: {
       enabled: true,
@@ -90,6 +103,12 @@ function applyEnv(cfg, pins) {
   if (Ei('LF_STREAM_PORT') !== undefined) { cfg.streamServer.port = Ei('LF_STREAM_PORT'); P('streamServer.port', 1); }
 
   if (Ei('LF_MATCH_DURATION_MS') !== undefined) { cfg.match.defaultDurationMs = Ei('LF_MATCH_DURATION_MS'); P('match.defaultDurationMs', 1); }
+
+  if (Eb('LF_EMIT_UNKNOWN_EVENTS') !== undefined) { cfg.engine.emitUnknownEvents = Eb('LF_EMIT_UNKNOWN_EVENTS'); P('engine.emitUnknownEvents', 1); }
+
+  if (Eb('LF_EVENTLOG_ENABLED') !== undefined) { cfg.eventLog.enabled = Eb('LF_EVENTLOG_ENABLED'); P('eventLog.enabled', 1); }
+  if (E('LF_EVENTLOG_DIR')) { cfg.eventLog.dir = E('LF_EVENTLOG_DIR'); P('eventLog.dir', 1); }
+  if (['daily', 'match', 'none'].includes(E('LF_EVENTLOG_ROTATE'))) { cfg.eventLog.rotate = E('LF_EVENTLOG_ROTATE'); P('eventLog.rotate', 1); }
 
   if (Eb('LF_CSV_ENABLED') !== undefined) { cfg.csv.enabled = Eb('LF_CSV_ENABLED'); P('csv.enabled', 1); }
   if (E('LF_CSV_DIR')) { cfg.csv.dir = E('LF_CSV_DIR'); P('csv.dir', 1); }
@@ -167,6 +186,13 @@ function normalize(raw) {
   c.streamServer.port = clampInt(raw.streamServer?.port, d.streamServer.port, 1, 65535);
 
   c.match.defaultDurationMs = clampInt(raw.match?.defaultDurationMs, d.match.defaultDurationMs, 1000, 86400000);
+
+  c.engine.emitUnknownEvents = bool(raw.engine?.emitUnknownEvents, d.engine.emitUnknownEvents);
+
+  c.eventLog.enabled = bool(raw.eventLog?.enabled, d.eventLog.enabled);
+  c.eventLog.dir = str(raw.eventLog?.dir, d.eventLog.dir).trim() || d.eventLog.dir;
+  c.eventLog.rotate = (['daily', 'match', 'none'].includes(raw.eventLog?.rotate)) ? raw.eventLog.rotate : d.eventLog.rotate;
+  c.eventLog.filenamePrefix = (str(raw.eventLog?.filenamePrefix, d.eventLog.filenamePrefix).trim() || d.eventLog.filenamePrefix).replace(/[^a-zA-Z0-9._-]/g, '') || d.eventLog.filenamePrefix;
 
   c.csv.enabled = bool(raw.csv?.enabled, d.csv.enabled);
   c.csv.dir = str(raw.csv?.dir, d.csv.dir).trim() || d.csv.dir;

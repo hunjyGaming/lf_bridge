@@ -8,6 +8,71 @@ const el = (t, props = {}, ...kids) => {
 };
 const TEAM_FALLBACK = ['#ef4444', '#38bdf8', '#22c55e', '#eab308', '#a855f7'];
 
+// ---------------- event language (shared: Live-Feed + Ereignisse) ----------------
+// Renders straight from the WS `event` frame. Prefers a server-supplied
+// `category` / `label` / `phrase` if a later build adds them (see docs/API.md),
+// otherwise derives category + a readable German sentence from the structured fields.
+const EV_CATS = ['match', 'score', 'possession', 'combat', 'player', 'special', 'other'];
+const EV_CAT_LABEL = {
+  match: 'Match', score: 'Treffer', possession: 'Ballbesitz', combat: 'Duell',
+  player: 'Spieler', special: 'Spezial', other: 'Sonstiges',
+};
+// Mirrors the category taxonomy in src/eventCatalog.js (match / score / possession
+// / combat / player / special / other) so a future server-supplied `category` and
+// this client-side fallback agree.
+const EV_TYPE_CAT = {
+  match_start: 'match', match_end: 'match',
+  goal: 'score',
+  pass: 'possession', clear: 'possession', steal: 'possession', failed_clear: 'possession',
+  block: 'combat',
+  reset: 'special',
+  player_join: 'player', status: 'player',
+};
+function evtCategory(e) {
+  if (e && e.category && EV_CAT_LABEL[e.category]) return e.category;
+  return (e && EV_TYPE_CAT[e.type]) || 'other';
+}
+function evtTag(e) {
+  return (e && typeof e.label === 'string' && e.label) || EV_CAT_LABEL[evtCategory(e)];
+}
+function evtScoreLine(e) {
+  if (!e || !e.scores) return '';
+  return Object.keys(e.scores).sort().map((k) => e.scores[k]).join(':');
+}
+function evtSentence(e) {
+  if (!e) return '';
+  if (typeof e.phrase === 'string' && e.phrase) return e.phrase;
+  const a = e.actorName || (e.actorId ? '#' + e.actorId : 'Jemand');
+  const t = e.targetName || (e.targetId ? '#' + e.targetId : null);
+  switch (e.type) {
+    case 'match_start': return 'Match gestartet';
+    case 'match_end':   return 'Match beendet' + (e.scores ? ` — Endstand ${evtScoreLine(e)}` : '');
+    case 'player_join': return `${a} betritt Team ${e.teamId != null ? e.teamId : '?'}`;
+    case 'pass':        return t ? `${a} passt zu ${t}` : `${a} passt`;
+    case 'clear':       return t ? `${a} klärt zu ${t}` : `${a} klärt`;
+    case 'failed_clear':return `${a} vergibt den Clear`;
+    case 'steal':       return t ? `${a} erobert den Ball von ${t}` : `${a} erobert den Ball`;
+    case 'block':       return t ? `${a} blockt ${t}` : `${a} blockt`;
+    case 'reset':       return t ? `${a} setzt ${t} zurück` : `${a} setzt zurück`;
+    case 'goal': {
+      const as = e.assistName ? ` (Vorlage: ${e.assistName})` : '';
+      const sc = e.scores ? ` — ${evtScoreLine(e)}` : '';
+      return `${a} trifft${as}${sc}`;
+    }
+    case 'status': {
+      const s = Number(e.status);
+      if (s === 3) return `${a} ist ausgeschieden`;
+      if (s === 2) return `${a} im Reset`;
+      if (s === 0) return `${a} ist wieder aktiv`;
+      return `${a}: Status ${e.status}`;
+    }
+  }
+  return e.text || e.type || 'Ereignis';
+}
+function evtMatchShort(e) {
+  return e && e.matchId ? String(e.matchId).slice(-4) : '—';
+}
+
 let token = localStorage.getItem('lf_token') || '';
 let cfg = null;
 let outputs = [];
@@ -82,7 +147,7 @@ function connectWs() {
   ws.onmessage = (e) => {
     const m = JSON.parse(e.data);
     if (m.type === 'state') renderLive(m.data);
-    else if (m.type === 'event') { pushFeed(m.data); fireFlow(); }
+    else if (m.type === 'event') { pushFeed(m.data); events.add(m.data); fireFlow(); }
   };
 }
 
@@ -142,7 +207,7 @@ function setChip(id, cls, text) {
 }
 
 // ---------------- live rendering ----------------
-let clockTimer = null, remaining = 0;
+let clockTimer = null, remaining = 0, matchDur = 0;
 function renderLive(s) {
   const players = Object.values(s.players || {});
   const teamIds = [...new Set(players.map((p) => String(p.teamId)))].sort();
@@ -154,7 +219,8 @@ function renderLive(s) {
 
   $('mid-label').textContent = s.missionActive ? 'Match läuft' : 'kein Match';
   $('tab-live').classList.toggle('match-live', s.missionActive);
-  remaining = (s.duration || 0) - (s.elapsedTime || 0);
+  matchDur = s.duration || 0;
+  remaining = matchDur - (s.elapsedTime || 0);
   drawClock();
   clearInterval(clockTimer);
   if (s.missionActive) clockTimer = setInterval(() => { remaining -= 1000; drawClock(); }, 1000);
@@ -188,17 +254,159 @@ function paintSide(id, m, score) {
   e.querySelector('.sscore').textContent = score;
 }
 function trow(cell, vals) { const tr = el('tr'); for (const v of vals) tr.append(el(cell, {}, String(v))); return tr; }
-function drawClock() { let ms = remaining < 0 ? 0 : remaining; $('clock').textContent = fmt(ms); }
+function drawClock() {
+  const ms = remaining < 0 ? 0 : remaining;
+  $('clock').textContent = fmt(ms);
+  const fill = $('mid-prog-fill');
+  if (fill) fill.style.width = matchDur > 0 ? (Math.min(1, Math.max(0, 1 - ms / matchDur)) * 100).toFixed(1) + '%' : '0%';
+}
 function fmt(ms) { const t = Math.floor((ms || 0) / 1000); return `${Math.floor(t / 60)}:${String(t % 60).padStart(2, '0')}`; }
 function pushFeed(evt) {
   const f = $('feed');
-  const line = el('div', { className: 'fe' },
+  const cat = evtCategory(evt);
+  const line = el('div', { className: 'fe', style: `--cat:var(--cat-${cat})` },
     el('span', { className: 'ft' }, fmt(evt.elapsedMs)),
-    el('span', { className: evt.type === 'goal' ? 'fg' : '' }, evt.text || evt.type));
+    el('i', { className: 'flamp' }),
+    el('span', { className: 'fx' + (cat === 'score' ? ' fg' : '') }, evtSentence(evt)));
   f.append(line);
   while (f.childElementCount > 80) f.removeChild(f.firstChild);
   f.scrollTop = f.scrollHeight;
 }
+
+// ---------------- Ereignisse (event feed tab) ----------------
+const events = (() => {
+  const MAX = 200;
+  const LOG = [];              // newest first
+  let paused = false;
+  let bufferedWhilePaused = 0;
+  let ready = false;
+  let hidden;
+  try { hidden = new Set(JSON.parse(localStorage.getItem('lf_ev_hidden') || '[]').filter((c) => EV_CATS.includes(c))); }
+  catch { hidden = new Set(); }
+
+  const rowFor = (e) => {
+    const cat = evtCategory(e);
+    const row = el('div', { className: 'ev-row' },
+      el('span', { className: 'ev-tc' }, fmt(e.elapsedMs)),
+      el('span', { className: 'ev-mid' }, evtMatchShort(e)),
+      el('i', { className: 'ev-lamp' }),
+      el('span', { className: 'ev-tag' }, evtTag(e)),
+      el('span', { className: 'ev-txt' }, evtSentence(e)));
+    row.dataset.cat = cat;
+    row.dataset.eid = e.id != null ? String(e.id) : '';
+    if (hidden.has(cat)) row.hidden = true;
+    return row;
+  };
+
+  function render() {
+    const log = $('ev-log');
+    if (!log) return;
+    log.textContent = '';
+    let shown = 0;
+    for (const e of LOG) {
+      const row = rowFor(e);
+      if (!row.hidden) shown++;
+      log.append(row);
+    }
+    if (!shown) {
+      log.append(el('p', { className: 'ev-empty' },
+        LOG.length ? 'Alle Kategorien ausgeblendet — oben wieder einblenden.'
+                   : 'Noch keine Ereignisse — warten auf den Laserforce-Stream.'));
+    }
+    const c = $('ev-count');
+    if (c) c.textContent = LOG.length ? `${shown}/${LOG.length}` : '';
+  }
+
+  function add(e) {
+    if (!e || typeof e !== 'object') return;
+    if (LOG.length && LOG[0].id != null && e.id === LOG[0].id) return;
+    if (paused) { bufferedWhilePaused++; syncPause(); return; }
+    LOG.unshift(e);
+    if (LOG.length > MAX) LOG.length = MAX;
+    if (ready) render();
+  }
+
+  function syncPause() {
+    const b = $('ev-pause');
+    if (!b) return;
+    b.textContent = paused ? (bufferedWhilePaused ? `Live (+${bufferedWhilePaused})` : 'Live') : 'Pause';
+    b.classList.toggle('armed', paused);
+  }
+
+  async function togglePause() {
+    paused = !paused;
+    if (!paused && bufferedWhilePaused) { bufferedWhilePaused = 0; await backfill(); }
+    syncPause();
+  }
+
+  async function backfill() {
+    try {
+      const r = await api('/api/events?limit=200');
+      const rows = Array.isArray(r.data) ? r.data : [];
+      const have = new Set(LOG.map((e) => e.id));
+      for (const e of rows) if (!have.has(e.id)) LOG.push(e);
+      LOG.sort((x, y) => (y.id || 0) - (x.id || 0));
+      if (LOG.length > MAX) LOG.length = MAX;
+    } catch {}
+  }
+
+  function buildFilters() {
+    const wrap = $('ev-filters');
+    if (!wrap || wrap.childElementCount) return;
+    for (const cat of EV_CATS) {
+      const b = el('button', { className: 'ev-chip', type: 'button', title: `${EV_CAT_LABEL[cat]} ein-/ausblenden` },
+        el('i', { className: 'ev-lamp', style: `--lamp:var(--cat-${cat})` }), EV_CAT_LABEL[cat]);
+      b.dataset.cat = cat;
+      const paint = () => { b.classList.toggle('off', hidden.has(cat)); b.setAttribute('aria-pressed', String(!hidden.has(cat))); };
+      paint();
+      b.addEventListener('click', () => {
+        if (hidden.has(cat)) hidden.delete(cat); else hidden.add(cat);
+        try { localStorage.setItem('lf_ev_hidden', JSON.stringify([...hidden])); } catch {}
+        paint();
+        render();
+      });
+      wrap.append(b);
+    }
+  }
+
+  async function probeFile() {
+    const link = $('ev-file');
+    if (!link) return;
+    for (const path of ['/api/logs/events', '/api/events/file']) {
+      try {
+        const res = await fetch(path, { method: 'HEAD', headers: token ? { Authorization: 'Bearer ' + token } : {} });
+        if (res.ok) { link.href = path + (token ? `?token=${encodeURIComponent(token)}` : ''); link.hidden = false; return; }
+      } catch {}
+    }
+  }
+
+  async function onShow() {
+    buildFilters();
+    syncPause();
+    if (!ready) {
+      await backfill();
+      ready = true;
+      probeFile();
+    }
+    render();
+  }
+
+  function copy() {
+    const lines = [...LOG].reverse()
+      .filter((e) => !hidden.has(evtCategory(e)))
+      .map((e) => `${fmt(e.elapsedMs).padStart(6)}  ${evtMatchShort(e).padEnd(4)}  ${evtTag(e).padEnd(10)}  ${evtSentence(e)}`);
+    const text = lines.join('\n');
+    navigator.clipboard.writeText(text)
+      .then(() => toast(`${lines.length} Zeilen kopiert`))
+      .catch(() => toast('Kopieren nicht möglich', true));
+  }
+
+  $('ev-pause')?.addEventListener('click', togglePause);
+  $('ev-copy')?.addEventListener('click', copy);
+
+  return { add, onShow };
+})();
+document.querySelector('.tabs button[data-tab="events"]')?.addEventListener('click', () => events.onShow());
 
 // ---------------- settings ----------------
 const PIN_MAP = {
