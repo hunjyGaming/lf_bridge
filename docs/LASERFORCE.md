@@ -1,0 +1,756 @@
+# Laserforce — Anbindung, Log-Format & Event-Codes
+
+Alles über die Verbindung zum Laserforce-System und das Format, das über den
+TCP-Stream kommt. Dies ist die **einzige** Protokoll-Referenz des Projekts.
+
+- [Zweck](#zweck)
+- [Anbinden](#anbinden)
+- [Was der Parser liest](#was-der-parser-liest)
+- [Tabulatoren, Leerzeichen und der Spaltenversatz](#tabulatoren-leerzeichen-und-der-spaltenversatz)
+- [Zeilentypen 0–9](#zeilentypen-09)
+- [Schema-Kommentarzeilen](#schema-kommentarzeilen)
+- [Feld-Referenz](#feld-referenz)
+- [Typ-1 (Mission) im Detail](#typ-1-mission-im-detail)
+- [Typ-2 (Team) im Detail](#typ-2-team-im-detail)
+- [Typ-3 (Login nach 0100) im Detail](#typ-3-login-nach-0100-im-detail)
+- [Typ-5 (Score) im Detail](#typ-5-score-im-detail)
+- [Typ-7 (SM5-Endblock) im Detail](#typ-7-sm5-endblock-im-detail)
+- [Typ-4-Event-Codes: gemeinsame Match-Steuerung](#typ-4-event-codes-gemeinsame-match-steuerung)
+- [Typ-4-Event-Codes: Space Marines 5](#typ-4-event-codes-space-marines-5)
+- [Typ-4-Event-Codes: Laserball](#typ-4-event-codes-laserball)
+- [Typ-4-Event-Codes: 7SM / Nexus](#typ-4-event-codes-7sm--nexus)
+- [Spielvarianten](#spielvarianten)
+- [Modus-Erkennung](#modus-erkennung)
+- [Assist-Fenster & Ballbesitz](#assist-fenster--ballbesitz)
+- [Was lf_live daraus macht](#was-lf_live-daraus-macht)
+- [Bekannte Lücken / unbestätigt](#bekannte-lücken--unbestätigt)
+- [Quellen](#quellen)
+- [Gegen die echte Anlage prüfen](#gegen-die-echte-anlage-prüfen)
+
+---
+
+## Zweck
+
+Diese Datei dokumentiert das TDF-Log-Format ("Tournament Data Format" bzw.
+"Tab Delimited File"), das eine Laserforce-Anlage als Stream ausgibt, sowie
+**jeden bekannten Typ-4-Event-Code je Spielmodus**. Die maschinenlesbare Fassung
+der Code-Tabellen liegt in [`src/eventCatalog.js`](../src/eventCatalog.js)
+(`EVENTS`, `describe()`, `phrase()`).
+
+> **Verhältnis zum Originalsystem — Stand heute.** Die Auswertung
+> (`src/engine.js`, `processLogLine`) war ursprünglich ein 1:1-Port des
+> Originalsystems. Das gilt **nicht mehr pauschal**: der Parser kann inzwischen
+> mehr als das Original. Was garantiert unverändert blieb und was bewusst neu
+> ist, steht in [Was lf_live daraus macht](#was-lf_live-daraus-macht).
+>
+> **Unverändert am Laserball-Pfad** — und das ist die Leitplanke des ganzen
+> Umbaus: der komplette `11xx`-`switch`, das **10-Sekunden-Assist-Fenster**, die
+> Ballbesitz-Führung über `ballHolderId`, die Unterscheidung Reset/Block über den
+> Ziel-Status und **alle zwölf bestehenden Laserball-Zählerfelder** unter ihren
+> bisherigen Namen. Der Regressionstest `engine.smoke` in `scripts/check.js`
+> fährt genau diesen Pfad (Pass → Tor → Assist → Teamscore) und ist grün; die
+> Laserball-CSV-Spalten sind nachweislich Zeichen für Zeichen dieselben wie vorher.
+>
+> **Genau ein** Eingriff in den Laserball-Pfad war nötig: sobald die Anlage
+> eigene Punkte per Typ-5-Zeile meldet, zählt lf_live den Teamscore nicht mehr
+> selbst mit hoch (siehe [Typ-5 im Detail](#typ-5-score-im-detail)). Tor-Ereignis,
+> `goals`-Zähler, Assist-Logik und OBS-Auslöser sind davon nicht berührt.
+>
+> **Neu gegenüber dem Original** ist alles, was das Original gar nicht kannte:
+> die `;`-Schema-Kommentarzeilen, die Modus-Erkennung aus Typ 1, die
+> SM5-Live-Zähler aus den `0xxx`-Codes, der Typ-7-Endblock und der Typ-5-Score
+> als Autorität.
+>
+> `src/eventCatalog.js` ist weiterhin **rein beschreibendes Nachschlagewerk**
+> und ändert das Parser-Verhalten nicht.
+
+---
+
+## Anbinden
+
+lf_live öffnet einen **TCP-Server** (Standard `0.0.0.0:9000`, über
+`LF_TCP_HOST` / `LF_TCP_PORT` änderbar). Laserforce **verbindet sich dorthin**
+und schickt seinen Log-/Data-Stream, zeilenweise, durch `\n` getrennt.
+
+1. Im Laserforce-Betriebssystem den Log-/Statistik-Export (TCP-Ausgabe) aktivieren.
+2. Als Ziel **IP des Hallen-Rechners : 9000** eintragen. Die IP zeigt die Konsole
+   (unter „Einstellungen") und der Startlog; sonst `ipconfig`.
+3. Windows-Firewall für `node.exe` im **privaten** Netz freigeben.
+4. In der Konsole verschwindet der gelbe Hinweis „Laserforce nicht verbunden",
+   und im Log erscheint `Laserforce connected (...)`, bei Log-Level `debug`
+   danach `recv N bytes`.
+
+> Diese Verbindung ist **unverschlüsselt und ohne Anmeldung** — so gibt Laserforce
+> die Daten aus. Der Rechner gehört in ein vertrauenswürdiges Hallen-Netz. Wenn
+> Laserforce nur „lauschen" statt „verbinden" kann, braucht es einen kleinen
+> Relay davor — bitte melden.
+
+---
+
+## Was der Parser liest
+
+Zeilen, die mit `;` beginnen, sind **Schema-Kommentare**: sie nennen die
+Spaltennamen der folgenden Zeilen ihres Typs. Sie wurden früher verworfen und
+werden **jetzt ausgewertet** — siehe [Schema-Kommentarzeilen](#schema-kommentarzeilen).
+Alle übrigen Zeilen werden an Whitespace gesplittet; **Spalte 0 ist der
+Zeilentyp**.
+
+**Spielernamen** kommen aus der Typ-3-Zeile (Feld nach `player`). Optional
+überschreibt eine selbst gepflegte Namensliste (`data/roster.csv`, siehe
+[CONFIG.md](CONFIG.md#namensliste-optional)) einzelne Namen/Teams. lf_live
+kontaktiert **keine externen Dienste**.
+
+Das Format ist **versioniert** — Zeile 0 nennt die Version (z. B. `2.006`).
+Bekannte Versionen: `2.000`–`2.006`. Änderungen sind **additiv** (höhere Version =
+Obermenge). Einzelne Spalten kamen erst mit späteren Versionen dazu; im Zweifel
+gilt die Schema-Kommentarzeile, nicht die Versionsnummer.
+
+> **Kodierung.** Als Datei ist ein TDF UTF-16 LE (mit BOM), Tab-getrennt,
+> `\r\n`-Zeilenende. Über den TCP-Stream kommt es zeilenbasiert an; der Parser
+> splittet tolerant an beliebigem Whitespace, deshalb funktioniert Tab **und**
+> Space.
+
+---
+
+## Tabulatoren, Leerzeichen und der Spaltenversatz
+
+**TDF ist tabulatorgetrennt.** Der Parser splittet aus historischen Gründen
+zusätzlich an beliebigem Whitespace, damit auch ein leerzeichengetrennter Feed
+und Testdaten funktionieren. Das klingt harmlos, ist aber der Grund, warum
+Spaltenpositionen im TDF zwei verschiedene Zahlen haben können.
+
+Sobald ein Feld selbst ein Leerzeichen enthält — die Missionsbeschreibung, der
+Team-Name, der Spielername —, zerfällt es beim Whitespace-Split in mehrere
+Tokens und **verschiebt jede Spalte dahinter**:
+
+```
+1 ⇥ 5 ⇥ Space Marines 5 ⇥ 20260916120000 ⇥ 900000 ⇥ 0
+
+Tabulator-Spalten:   0:1   1:5   2:"Space Marines 5"   3:start   4:duration   5:penalty
+Whitespace-Tokens:   0:1   1:5   2:Space  3:Marines  4:5   5:start  6:duration  7:penalty
+```
+
+`duration` liegt auf **Tab-Spalte 4**, aber auf **Whitespace-Token 6**. Ein
+Spaltenindex aus einer Schema-Kommentarzeile zählt immer Tabulator-Spalten und
+darf deshalb **nie** ungeprüft auf den Whitespace-Split angewendet werden.
+
+So löst die Engine das:
+
+1. Jede Zeile wird zusätzlich an `\t` gesplittet, sofern ein Tabulator drin ist.
+   Diese Tab-Spalten sind die **einzige** Darstellung, auf die ein Schema-Index
+   direkt angewendet wird.
+2. Kommt der Feed **ohne** Tabulatoren, aber es ist ein Schema bekannt, wird der
+   Versatz zurückgerechnet: er ist genau `Anzahl Tokens − Anzahl Schema-Spalten`,
+   und die überzähligen Tokens gehören zu dem einen Feld, das Leerzeichen
+   enthalten darf. Danach passt die Zeile wieder zum Schema.
+3. Ist weder ein Tabulator noch ein Schema vorhanden, gilt die feste
+   Positionsangabe des jeweiligen Zweigs — also exakt das bisherige Verhalten.
+
+Der ursprüngliche Whitespace-Split bleibt für jeden bestehenden Zweig
+unverändert erhalten; die Tab-Spalten sind eine zusätzliche Darstellung, keine
+Ablösung. Ein tabulator- und ein leerzeichengetrennter Stream liefern damit
+identische Ergebnisse.
+
+> **Bekannte Grenze.** Kommt ein Stream **ohne** Tabulatoren **und ohne**
+> Schema-Zeilen, und endet die Missionsbeschreibung auf einer Zahl, kann dieses
+> letzte Token verlorengehen — es ist dann nicht mehr von den nachfolgenden
+> Zahlenspalten zu unterscheiden. Mit Tabulator oder mit Schema-Zeile korrekt.
+
+---
+
+## Zeilentypen 0–9
+
+| Typ | Name | Spaltenlayout (Schema) | Vorkommen | lf_live |
+|---|---|---|---|---|
+| `;` | **Schema-Kommentar** | `;<typ>/<name>  spalte  spalte  …` | vor der ersten Zeile ihres Typs | **ausgewertet** → Spaltennamen je Zeilentyp, siehe [unten](#schema-kommentarzeilen) |
+| `0` | info / Kopf | `0  file-version  program-version  centre` | 1×, erste Zeile | ⚪ ignoriert (Version nicht ausgewertet) |
+| `1` | mission | `1  type  desc  start  [duration]  [penalty]` — `duration` ab v2.001, `penalty` ab v2.003 | 1×, nach Typ 0 | `type` → **Spielmodus**, `desc` → Anzeigename, `duration` → Spieluhr. Details: [Typ-1 im Detail](#typ-1-mission-im-detail) |
+| `2` | team | `2  index  desc…  colour-enum  colour-desc  [#rgb]` — `#rgb` ab v2.004 | je Team 1×, „Neutral" zuletzt | → `teams[index] = {name, color}` |
+| `3` | entity-start | `3  time  id  type  desc  team  level  category  [battlesuit]  [memberId]` — `battlesuit` ab v2.003, `memberId` in späten 2.006 | je Entity 1×, **nach `0100`** | wenn `type == player` und `team != 5` → Spieler anlegen; `level`/`category`/`battlesuit`/`memberId` werden **jetzt gemerkt** |
+| `4` | **event** | `4  time  code  <actor>  <verb…>  <target>` | laufend | siehe Code-Tabellen |
+| `5` | score | `5  time  entity  old  delta  new` | begleitet jedes werterelevante Typ-4-Event | **Punktestand-Autorität** für alle Modi → `scores` / `players[id].score`, `scoreSource='tdf'`. Details: [Typ-5 im Detail](#typ-5-score-im-detail) |
+| `6` | entity-end | `6  time  id  type  score` — `type` = Exit-Code (`02` Ende, `04` eliminiert, `01` Kick, `17` Ref-Kick) | je Entity 1× (bei Elimination mitten im Spiel) | → `match_summary`-Ereignis (informativ, verändert den Zustand nicht) |
+| `7` | sm5-stats | `7  id  <23 benannte Felder>` = 24 Felder + Typ-Spalte | je Entity 1×, **nur SM5** — in Laserball nicht vorhanden | **offizielle Endstatistik** → `players[id].official`, überschreibt die SM5-Live-Zähler, `statsSource='tdf7'`. Details: [Typ-7 im Detail](#typ-7-sm5-endblock-im-detail) |
+| `8` | — | nicht dokumentiert / nicht beobachtet | — | – |
+| `9` | player-state | `9  time  entity  state` — ab v2.005 (SM5); in Laserball ab v2.004 | laufend | → `players[id].status` |
+| `3`–`9` | (alle In-Game-Zeilen) | Spalte 1 = Spielzeit in ms | – | → `elapsedTime`. **Ausnahme Typ 7**: hat keine `time`-Spalte und lässt `elapsedTime` unberührt |
+
+**Reihenfolge im echten Betrieb:** `0` → `1` → `2` (Teams) → `0100` (Start) →
+viele `3` (Logins, sobald Spieler aktiviert werden) → `4`/`5`/`9` (Spielverlauf)
+→ `6`/`7` (Endabrechnung) → `0101`. **`0100` leert die Spielerliste** — Logins
+kommen im echten Ablauf *danach*. `lf_simulate` hält diese Reihenfolge ein.
+
+Die Typ-7-Zeilen kommen **vor** `0101` — die offiziellen Endzahlen stehen also
+fest, bevor das Match als beendet gilt und weggeschrieben wird.
+
+---
+
+## Schema-Kommentarzeilen
+
+Ein TDF stellt (den meisten) seiner Zeilentypen eine Kommentarzeile voran, die
+die Spalten der folgenden Zeilen dieses Typs benennt:
+
+```
+;1/mission ⇥ type ⇥ desc ⇥ start ⇥ duration ⇥ penalty
+1 ⇥ 28 ⇥ Laserball Ranked ⇥ 20260916120000 ⇥ 900000 ⇥ 0
+```
+
+Form: `;<typ>/<name>` als erstes Feld, danach ein Spaltenname je Feld. Das erste
+Feld beschreibt dabei **Spalte 0 der Datenzeile**, also die Typ-Spalte selbst —
+`duration` steht im Beispiel auf Index 4, und genau dieser Index ist in der
+Datenzeile nutzbar.
+
+**Warum das wichtig ist:** die TDF-Versionen 2.000–2.006 unterscheiden sich fast
+ausschließlich in den Spalten (`duration` ab 2.001, `penalty` ab 2.003,
+`battlesuit` ab 2.003, `#rgb` ab 2.004, `memberId` in späten 2.006). Die
+Schema-Zeile ist damit die **zuverlässigste Quelle für Spaltenpositionen** —
+zuverlässiger als die Versionsnummer in Zeile 0 und weit zuverlässiger als eine
+feste Position. Sie ist außerdem der einzige belastbare Weg, die 23 benannten
+Felder des Typ-7-Blocks zuzuordnen.
+
+Wie lf_live sie behandelt:
+
+| | |
+|---|---|
+| **Früher** | jede `;`-Zeile wurde ersatzlos verworfen |
+| **Jetzt** | jede `;`-Zeile wird eingelesen und ihrem Zeilentyp zugeordnet |
+| Zuordnung | primär über das `<typ>/<name>`-Präfix des ersten Feldes; nennt es keinen Typ, gilt die Schema-Zeile für den Typ der **nächsten** Nicht-Kommentarzeile |
+| Namensvergleich | tolerant: Groß-/Kleinschreibung, `-`, `_` und Leerzeichen sind egal (`shots-hit` = `shotsHit` = `shots hit`) |
+| Vorrang | eine Schema-Zeile schlägt **immer** die fest verdrahtete Position |
+| Kein Schema | jede Abfrage meldet „unbekannt" und der jeweilige Zweig fällt auf seine bisherige Position zurück — Verhalten wie vorher |
+| Fehler | die Schema-Auswertung wirft nie und kann den Parser nicht anhalten |
+
+Ein Spaltenindex aus einer Schema-Zeile zählt **Tabulator-Spalten** — die
+Fallstricke dazu stehen unter
+[Tabulatoren, Leerzeichen und der Spaltenversatz](#tabulatoren-leerzeichen-und-der-spaltenversatz).
+
+> **Nicht jede Anlage schickt sie.** Ob Ihre Anlage `;`-Zeilen sendet und welche,
+> zeigt `scripts/inspect.js` — siehe
+> [Gegen die echte Anlage prüfen](#gegen-die-echte-anlage-prüfen).
+
+---
+
+## Feld-Referenz
+
+- **`time`** — Millisekunden seit `0100` (Mission Start). Vor dem Start ggf. 0/negativ.
+- **`id` / `actor` / `target` / `entity`**
+  - `#xxxxxxx` — **iplId**, weltweit eindeutige Laserforce-Mitglieds-ID.
+    Profil: `https://www.iplaylaserforce.com/mission-stats/?t={id-ohne-raute}`
+  - `@NNN` — **Hardware-ID** der Weste/des Ziels, nur je Zentrale eindeutig;
+    Gäste & Nicht-Spieler.
+  - lf_live entfernt `@`/`#` (`cleanId()`) und nutzt den Rest als String-Schlüssel.
+- **`category`** (Zeile 3, SM5-Rolle): `0` N/A · `1` Commander · `2` Heavy Weapons ·
+  `3` Scout · `4` Ammo Carrier · `5` Medic. In Laserball ist `category` immer `0`.
+- **`state`** (Zeile 9): `0` aktiv · `2` „resettable"/verwundbar (lf_live: „in Reset") ·
+  `3` deaktiviert/unverwundbar. (SM5-Respawn: `3` → 4000 ms → `2` → 4000 ms → `0`.)
+  Der Wert `1` erscheint in Laserball-Quellen als Synonym für „down".
+- **`mission type`** (Zeile 1): **`5` = Space Marines 5** · **`28` = Laserball Ranked**.
+  Andere Modi (7SM/Nexus, Junior, diverse Varianten) haben eigene, öffentlich
+  nicht dokumentierte Typ-Nummern. Wie lf_live damit umgeht und wie man die
+  Nummern der eigenen Anlage ermittelt: [GAMEMODES.md](GAMEMODES.md).
+- **Team-Index `5`** wird vom Parser als „kein echtes Team" behandelt (Neutral /
+  Nicht-Spieler) und beim Login übersprungen.
+
+---
+
+## Typ-1 (Mission) im Detail
+
+`1  <type>  <desc…>  <start>  [duration]  [penalty]`
+(`duration` ab v2.001, `penalty` ab v2.003)
+
+Diese eine Zeile liefert drei Dinge: die **Modus-Nummer**, den **Anzeigenamen**
+und die **Missionsdauer**. Sie kommt **vor** dem Mission-Start `0100`, und `0100`
+setzt weder Modus noch Dauer zurück.
+
+| Spalte | lf_live |
+|---|---|
+| `type` | Modus-Nummer → Registry → Familie. Schema zuerst, sonst Position 1. |
+| `desc` | Anzeigename des Modus, wenn nicht leer. Schema zuerst, sonst die Tokens zwischen `type` und den abschließenden Zahlen. Fremde Daten — nie als HTML ausgeben. |
+| `duration` | Spieluhr. Schema zuerst, Position nur als Rückfall. |
+
+### Die Dauer — und warum die alte Lesart falsch war
+
+**Früher** las der Parser schlicht die **vorletzte Spalte** als `duration`. Das
+funktionierte, aber nur zufällig: `start`, `duration` und `penalty` stehen alle
+numerisch am Zeilenende, und in der getesteten TDF-Version lag `duration`
+tatsächlich vorletzt.
+
+Die Lesart bricht in zwei realen Fällen:
+
+- **`penalty` fehlt** (TDF vor v2.003). Dann ist die vorletzte Spalte nicht
+  `duration`, sondern `start` — die Startzeit. Die Uhr bekommt einen
+  Zeitstempel als Spieldauer.
+- **Eine spätere TDF-Version hängt eine Spalte an.** Dann rutscht `duration`
+  weiter nach vorn. Dass das passiert, ist keine Theorie: in Typ 2 ist mit der
+  `#rgb`-Spalte ab v2.004 genau das bereits geschehen.
+
+**Jetzt gilt:**
+
+1. **Schema zuerst.** Nennt eine `;`-Schema-Kommentarzeile die Spalte
+   `duration`, wird genau diese gelesen.
+2. **Position nur als Rückfall.** Ohne Schema werden ausschließlich die letzten
+   drei Tokens betrachtet — dort liegen `start`, `duration` und `penalty`. Eine
+   Zahl mitten in der Missionsbeschreibung kann so nicht mehr fälschlich als
+   Dauer durchgehen. Der erste Kandidat, der die Prüfung unten besteht, gewinnt:
+   `duration` steht immer vor `penalty`, und `start` (ein Zeitstempel) fällt nie
+   in das Plausibilitätsfenster.
+3. **Einheiten-Heuristik.** Rohwert unter `10000` → als **Sekunden** gelesen und
+   mit 1000 multipliziert. Alles darüber → bereits Millisekunden.
+4. **Plausibilitätsprüfung.** Das Ergebnis muss zwischen **60 000 ms** (1 Minute)
+   und **7 200 000 ms** (2 Stunden) liegen. Andernfalls wird es verworfen.
+
+Kommt dabei kein Wert heraus, gilt die Dauer als **unbekannt**: die Spieluhr
+zählt dann **hoch** statt herunter. Mehr dazu in
+[GAMEMODES.md](GAMEMODES.md#die-spieluhr).
+
+---
+
+## Typ-2 (Team) im Detail
+
+`2  <index>  <name…>  <colour-enum>  <colour-desc>  [#rgb]`
+
+Der Team-**Name** sind die Tokens zwischen `index` und den **zwei** Werten
+(`colour-enum`, `colour-desc`), die dem `#rgb` vorausgehen. Fehlt `#rgb`
+(v2.003 und älter), nimmt der Parser Fallback-Farbe `#9ca3af` und den Namen bis
+Spaltenende. Der Parser hat eine reine Schutzgrenze auf `index` 0–31 (verhindert
+unbegrenztes Wachsen bei feindlichem Feed); echte Anlagen nutzen 0–7 plus Neutral.
+
+**`colour-enum`-Tabelle:** `0` None · `1` Red · `2` Green · `3` Yellow · `4` Blue ·
+`5` Aqua · `6` Purple · `7` White · `8` Orange · `9` Pink · `10` Black · `11` Fire ·
+`12` Ice · `13` Earth · `14` Crystal · `15` Rainbow.
+
+Der **Team-Namens-Synchronisierer** (`resolveTeamNames()`, aus dem Original
+übernommen) überschreibt den TDF-Teamnamen mit dem häufigsten `dbTeamName` aus
+der optionalen Namensliste, falls vorhanden.
+
+---
+
+## Typ-3 (Login nach 0100) im Detail
+
+`3  <time>  <id>  player  <name…>  <team>  <level>  <category>  [battlesuit]  [memberId]`
+
+Der Parser sucht ab dem Token `player` die **Signatur „drei Zahlen in Folge"**
+(Team, Level, Category); alle Tokens zwischen `player` und dieser Dreiergruppe
+sind der Name. Entities mit `team == 5` (Neutral / Nicht-Spieler wie Targets,
+Referees) werden **nicht** als Spieler angelegt.
+
+`level` und `category` wurden früher verworfen und werden **jetzt gemerkt**:
+`category` ist die SM5-Rolle und wird zusätzlich als Klartext (`roleLabel`)
+aufgelöst. `battlesuit` (ab v2.003) und `memberId` (späte 2.006) werden
+mitgenommen, **sofern eine Schema-Zeile sie benennt** — ohne Schema-Zeile gibt es
+für sie keine verlässliche Position, und sie bleiben leer.
+
+Ein Spieler bekommt beim Login außerdem die Zählerfelder seiner Modus-Familie:
+die zwölf Laserball-Zähler hat er immer, bei Familie `sm5` zusätzlich die 30
+SM5-Zähler. Siehe [GAMEMODES.md](GAMEMODES.md#die-zwei-familien).
+
+Logins kommen **nach** `0100` — der Start-Event hat die Spielerliste geleert.
+
+---
+
+## Typ-5 (Score) im Detail
+
+`5  <time>  <entity>  <old>  <delta>  <new>`
+
+Diese Zeile begleitet jedes punkterelevante Ereignis und enthält den **offiziellen
+Punktestand der Anlage**. Sie wurde früher nur als Info-Ereignis durchgereicht;
+der Punktestand wurde selbst gezählt. **Jetzt ist sie die Autorität** — für alle
+Modi, nicht nur für SM5.
+
+- `entity` kann ein **Team-Index** oder eine **Spieler-ID** sein. lf_live
+  unterscheidet das an der bekannten Spielerliste: ist `entity` eine bekannte
+  Spieler-ID, landet `new` als Spieler-Punktestand, sonst als Team-Punktestand.
+  Beides wird parallel geführt.
+- Gelesen wird die Spalte `new` (Schema zuerst, sonst Position 5), nicht `delta`.
+- Ab der ersten Typ-5-Zeile steht `scoreSource` auf `tdf`. `0100` setzt es
+  wieder auf `internal` zurück, damit ein Match nicht die Autorität des
+  Vormatches erbt.
+- Solange `scoreSource` auf `internal` steht, zählt lf_live Laserball-Tore wie
+  bisher selbst. Danach nicht mehr — das ist **der einzige** Eingriff in den
+  Laserball-Pfad. `goals`, das Tor-Ereignis, das Assist-Fenster und der
+  OBS-Auslöser bleiben davon unberührt.
+- Das bisherige `score`-Ereignis mit `old`/`delta`/`new` wird zusätzlich weiterhin
+  ausgegeben, unverändert.
+
+Gegen einen feindlichen Feed ist ein Team-Punktestand nur für einen plausiblen
+Team-Schlüssel (ein- oder zweistellig, maximal 32 verschiedene) zulässig — dieselbe
+Schutzgrenze wie bei Typ 2.
+
+---
+
+## Typ-7 (SM5-Endblock) im Detail
+
+`7  <id>  <23 benannte Felder>`
+
+**Die Feldzahl wird gern verwechselt.** Es sind **24 Felder** — `id` plus 23
+benannte Statistikfelder — und mit der vorangestellten Typ-Spalte ergeben sich
+**25 Tabulator-Spalten**. Die 23 benannten Felder beginnen also erst nach `7`
+und `id`, ab Spaltenindex 2.
+
+Typ-7-Zeilen kommen je Entity einmal am Matchende, **vor** `0101`. In Laserball
+gibt es sie nicht.
+
+**Die Zeile hat keine `time`-Spalte** — Spalte 1 ist die Entity-ID, nicht die
+Spielzeit. lf_live lässt `elapsedTime` bei Typ-7-Zeilen deshalb bewusst unberührt.
+
+### Feldreihenfolge (Positions-Rückfall)
+
+Diese Reihenfolge stammt aus der lfstats-`TDF_Spec` und wird **nur** verwendet,
+wenn die Anlage keine `;`-Schema-Zeile für Typ 7 geschickt hat. **Eine
+Schema-Zeile der Anlage hat immer Vorrang vor dieser Liste** — genau dafür ist
+die Schema-Auswertung da.
+
+| Spalte | Feld | Spalte | Feld |
+|---|---|---|---|
+| 0 | (Zeilentyp `7`) | 13 | `scoutRapid` |
+| 1 | `id` | 14 | `lifeBoost` |
+| 2 | `shotsHit` | 15 | `ammoBoost` |
+| 3 | `shotsFired` | 16 | `livesLeft` |
+| 4 | `timesZapped` | 17 | `shotsLeft` |
+| 5 | `timesMissiled` | 18 | `penalties` |
+| 6 | `missileHits` | 19 | `shot3Hit` |
+| 7 | `nukesDetonated` | 20 | `ownNukeCancels` |
+| 8 | `nukesActivated` | 21 | `shotOpponent` |
+| 9 | `nukesCancelled` | 22 | `shotTeam` |
+| 10 | `medicHits` | 23 | `missiledOpponent` |
+| 11 | `ownMedicHits` | 24 | `missiledTeam` |
+| 12 | `medicNukes` | | |
+
+Die Spalten 2 bis 24 sind die 23 benannten Felder; mit `id` ergeben sich die oft
+zitierten „24 Felder" und mit der Typ-Spalte 25 Tabulator-Spalten. Schickt eine
+Anlage mehr Spalten, sind sie hier nicht benannt und lassen sich ausschließlich
+über eine Schema-Zeile zuordnen.
+
+### Was lf_live damit macht
+
+1. Alle Werte landen **roh** unter `players[id].official`. Unbekannte
+   Zusatzfelder aus einer Schema-Zeile werden mitgenommen, nichts wird verworfen.
+2. Die Felder mit eindeutiger Entsprechung **überschreiben** die SM5-Live-Zähler.
+3. `players[id].statsSource` wechselt von `live` auf `tdf7`.
+4. Ein `sm5_stats`-Ereignis wird ausgegeben.
+
+Welches Feld welchen Zähler überschreibt und warum die Live-Zahlen davor eine
+Untergrenze sind, steht in
+[GAMEMODES.md](GAMEMODES.md#warum-die-sm5-live-zahlen-eine-untergrenze-sind).
+
+---
+
+## Typ-4-Event-Codes: gemeinsame Match-Steuerung
+
+Diese Codes gelten für **alle** Modi (`mode: 'all'`).
+
+| Code | Label | Kategorie | Bedeutung | Status |
+|---|---|---|---|---|
+| `0100` | Mission Start | match | Beginnt die Mission bei t=0; startet die Spieluhr. Der Parser leert Spielerliste, Ball und Events. | verified |
+| `0101` | Mission End | match | Beendet die Mission. In Laserball zusätzlich alle Spieler-Status → 0. Tatsächliche Dauer = dieser Zeitstempel. | verified |
+| `0201` | Miss | combat | Schuss/Wurf ins Leere. Sehr häufig, kein Score. Kommt in SM5 **und** Laserball vor. | verified |
+| `0900` | Achievement | other | Ingame-Achievement abgeschlossen. Rein informativ. | verified |
+| `0902` | Reward | other | Standort-Belohnung (z. B. Freispiel). Rein informativ. TDF ab v2.005. | verified |
+| `0901` | Achievement/Reward (Variante) | other | (unbestätigt) Nur in der lfstats-Laserball-Simulation neben `0900`/`0902` in der Ignorier-Liste; genaue Bedeutung unbekannt. | unverified |
+
+---
+
+## Typ-4-Event-Codes: Space Marines 5
+
+Modus-Nummer `5`. **Keine `11xx`-Codes.** Quelle: lfstats `docs/TDF_Spec.md`
+(Versionen 2.000–2.006) plus `apps/chomper/src/simulator.ts`. Score-Deltas in
+Klammern sind aus der Spezifikation, nicht von lf_live gezählt.
+
+| Code | Label | Kategorie | Bedeutung | Status |
+|---|---|---|---|---|
+| `0201` | Miss | combat | Fehlschuss, kein Treffer. Kein Score. | verified |
+| `0202` | Gen Miss | combat | Fehlschuss auf ein angeschlagenes Nicht-Spieler-Ziel; setzt dessen 3-Treffer-Zähler auf 0. | verified |
+| `0203` | Target Hit | combat | Treffer auf Nicht-Spieler-Ziel (`@NNN`); 3 Treffer in Folge zerstören es. | verified |
+| `0204` | Target Destroy | score | 3. Treffer zerstört das Ziel. Actor +1001. | verified |
+| `0205` | Player Hit | combat | Spieler beschädigt, nicht deaktiviert. Actor ±100, Ziel −20. | verified |
+| `0206` | Player Deactivate | combat | Trefferpunkte des Ziels auf 0 → Deaktivierung + Respawn. Score wie `0205`. | verified |
+| `0209` | Warbot Deactivate | combat | Warbot deaktiviert einen Spieler: −1 Leben. Kein Score, zählt nicht als `timesZapped`. | verified |
+| `0300` | Missile Lock | combat | Actor schaltet auf ein Ziel auf; geht jedem Raketenschuss voraus. | verified |
+| `0301` | Missile Miss vs Target | combat | Rakete verfehlt Nicht-Spieler-Ziel; 3-Treffer-Zähler zurück. | verified |
+| `0303` | Missile Destroy Target | score | Rakete zerstört Nicht-Spieler-Ziel in einem Schlag. Actor +1001. | verified |
+| `0304` | Missile Miss vs Player | combat | Rakete verfehlt einen Spieler. Kein Score. | verified |
+| `0306` | Missile Hit Player | combat | Rakete deaktiviert einen Spieler in einem Schlag. Actor ±500, Ziel −100. | verified |
+| `0308` | Missile Hit Player (Eigenbeschuss) | combat | Raketen-Eigenbeschuss; Ziel immer Mitspieler. Actor −500, Ziel −100. | verified |
+| `0400` | Rapid Fire Activate | special | Scout aktiviert Dauerfeuer (10 SP). Endet implizit bei Ammo-Resupply (`0500`). | verified |
+| `0404` | Nuke Activate | special | Commander startet Nuke-Sequenz (20 SP). | verified |
+| `0405` | Nuke Detonate | special | Nuke detoniert: Gegnerteam −3 Leben, sofort deaktiviert. Commander +500. | verified |
+| `0500` | Ammo Resupply | player | Munition für **einen** Mitspieler (Ammo Carrier oder Notfall-Beacon). Ziel 8 s deaktiviert. Kein Score. | verified |
+| `0502` | Lives Resupply | player | Leben für **einen** Mitspieler (Medic oder Notfall-Beacon). Ziel 8 s deaktiviert. Kein Score. | verified |
+| `0510` | Team Ammo Resupply | player | Ammo-Carrier-Spezial (15 SP): Munition für alle aktiven Mitspieler, ohne Deaktivierung. | verified |
+| `0512` | Team Lives Resupply | player | Medic-Spezial (10 SP): Leben für alle aktiven Mitspieler, ohne Deaktivierung. | verified |
+| `0600` | Penalty | player | Schiedsrichter-Strafe. `actor` = bestrafter Spieler; wird deaktiviert. Score-Abzug = `penalty` aus Zeile 1 (meist 0). Erzeugt Zeile 5 + Zeile 9. | verified |
+| `0900` | Achievement | other | Rein informativ. | verified |
+| `0902` | Reward | other | Rein informativ. Ab v2.005. | verified |
+| `0B00` | Beacon Claim | special | Finaler (3.) Treffer auf ein Beacon-Ziel. Sollte in normalem SM5 nicht auftreten (nur bei aktiven Beacons aus anderem Modus). | verified |
+| `0B03` | Base Award | score | Bei vorzeitigem Spielende durch Team-Elimination wird ein Ziel automatisch einem Spieler des Siegerteams zugesprochen. +1001. | verified |
+
+`0100` / `0101` siehe [gemeinsame Match-Steuerung](#typ-4-event-codes-gemeinsame-match-steuerung).
+
+---
+
+## Typ-4-Event-Codes: Laserball
+
+Modus-Nummer `28` (`Laserball Ranked`). Eigener `11xx`-Codesatz; Zeilenlayout wie
+SM5. Quellen: lfstats `docs/Laserball_TDF_Spec.md` + `apps/chomper/src/laserball/`
+(`types.ts` `LB_EVENT`, `simulator.ts`) **und** — unabhängig davon — das originale
+`lf_overlay/server.js`. Die **fett** markierten wertet der aktuelle Parser aus.
+
+| Code | Label | Kategorie | Bedeutung | Status |
+|---|---|---|---|---|
+| `0201` | Miss | combat | Fehlwurf ins Leere. Kein Score, nicht im Replay-Log. | verified |
+| **`1100`** | Pass | possession | Ball zu einem Mitspieler. Ball → Ziel, Assist-Fenster (10 s). | verified |
+| **`1101`** | Tor | score | Actor erzielt ein Tor; erzeugt genau eine Zeile 5 (`delta = 1`). Assist bei Pass/Clear ≤ 10 s zuvor an den Schützen. | verified |
+| **`1102`** | Tor (Variante) | score | (unbestätigt) Zweiter Tor-Code (lfstats-Konstante `GOAL_B`). Beide Quellen behandeln ihn sicherheitshalber wie ein Tor, in Beispieldaten nie beobachtet. | unverified |
+| **`1103`** | Steal | possession | Actor nimmt einem Gegner den Ball ab. Ball → Actor. | verified |
+| **`1104`** | Block | combat | Actor taggt/blockt einen Spieler. lf_live wertet es als **Reset**, wenn das Ziel Status 2 hat, sonst als **Block**. | verified |
+| `1105` | Round Start | match | Beginn einer Ballbesitz-Runde. Parser: als `round_start`-Event ausgegeben, keine Rundenstatistik. | verified |
+| **`1106`** | Round End | match | Ende einer Runde; Ball wird frei. | verified |
+| **`1107`** | Get Ball | possession | Actor bekommt bei Rundenstart den Ball. Ball → Actor. | verified |
+| **`1108`** | Ball Timeout | possession | Ball zu lange gehalten; Ballbesitz endet, Ball frei. | verified |
+| **`1109`** | Clear | possession | Defensiver Clear/Pass. Ball → Ziel, Assist-Fenster. | verified |
+| **`110A`** | Failed Clear | possession | Clear-Versuch fehlgeschlagen. | verified |
+| `110B` | Target Reset (self) | combat | Actor hat sein eigenes Ziel resettet. Parser: als `reset`-Event ausgegeben; kein `resetsDone`-Zähler. | verified |
+| `110C` | Target Reset (player) | combat | Ziel-Spieler wurde resettet. Parser: als `reset`-Event ausgegeben; kein Zähler. | verified |
+| `0900` / `0901` / `0902` | Achievement | other | Informativ; nicht interpretiert, nicht gespeichert. `0901` unbestätigt. | verified / unverified |
+
+`0100` / `0101` siehe [gemeinsame Match-Steuerung](#typ-4-event-codes-gemeinsame-match-steuerung).
+`actor`/`target` werden aus Tokens mit führendem `@`/`#` gelesen.
+
+---
+
+## Typ-4-Event-Codes: 7SM / Nexus
+
+**Keine belastbare Quelle gefunden.** Weder lfstats noch das originale `lf_overlay`
+noch andere öffentliche TDF-Parser dokumentieren einen eigenen Event-Codesatz für
+7SM (Nexus). Anhaltspunkte:
+
+- 7SM/Nexus läuft auf derselben Laserforce-Firmware wie SM5 und ist regelmechanisch
+  eine SM5-Abwandlung → **sehr wahrscheinlich derselbe `0xxx`-Codesatz wie SM5**,
+  evtl. mit zusätzlichen modus-spezifischen Codes.
+- Die Modus-Nummer in Zeile 1 (`type`) ist **unbekannt** (nicht `5`, nicht `28`).
+
+Bis eine echte 7SM-Aufzeichnung vorliegt: **als SM5 behandeln** und jede
+Abweichung mit `scripts/inspect.js` katalogisieren. Alle 7SM-spezifischen Codes
+gelten als `unbestätigt`.
+
+Genau so verhält sich lf_live: eine unbekannte Modus-Nummer läuft als Familie
+`sm5` — siehe [Modus-Erkennung](#modus-erkennung) und [GAMEMODES.md](GAMEMODES.md).
+
+---
+
+## Spielvarianten
+
+Laserforce kennt zahlreiche SM5-Varianten (Attack & Defend, Zombies, VIP,
+Kill Confirmed, Zone Control / Domination, Highlander, 2v2, Junior, …). Öffentlich
+liegt **keine** Aufschlüsselung eigener Event-Codes je Variante vor.
+
+| Variante | Annahme | Status |
+|---|---|---|
+| Attack & Defend, Highlander, 2v2, Junior u. a. reine Regelvarianten | Nutzen den **SM5-Codesatz** unverändert; Unterschiede stecken in Regeln/Dauer/Scoring, nicht im Log-Format. | unbestätigt |
+| Zombies | Vermutlich SM5-Codesatz + evtl. modus-spezifische Codes für „Infektion". Kein Code bekannt. | unbestätigt |
+| VIP | Vermutlich SM5-Codesatz; ein „VIP down"-Marker könnte über einen der `0xxx`-Codes oder Zeile 6 laufen. Kein Code bekannt. | unbestätigt |
+| Kill Confirmed / Zone Control / Domination | Vermutlich SM5-Codesatz + Zonen-/Bestätigungs-Codes. `0B00`/`0B03` (Beacon/Base) könnten hier regulär auftreten. Nicht verifiziert. | unbestätigt |
+| Laserball-Varianten | Nutzen den `11xx`-Codesatz (Modus `28`). | verified |
+
+**Kurz:** die meisten Varianten teilen sich den SM5-Codesatz. `eventCatalog.js`
+bildet daher nur `sm5` / `laserball` / `all` ab; Varianten werden auf `sm5`
+gemappt. Modus-spezifische Sonder-Codes sind eine offene Lücke (siehe unten).
+
+---
+
+## Modus-Erkennung
+
+Aus Protokollsicht kurz zusammengefasst — die ausführliche Betriebsanleitung
+steht in [GAMEMODES.md](GAMEMODES.md).
+
+| Merkmal | Aussagekraft |
+|---|---|
+| **`type` in der Typ-1-Zeile** | Das Primärmerkmal. `5` = SM5, `28` = Laserball Ranked, alles andere unbekannt. Liegt ab der ersten Zeile der Mission vor. |
+| **`11xx`-Codes** | Beweisen Laserball. lf_live stellt die Familie zur Laufzeit darauf um, falls die Typ-1-Zeile etwas anderes sagte oder fehlte. |
+| **`02xx`–`06xx`, `0Bxx`** | Sprechen für SM5. Sie stellen die Familie ebenfalls um — aber **nie**, wenn die Modus-Nummer `28` ist. |
+| **`0100`, `0101`, `0201`, `09xx`** | Kommen in **beiden** Familien vor und taugen nicht zur Unterscheidung. `0201` insbesondere ist in Laserball der Fehlwurf. |
+| **Fehlende Typ-7-Zeilen** | *Sekundärmerkmal.* Fehlen in einer Mission Typ-7-Zeilen völlig, **spricht das gegen SM5** — SM5 schickt am Matchende je Spieler eine, Laserball gar keine. Die Einschränkung: das steht erst **am Matchende** fest und taugt deshalb nicht zur Erkennung während des Spiels, sondern nur zur nachträglichen Auswertung einer Aufzeichnung. Genau dafür weist `scripts/inspect.js` die Typ-7-Zahl je Modus aus. |
+
+---
+
+## Assist-Fenster & Ballbesitz
+
+- **Assist-Fenster (Laserball):** 10 000 ms. Ein Tor (`1101`/`1102`) zählt einen
+  Assist für den letzten Passer/Clearer, wenn dessen `1100`/`1109` an den Schützen
+  ≤ 10 s zurückliegt. Nach `1101`/`1102`/`1103` wird die Pass-Historie geleert.
+- **Ballbesitz (Laserball):** ein einzelner `ballHolderId` wird geführt. Gewinn bei
+  `1107` (Actor), `1100`/`1109` (Ziel), `1103` (Actor). Verlust (Ball frei) bei
+  `1101`, `1102`, `1106`, `1108`. Bei `0101` wird der Ball ebenfalls frei.
+- **Reset vs. Block (`1104`):** hängt vom `status` des Ziels ab — Status 2 → Reset,
+  sonst Block. Der Status kommt aus Zeile 9.
+
+Objekt-Formen: [API.md](API.md).
+
+---
+
+## Was lf_live daraus macht
+
+### Zeilentypen
+
+| TDF | → lf_live |
+|---|---|
+| `;`-Schema-Kommentar | Spaltennamen je Zeilentyp; **alle** Spalten unten werden darüber aufgelöst, Positionen nur als Rückfall |
+| Zeile 0 | ⚪ ignoriert (Version nicht ausgewertet) |
+| Zeile 1 (Mission) | `mode` (Nummer, Familie, Anzeigename) + `missionDesc`; `duration` und `durationKnown`; `mode_change`-Event |
+| Zeile 2 | `teams[index] = {name, color}` |
+| Zeile 3 (`player`, `team != 5`) | Spieler angelegt; `player_join`-Event; zusätzlich `level`, `category`, `roleLabel`, `battlesuit`, `memberId` und die Zählerfelder der Familie |
+| Zeile 5 (Score) | **autoritativer Punktestand** → `scores[team]` bzw. `players[id].score`, `scoreSource='tdf'`; zusätzlich weiterhin das `score`-Event mit `teamId`/`old`/`new`/`delta` |
+| Zeile 6 (Entity-Ende) | `match_summary`-Event mit `entityId`/`exitCode`/`score` (informativ, kein Zustandswechsel) |
+| Zeile 7 (SM5-Endblock) | `players[id].official` (Rohwerte), überschreibt die SM5-Live-Zähler, `statsSource='tdf7'`, `sm5_stats`-Event |
+| Zeile 9 | `players[id].status`; `status`-Event |
+
+### Typ-4-Codes: Laserball (`11xx`) — unverändert
+
+| TDF | → lf_live |
+|---|---|
+| `0100` | `match_start`; `players`/`ballHolderId`/`events` geleert, Scores → 0, neue `matchId`, `scoreSource` → `internal`. **`mode` und `duration` bleiben stehen** (Typ 1 kam davor) |
+| `0101` | `match_end`; Ball frei |
+| `1100` | `pass`; `passesDone/Received++`; Ball→target; Assist-Fenster (10 s) |
+| `1109` | `clear`; `clearsDone/Received++`; Ball→target; Assist-Fenster |
+| `1101` / `1102` | `goal`; `goals++`; Assist wenn Pass/Clear an Schützen ≤ 10 s zuvor. `scores[team]++` **nur solange `scoreSource === 'internal'`** |
+| `1103` | `steal`; `stealsDone/Received++`; Ball→actor |
+| `1104` | `block` bzw. `reset` (Ziel-Status 2) |
+| `110A` | `failed_clear` |
+| `1107` | Ball→actor |
+| `1106` / `1108` | Ball frei (kein eigenes Event) |
+| `1105` | `round_start`-Event (nur Event, keine „pro Runde"-Statistik) |
+| `110B` / `110C` | `reset`-Event (explizit; zusätzlich zum aus `1104`+Status abgeleiteten Reset — State unverändert) |
+
+### Typ-4-Codes: SM5 (`0xxx`) — neu gezählt
+
+Diese Zählung läuft **nur**, solange die Modus-Familie `sm5` ist, und ist vom
+`11xx`-Zweig strikt getrennt.
+
+| TDF | → lf_live (Zähler) |
+|---|---|
+| `0201` / `0202` | Actor: `misses`, `shotsFired` |
+| `0203` | Actor: `targetHits`, `shotsHit`, `shotsFired` |
+| `0204` | Actor: `targetDestroys`, `shotsHit`, `shotsFired` |
+| `0205` | Gegner: Actor `shotsHit`+`shotsFired`, Ziel `timesHit` · eigenes Team: Actor `shotTeam`+`shotsFired`, Ziel `timesHitByTeam` |
+| `0206` | wie `0205`, zusätzlich Actor `deactivations`, Ziel `timesDeactivated` |
+| `0209` | Ziel: `timesDeactivated` (Warbot — kein Actor-Credit) |
+| `0300` | Actor: `missileLocks` |
+| `0301` / `0304` | Actor: `missileMisses` |
+| `0303` | Actor: `missileDestroys` |
+| `0306` | Actor: `missileHits` · Ziel: `timesMissiled` |
+| `0308` | Actor: `missileTeam` · Ziel: `timesMissiled` |
+| `0400` | Actor: `rapidFires` |
+| `0404` / `0405` | Actor: `nukesActivated` / `nukesDetonated` |
+| `0500` | Actor: `ammoResupplies` · Ziel: `ammoReceived` |
+| `0502` | Actor: `livesResupplies` · Ziel: `livesReceived` |
+| `0510` / `0512` | Actor: `teamAmmoResupplies` / `teamLivesResupplies` |
+| `0600` | Actor: `penalties` |
+| `0B00` / `0B03` | Actor: `beaconClaims` / `baseAwards` |
+| `0900` / `0901` | Actor: `achievements` |
+| `0902` | Actor: `rewards` |
+
+**`shotsFired` wird nur dort erhöht, wo die Tabelle es sagt** — Laserforce meldet
+keinen eigenen „Schuss"-Event. Die Live-Zahl ist damit eine **Untergrenze**; der
+Typ-7-Endblock korrigiert sie am Matchende. Ausführlich:
+[GAMEMODES.md](GAMEMODES.md#warum-die-sm5-live-zahlen-eine-untergrenze-sind).
+
+### Beschreibende Events
+
+| TDF | → lf_live |
+|---|---|
+| SM5-`02xx`/`03xx`/`04xx`/`05xx`/`06xx`/`0Bxx`/`09xx` | eigenes Event (`miss`, `player_hit`, `missile_*`, `nuke_*`, `resupply`, `penalty` …), `category` aus `eventCatalog` |
+| alle übrigen Typ-4-Codes | generisches `lf_event` mit `code`+`category`+`label` (abschaltbar: `LF_EMIT_UNKNOWN_EVENTS=false`) |
+
+Diese beschreibenden Events sind **rein additiv** (seit v1.1): sie verändern
+`gameState` nicht, lösen keinen State-Push aus und ändern kein bestehendes
+Event. Für jeden Code, den der Kern-Parser schon vorher behandelt hat, ist sein
+Verhalten unverändert — die neuen Zählungen laufen in einem getrennten Zweig.
+
+`describe(code)` / `phrase(evt)` aus [`src/eventCatalog.js`](../src/eventCatalog.js)
+liefern Label, Modus, Kategorie und einen deutschen Klartext-Satz zu **jedem**
+Code (auch unbekannten) — ohne je zu werfen. Sie sind rein additiv und für
+Anzeigen/Overlays gedacht.
+
+---
+
+## Bekannte Lücken / unbestätigt
+
+Es ist **erwartet**, dass diese Liste Lücken hat. Alles hier ist entweder nicht
+öffentlich dokumentiert oder nur schwach belegt.
+
+| Thema | Was fehlt / unklar | Status |
+|---|---|---|
+| **7SM / Nexus** | Kein eigener Codesatz und keine Modus-Nummer bekannt. Annahme: = SM5. | unbestätigt |
+| **SM5-Varianten** (Zombies, VIP, Kill Confirmed, Zone Control, Domination …) | Mögliche modus-spezifische Sonder-Codes (Infektion, VIP-down, Zonen-Capture) sind nirgends dokumentiert. | unbestätigt |
+| **`1102` (Tor-Variante)** | Als Konstante `GOAL_B` in lfstats, aber in keiner Beispieldatei beobachtet. | unbestätigt |
+| **`0901`** | Erscheint nur in einer Ignorier-Liste neben `0900`/`0902`; Bedeutung unbekannt. | unbestätigt |
+| **Nicht belegte `0xxx`-Codes** | u. a. `0207`, `0208`, `020A+`, `0302`, `0305`, `0307`, `0309+`, `0401`–`0403`, `0406+`, `0501`, `0503`–`0509`, `0511`, `0513+`, `0601+`, `0700`–`08FF`, `0B01`, `0B02`, `0B04+` sind in keiner Quelle beschrieben. | Lücke |
+| **`1000`–`10FF` / `12xx+`** | Kein `10xx`- oder `12xx`-Laserball-Code bekannt; nur `11xx` belegt. | Lücke |
+| **Zeilentyp `8`** | Nicht dokumentiert, nicht beobachtet. | Lücke |
+| **Score-Deltas** | Die `±100 / −20 / +1001 / +500`-Angaben stammen aus der lfstats-Spezifikation, nicht aus lf_live-Zählung. Gegen Zeile 5 der echten Anlage prüfen. | teils unbestätigt |
+| **Explizite Resets `110B`/`110C`** | Codes belegt, Bedeutung/Auslöser nicht gegen echte Anlage verifiziert. Werden jetzt als `reset`-Event ausgegeben, fließen aber nicht in `resetsDone`/`resetsReceived` (die kommen weiter aus `1104`+Status). | teilweise |
+| **`1105` Round Start** | Wird als `round_start`-Event ausgegeben, aber es gibt weiterhin keine „pro Runde"-Statistik. | offen |
+| **Modus-Nummern außer `5` und `28`** | Keine weitere Nummer ist belegt. 7SM/Nexus und sämtliche SM5- und Laserball-Varianten haben unbekannte Nummern und müssen an der eigenen Anlage ermittelt werden ([GAMEMODES.md](GAMEMODES.md#eigene-modus-nummern-ermitteln-und-eintragen)). | Lücke |
+| **Typ-7-Feldreihenfolge** | Die 23 Feldnamen stammen aus der lfstats-`TDF_Spec` und sind nicht gegen eine echte Anlage geprüft. Eine `;`-Schema-Zeile der Anlage hat Vorrang und macht die Frage gegenstandslos. | teils unbestätigt |
+| **Zuordnung Typ-7 → Live-Zähler** | Welches Typ-7-Feld welchen SM5-Live-Zähler überschreibt, ist aus den Feldnamen erschlossen (`shotOpponent` → `deactivations`, `timesZapped` → `timesDeactivated`, `missiledOpponent` → `missileHits`). Nicht verifiziert. | unbestätigt |
+| **`shotsFired` live** | Laserforce meldet keinen Schuss-Event. Die Live-Zahl ist systematisch zu niedrig, bis der Typ-7-Block sie korrigiert. Für Laserball und für SM5-Zähler ohne Typ-7-Pendant bleibt es dabei. | bekannte Grenze |
+| **Beschreibung endet auf einer Zahl** | Ohne Tabulatoren **und** ohne Schema-Zeile kann das letzte Token einer auf eine Zahl endenden Missionsbeschreibung verlorengehen. Mit Tabulator oder Schema-Zeile korrekt. | bekannte Grenze |
+| **Offizieller Score / Endstand** | Zeile 5 ist jetzt die Autorität für `gameState.scores` und `players[id].score`, Zeile 7 die Autorität für die SM5-Endstatistik. Nicht übernommen wird weiterhin der Score aus Zeile 6 (bleibt rein informativ). | weitgehend geschlossen |
+| **Farb-Enum → RGB** | Fallback-RGB pro `colour-enum` (für v2.003-Feeds ohne `#rgb`) nicht implementiert. | offen |
+
+---
+
+## Quellen
+
+| Quelle | URL | Autorität |
+|---|---|---|
+| **lfstats — TDF-Spezifikation (SM5)** | `https://github.com/zmaniacz/lfstats/blob/main/docs/TDF_Spec.md` | **Haupt-Quelle.** Community-reverse-engineert, nicht offiziell von Laserforce. Aber: sehr detailliert (Versionen 2.000–2.006, alle Zeilentypen, alle Codes, Score-Deltas), aktiv gepflegt (2026), und Grundlage der öffentlichen SM5-Turnier-Statistikseite. |
+| **lfstats — Laserball-TDF-Spezifikation** | `https://github.com/zmaniacz/lfstats/blob/main/docs/Laserball_TDF_Spec.md` | Delta zu oben. Selbst ein Port einer europäischen Referenz-Implementierung (`process_logs.php`), die dort als „authoritative spec" bezeichnet wird. |
+| **lfstats — Parser & Simulator** | `https://github.com/zmaniacz/lfstats/tree/main/apps/chomper/src` (`parser.ts`, `simulator.ts`, `laserball/types.ts`, `laserball/simulator.ts`) | Ausführbarer Beleg der obigen Specs. `laserball/types.ts` enthält die `LB_EVENT`-Konstantentabelle. |
+| **lfstats — Penalty-Definitionen** | `https://github.com/zmaniacz/lfstats/blob/main/docs/SM5-penalty-definitions.md` | Kontext zu `0600`. |
+| **Original `lf_overlay/server.js`** | lokal: `C:\Users\menze\Desktop\lf_overlay\server.js` (von Dritten übergeben) | **Unabhängige Zweitquelle.** Bestätigt den Laserball-`11xx`-Satz sowie `0100`/`0101`/`0201`/`0900` exakt (deckungsgleiche `switch`-Fälle und Kommentare). Enthält keine SM5-`0xxx`-Auswertung. |
+| lfstats — Doku-Index & Chomper-Design | `https://github.com/zmaniacz/lfstats/blob/main/docs/README.md`, `.../docs/chomper-design.md` | Einordnung, Verweis auf `process_logs.php` als Laserball-Referenz. |
+| **Der Stream der eigenen Anlage** | `scripts/inspect.js` → `inspect-report.json` | **Die einzige Quelle, die eure Firmware wirklich beschreibt.** Modus-Nummern außer `5`/`28`, das tatsächliche Vorhandensein von `;`-Schema-Zeilen und die reale Feldzahl in Typ 7 lassen sich nur so belegen. Alles in dieser Datei, was nicht aus einer Aufzeichnung stammt, ist Fremdquelle. |
+
+Nicht als Quelle brauchbar: `spookybear0/laserforce.py` (nur die iPlayLaserforce-Web-API,
+kein TDF); diverse gleichnamige „TDF"-Projekte (Trusted Data Format, TheDraw-Fonts)
+sind unverwandt.
+
+**Konfliktfälle zwischen den Quellen:** keine inhaltlichen Widersprüche gefunden.
+lfstats und `server.js` benennen dieselben `11xx`-Codes und behandeln `1104`
+identisch (Reset vs. Block über den Ziel-Status). Wo `server.js` schweigt (der
+gesamte SM5-`0xxx`-Bereich), ist lfstats die einzige Quelle — entsprechend als
+`verified` geführt, weil dort feldgenau spezifiziert, aber ohne zweite
+Bestätigung.
+
+---
+
+## Gegen die echte Anlage prüfen
+
+```bash
+node scripts/inspect.js 9100        # bare TCP server, interpretiert nichts
+```
+
+Den Laserforce-Export **temporär** auf `<PC>:9100` stellen, ein Match spielen,
+`Ctrl+C`. `inspect.js` katalogisiert und schreibt zusätzlich
+`inspect-report.json` ins aktuelle Verzeichnis:
+
+| Abschnitt | Wofür |
+|---|---|
+| **LINE TYPES** | jeder gesehene Zeilentyp mit Häufigkeit und Beispielzeile |
+| **TYPE-4 EVENT CODES** | jeder Event-Code mit Häufigkeit und der Form seiner ID-Tokens (`@` Hardware / `#` iplId) |
+| **SCHEMA-KOMMENTARE** | jede `;`-Zeile mit ihren Spaltennamen **und deren Index**. Damit lässt sich prüfen, ob eure Firmware Schema-Zeilen schickt und wo `duration` in Typ 1 bzw. die 23 Felder in Typ 7 wirklich liegen. Schickt sie keine, sagt der Abschnitt das ausdrücklich |
+| **TYP-7-ZEILEN** | tatsächliche Spaltenzahl der SM5-Endstatistik, im Vergleich zu den erwarteten 24 Feldern + Typ-Spalte |
+| **SPIELMODI** | jede Typ-1-Zeile nach Modus-Nummer, mit Beschreibung, Dauer-Quelle, Zeilentypen, Typ-7-Zahl, allen Event-Codes dieses Modus und der Rohzeile |
+| **WAS JETZT ZU TUN IST** | die zu meldenden Zeilen für Modi, die lf_live nicht kennt |
+
+Damit lässt sich die obige Liste gegen eure Firmware verifizieren — besonders
+für 7SM/Nexus, Varianten und die als `unbestätigt` markierten Codes.
+
+Das Werkzeug meldet außerdem, wenn die Schema-Spalte `duration` und die alte
+Heuristik „vorletzte Spalte" **verschiedene** Werte liefern — genau der Fall, der
+unter [Typ-1 im Detail](#typ-1-mission-im-detail) beschrieben ist.
+
+Die Schritt-für-Schritt-Anleitung, wie man daraus eine neue Modus-Nummer
+einträgt, steht in
+[GAMEMODES.md](GAMEMODES.md#eigene-modus-nummern-ermitteln-und-eintragen).

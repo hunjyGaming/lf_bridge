@@ -1,0 +1,43 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <meta name="color-scheme" content="dark" />
+  <meta name="robots" content="noindex, nofollow" />
+  <title>LF Live — Einrichten</title>
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%230a0a0e'/%3E%3Crect x='9' y='9' width='14' height='14' rx='3' fill='%23ffb020'/%3E%3C/svg%3E" />
+  <link rel="stylesheet" href="styles.css" />
+</head>
+<body class="login-body">
+
+<main class="login-wrap">
+  <form class="login-card" id="setup-form" autocomplete="on">
+    <div class="wordmark">LF&nbsp;<b>LIVE</b></div>
+    <span class="eyebrow">Erste Einrichtung</span>
+    <h1>Passwort vergeben</h1>
+    <p class="muted">Für diese Konsole ist noch kein Admin-Passwort gesetzt. Bis
+      das erledigt ist, ist alles außer dieser Seite gesperrt.</p>
+
+    <label for="pw1">Admin-Passwort
+      <input id="pw1" name="new-password" type="password" autocomplete="new-password" minlength="8" required autofocus />
+    </label>
+    <label for="pw2">Zur Bestätigung wiederholen
+      <input id="pw2" name="confirm-password" type="password" autocomplete="new-password" minlength="8" required />
+    </label>
+
+    <button id="setup-btn" type="submit">Passwort setzen und anmelden</button>
+    <p class="login-msg" id="setup-msg" role="alert" hidden></p>
+
+    <p class="login-foot muted">
+      Mindestens 8 Zeichen. Danach lohnt sich unter <b>Einstellungen →
+      Start-Benachrichtigung</b> ein Kanal (Discord, ntfy, E-Mail): der meldet
+      dir bei jedem Start IP und Port — und liefert einen Code, falls du dich
+      später mal aussperrst.
+    </p>
+  </form>
+</main>
+
+<script src="setup.js"></script>
+</body>
+</html>

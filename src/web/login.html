@@ -1,0 +1,60 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <meta name="color-scheme" content="dark" />
+  <meta name="robots" content="noindex, nofollow" />
+  <title>LF Live — Anmelden</title>
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%230a0a0e'/%3E%3Crect x='9' y='9' width='14' height='14' rx='3' fill='%23ffb020'/%3E%3C/svg%3E" />
+  <link rel="stylesheet" href="styles.css" />
+</head>
+<body class="login-body">
+
+<main class="login-wrap">
+  <form class="login-card" id="login-form" autocomplete="on">
+    <div class="wordmark">LF&nbsp;<b>LIVE</b></div>
+    <span class="eyebrow">Konsole</span>
+    <h1>Anmelden</h1>
+    <p class="muted" id="login-lead">Diese Konsole ist mit einem Admin-Passwort geschützt.</p>
+
+    <label for="pw">Admin-Passwort
+      <input id="pw" name="password" type="password" autocomplete="current-password" required autofocus />
+    </label>
+
+    <button id="login-btn" type="submit">Anmelden</button>
+    <p class="login-msg" id="login-msg" role="alert" hidden></p>
+
+    <p class="login-foot muted">
+      <button type="button" class="linkish" id="forgot">Passwort vergessen?</button>
+    </p>
+  </form>
+
+  <!-- Wiederherstellung: Code kommt über den Benachrichtigungskanal -->
+  <form class="login-card" id="recover-form" hidden autocomplete="off">
+    <span class="eyebrow">Wiederherstellung</span>
+    <h1>Neues Passwort</h1>
+    <p class="muted" id="recover-lead">Wir schicken dir einen Code über den
+      eingerichteten Benachrichtigungskanal.</p>
+
+    <button type="button" id="send-code">Code senden</button>
+
+    <label for="code">Code aus der Nachricht
+      <input id="code" type="text" inputmode="latin" autocapitalize="characters" placeholder="XXXX-XXXX-XXXX" />
+    </label>
+    <label for="newpw">Neues Passwort
+      <input id="newpw" type="password" autocomplete="new-password" minlength="8" />
+    </label>
+
+    <button id="recover-btn" type="submit">Passwort setzen</button>
+    <p class="login-msg" id="recover-msg" role="alert" hidden></p>
+
+    <p class="login-foot muted">
+      <button type="button" class="linkish" id="back-to-login">Zurück zur Anmeldung</button>
+    </p>
+  </form>
+</main>
+
+<script src="login.js"></script>
+</body>
+</html>

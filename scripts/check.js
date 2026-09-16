@@ -1,0 +1,1117 @@
+'use strict';
+
+const assert = require('assert');
+const fs = require('fs');
+const os = require('os');
+const path = require('path');
+
+const mods = [
+  '../src/config', '../src/logger', '../src/engine', '../src/localRoster', '../src/statsWriter',
+  '../src/tcpIngest', '../src/outputs', '../src/streamServer', '../src/apiServer',
+  '../src/auth', '../src/netinfo', '../src/notify', '../src/smtp',
+];
+let failed = 0;
+for (const m of mods) {
+  try { require(m); console.log(`  ok    ${m}`); }
+  catch (err) { failed++; console.error(`  FAIL  ${m}\n        ${err.stack}`); }
+}
+
+try {
+  const { normalize } = require('../src/config');
+  const c = normalize({
+    http: { port: '99999' },
+    outputs: [
+      { kind: 'webhook', url: 'ftp://x' },
+      { kind: 'webhook', url: 'https://ok.example/h', events: ['goal'] },
+      { kind: 'tcp', host: '10.0.0.5', port: '7000', enabled: true },
+    ],
+    streamServer: { enabled: true, port: '99999' },
+    cors: ['https://ok.example', 42, 'https://two.example'],
+    rateLimitPerMin: '-5',
+  });
+  assert.strictEqual(c.http.port, 65535, 'port clamped');
+  assert.strictEqual(c.outputs[0].url, '', 'non-http webhook url rejected');
+  assert.strictEqual(c.outputs[1].url, 'https://ok.example/h', 'https webhook kept');
+  assert.strictEqual(c.outputs[2].kind, 'tcp', 'tcp output kept');
+  assert.strictEqual(c.outputs[2].port, 7000, 'tcp port coerced to number');
+  assert.strictEqual(c.streamServer.port, 65535, 'stream server port clamped');
+  assert.strictEqual(c.streamServer.host, '127.0.0.1', 'stream server binds localhost by default');
+  assert.deepStrictEqual(c.cors, ['https://ok.example', 'https://two.example'], 'cors: strings only');
+  assert.strictEqual(c.rateLimitPerMin, 0, 'negative rate limit clamped to 0');
+  // legacy webhooks array migrates to outputs
+  const legacy = normalize({ webhooks: [{ url: 'https://a.example/x', secret: 's' }] });
+  assert.strictEqual(legacy.outputs[0].kind, 'webhook', 'legacy webhooks migrate to outputs');
+  console.log('  ok    config.normalize');
+} catch (err) { failed++; console.error(`  FAIL  config.normalize\n        ${err.stack}`); }
+
+try {
+  const { Config } = require('../src/config');
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'lflive-env-'));
+  const cwd = process.cwd(); process.chdir(dir);
+  const save = { ...process.env };
+  process.env.LF_HTTP_PORT = '8123'; process.env.LF_STREAM_ENABLED = 'true'; process.env.LF_STREAM_HOST = '0.0.0.0'; process.env.LF_API_TOKEN = 'sekret';
+  const c = new Config(); c.load();
+  assert.strictEqual(c.data.http.port, 8123, 'env pins http port');
+  assert.strictEqual(c.data.streamServer.enabled, true, 'env enables stream server');
+  assert.strictEqual(c.data.apiToken, 'sekret', 'env sets token');
+  assert.ok(c.envPins.includes('http.port') && c.envPins.includes('apiToken'), 'envPins reported');
+  // a console patch cannot override an env-pinned value
+  c.update({ http: { port: 9999 } });
+  assert.strictEqual(c.data.http.port, 8123, 'env pin survives a console save');
+  process.env = save;
+  process.chdir(cwd); fs.rmSync(dir, { recursive: true, force: true });
+  console.log('  ok    config.envPins');
+} catch (err) { failed++; console.error(`  FAIL  config.envPins\n        ${err.stack}`); }
+
+try {
+  const { Config } = require('../src/config');
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'lflive-'));
+  const cwd = process.cwd(); process.chdir(dir);
+  const cfg = new Config();
+  cfg.load();
+  assert.ok(fs.existsSync(path.join(dir, 'config.json')), 'config.json created on first run');
+  cfg.update({ csv: { delimiter: ',' } });
+  assert.strictEqual(new Config().load().csv.delimiter, ',', 'update persists');
+  assert.strictEqual(new Config().load().csv.enabled, true, 'csv on by default');
+  process.chdir(cwd);
+  fs.rmSync(dir, { recursive: true, force: true });
+  console.log('  ok    config.persist');
+} catch (err) { failed++; console.error(`  FAIL  config.persist\n        ${err.stack}`); }
+
+try {
+  const { csvCell, splitCsv, StatsWriter } = require('../src/statsWriter');
+  assert.strictEqual(csvCell('a;b', ';'), '"a;b"', 'delimiter forces quotes');
+  assert.strictEqual(csvCell('say "hi"', ','), '"say ""hi"""', 'quotes doubled');
+  assert.strictEqual(csvCell('plain', ','), 'plain', 'plain value untouched');
+  assert.deepStrictEqual(splitCsv('a;"b;c";d', ';'), ['a', 'b;c', 'd'], 'round-trips quoted field');
+
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'lfstats-'));
+  const cwd = process.cwd(); process.chdir(dir);
+  const sw = new StatsWriter({ logger: { info() {}, warn() {}, error() {} }, getConfig: () => ({ csv: { enabled: true, dir: 'stats', delimiter: ';', bom: true, writeEvents: true, writeLive: false } }) });
+  const st = {
+    matchId: 'mtest', elapsedTime: 300000,
+    teams: { 0: { name: 'Rot' }, 1: { name: 'Blau' } }, scores: { 0: 3, 1: 1 },
+    players: {
+      1001: { id: '1001', name: 'Mara', teamId: '0', goals: 2, assists: 1, stealsDone: 0, stealsReceived: 1, blocksDone: 2, blocksReceived: 0, resetsDone: 0, resetsReceived: 0, clearsDone: 1, clearsReceived: 0, passesDone: 5, passesReceived: 3 },
+      2001: { id: '2001', name: 'Lea', teamId: '1', goals: 1, assists: 0, stealsDone: 1, stealsReceived: 0, blocksDone: 1, blocksReceived: 1, resetsDone: 0, resetsReceived: 0, clearsDone: 0, clearsReceived: 1, passesDone: 2, passesReceived: 4 },
+    },
+  };
+  sw.onChange(st);
+  sw.onMatchStart(st);
+  sw.onEvent({ id: 1, ts: Date.now(), elapsedMs: 47000, type: 'goal', actorId: '1001', actorName: 'Mara', text: 'Mara SCORED' });
+  sw.onMatchEnd(st);
+  // a state without a `mode` (as here) is filed by the family inferred from the
+  // player objects — no SM5 counters present, so: laserball.
+  const players = fs.readFileSync(path.join(dir, 'stats', 'all_players_laserball.csv'), 'utf8');
+  assert.ok(players.includes('Mara') && players.includes('win'), 'all_players_laserball.csv has the winner row');
+  const totals = fs.readFileSync(path.join(dir, 'stats', 'totals_laserball.csv'), 'utf8').replace(/^﻿/, '');
+  assert.ok(totals.split(/\r?\n/).filter(Boolean).length === 3, 'totals_laserball.csv: header + 2 players');
+  assert.ok(totals.includes('Mara;1;1;0;0;2;1'), 'Mara totals: 1 match, 1 win, 2 goals, 1 assist');
+  assert.ok(fs.existsSync(path.join(dir, 'stats', 'matches')), 'per-match folder written');
+  const matchIdx = fs.readFileSync(path.join(dir, 'stats', 'matches.csv'), 'utf8');
+  assert.ok(matchIdx.split(/\r?\n/).filter(Boolean).length === 2 && matchIdx.includes('mtest'), 'matches.csv: header + 1 match');
+  const pm = fs.readFileSync(path.join(dir, 'stats', 'player_modes.csv'), 'utf8');
+  assert.ok(/Mara;unknown;/.test(pm) && pm.includes('laserball'), 'player_modes.csv has Mara with a laserball mode row');
+  // a second match aggregates
+  const st2 = structuredClone(st); st2.matchId = 'm2'; st2.players['1001'].goals = 1; st2.scores = { 0: 1, 1: 2 };
+  sw.onChange(st2); sw.onMatchStart(st2); sw.onMatchEnd(st2);
+  const totals2 = fs.readFileSync(path.join(dir, 'stats', 'totals_laserball.csv'), 'utf8');
+  assert.ok(totals2.includes('Mara;2;1;1;0;3;'), 'Mara after 2 matches: 2 played, 1 win, 1 loss, 3 goals total');
+  const pm2 = fs.readFileSync(path.join(dir, 'stats', 'player_modes.csv'), 'utf8').replace(/^﻿/, '');
+  assert.ok(pm2.split(/\r?\n/).filter(Boolean).length === 3, 'player_modes.csv: header + 2 players, one mode each');
+  assert.ok(/1001;Mara;unknown;[^;]*;laserball;2;/.test(pm2), 'Mara played the same mode twice');
+  process.chdir(cwd);
+  fs.rmSync(dir, { recursive: true, force: true });
+  console.log('  ok    statsWriter');
+} catch (err) { failed++; console.error(`  FAIL  statsWriter\n        ${err.stack}`); }
+
+try {
+  const { Engine } = require('../src/engine');
+  const evts = [];
+  const eng = new Engine({ logger: null });
+  eng.on('event', (e) => evts.push(e));
+  [
+    '1 0 0 0 720000 0', '2 0 Red Team 5 solid #ff0000', '2 1 Blue Team 5 solid #0000ff',
+    '4 2000 0100',
+    '3 1000 event @1234 player Alice 0 3 1', '3 1000 event @5678 player Bob 1 3 1',
+    '4 5000 1100 @1234 @5678', '4 6000 1101 @5678',
+  ].forEach((l) => eng.processLogLine(l));
+  assert.strictEqual(eng.snapshot().teams['0'].name, 'Red Team', 'multi-word team name parsed');
+  const s = eng.snapshot();
+  assert.strictEqual(Object.keys(s.players).length, 2);
+  assert.strictEqual(s.players['5678'].goals, 1);
+  assert.strictEqual(s.players['1234'].assists, 1);
+  assert.strictEqual(Object.values(s.scores).reduce((a, b) => a + b, 0), 1);
+  assert.ok(evts.some((e) => e.type === 'goal'));
+  assert.ok(evts.every((e) => !/<\/?[a-z][\s\S]*>/i.test(e.text || '')), 'no HTML in event text');
+  console.log('  ok    engine.smoke');
+} catch (err) { failed++; console.error(`  FAIL  engine.smoke\n        ${err.stack}`); }
+
+try {
+  const { Engine } = require('../src/engine');
+  const evts = [];
+  const eng = new Engine({ logger: null });
+  eng.on('event', (e) => evts.push(e));
+  [
+    '1 0 0 0 720000 0', '2 0 Red 5 solid #ff0000', '2 1 Blue 5 solid #0000ff',
+    '4 100 0100',
+    '3 100 event @1 player A 0 3 1', '3 100 event @2 player B 1 3 1',
+    '4 200 1105',                 // laserball round start — was ignored
+    '4 300 0201 @1',              // SM5 miss — was ignored
+    '4 400 110C @1 @2',           // explicit reset code — was ignored
+    '4 450 0F00 @1',              // truly unknown type-4 code
+    '5 600 0 0 1 1',              // type-5 score line — was ignored
+    '6 700 1 02 5',               // type-6 entity-end / summary — was ignored
+    '4 800 1100 @1 @2',           // handled code: must NOT get a duplicate aux event
+  ].forEach((l) => eng.processLogLine(l));
+  const has = (t, code) => evts.some((e) => e.type === t && (code === undefined || e.code === code));
+  assert.ok(has('round_start', '1105'), 'emits round_start for 1105');
+  assert.ok(has('miss', '0201'), 'emits typed event for SM5 0201');
+  assert.ok(has('reset', '110C'), 'emits reset for explicit 110C');
+  assert.ok(has('lf_event', '0F00'), 'emits generic lf_event for an unknown code');
+  assert.ok(evts.some((e) => e.type === 'score' && e.delta === 1 && e.new === 1), 'emits score event from type-5');
+  assert.ok(has('match_summary', '6'), 'emits match_summary from type-6');
+  assert.strictEqual(evts.filter((e) => e.code === '1100').length, 1, 'handled code 1100 not double-emitted');
+  assert.ok(evts.every((e) => !/<\/?[a-z][\s\S]*>/i.test(e.text || '')), 'no HTML in aux event text');
+  // emitUnknownEvents:false suppresses only the generic fallback, not the mapped types
+  const eng2 = new Engine({ logger: null, emitUnknownEvents: false });
+  const e2 = []; eng2.on('event', (e) => e2.push(e));
+  ['1 0 0 0 720000 0', '2 0 Red 5 solid #ff0000', '4 100 0100',
+    '3 100 event @1 player A 0 3 1', '4 200 0F00 @1', '4 300 1105'].forEach((l) => eng2.processLogLine(l));
+  assert.ok(!e2.some((e) => e.type === 'lf_event'), 'emitUnknownEvents:false hides generic lf_event');
+  assert.ok(e2.some((e) => e.type === 'round_start'), 'emitUnknownEvents:false keeps mapped types');
+  console.log('  ok    engine.auxEvents');
+} catch (err) { failed++; console.error(`  FAIL  engine.auxEvents\n        ${err.stack}`); }
+
+try {
+  const { EventLog } = require('../src/eventLog');
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'lflog-'));
+  const cwd = process.cwd(); process.chdir(dir);
+  const el = new EventLog({ eventLog: { enabled: true, dir: 'data/logs', rotate: 'daily', filenamePrefix: 'events' } }, { warn() {} });
+  el.onMatchStart({ matchId: 'abc123', players: { 1: {}, 2: {} } });
+  el.onEvent({ id: 1, ts: Date.parse('2026-09-10T21:14:03Z'), elapsedMs: 432900, matchId: 'abc123', type: 'goal', code: '1101', actorName: 'Mara', actorTeamId: '0', scores: { 0: 3, 1: 2 }, text: 'Mara SCORED' });
+  el.onEvent({ id: 2, ts: Date.now(), elapsedMs: 5000, matchId: 'abc123', type: 'lf_event', code: '0F00', text: 'Event 0F00' });
+  el.onMatchEnd({ matchId: 'abc123', scores: { 0: 3, 1: 2 }, players: { 1: {}, 2: {} } });
+  el.flush();
+  const f = path.join(dir, 'data', 'logs', `events-${new Date().toISOString().slice(0, 10)}.log`);
+  const txt = fs.readFileSync(f, 'utf8');
+  assert.ok(/^\d{4}-\d\d-\d\d \d\d:\d\d:\d\d {2}\+\d\d:\d\d\.\d{3} {2}\[abc123\] {2}\S/m.test(txt), 'readable columned line');
+  assert.ok(/\+07:12\.900/.test(txt), 'elapsed formatted mm:ss.mmm');
+  assert.ok(/──── Match abc123 · 2 Spieler/.test(txt), 'match header line');
+  assert.ok(/Match abc123 beendet · Endstand 3:2/.test(txt), 'match footer with score');
+  process.chdir(cwd); fs.rmSync(dir, { recursive: true, force: true });
+  console.log('  ok    eventLog');
+} catch (err) { failed++; console.error(`  FAIL  eventLog\n        ${err.stack}`); }
+
+try {
+  const { Engine } = require('../src/engine');
+  const evts = [];
+  const eng = new Engine({ logger: null });
+  eng.on('event', (e) => evts.push(e));
+  [
+    '1 0 0 0 720000 0', '2 0 Red 5 solid #ff0000', '2 1 Blue 5 solid #0000ff',
+    '4 100 0100',
+    '3 100 event @1 player A 0 3 1', '3 100 event @2 player B 1 3 1',
+    '4 500 1100 @1 @2', '4 900 1101 @2',
+  ].forEach((l) => eng.processLogLine(l));
+
+  const goal = evts.find((e) => e.type === 'goal');
+  assert.ok(goal, 'goal event emitted');
+  assert.strictEqual(goal.category, 'score', 'goal enriched with category:score');
+  assert.strictEqual(goal.code, '1101', 'goal keeps its own code');
+  assert.ok(typeof goal.phrase === 'string' && goal.phrase.trim(), 'goal enriched with a phrase');
+  assert.ok(goal.text === 'B SCORED', 'goal.text unchanged by enrichment');
+
+  const ms = evts.find((e) => e.type === 'match_start');
+  assert.strictEqual(ms.code, '0100', 'match_start gets code 0100 from TYPE_TO_CODE');
+  assert.strictEqual(ms.category, 'match', 'match_start enriched category');
+
+  const pass = evts.find((e) => e.type === 'pass');
+  assert.strictEqual(pass.category, 'possession', 'pass category from catalog');
+  assert.ok(evts.find((e) => e.type === 'player_join') && evts.find((e) => e.type === 'player_join').code === undefined, 'player_join has no code (type-3 login)');
+  console.log('  ok    engine.enrich');
+} catch (err) { failed++; console.error(`  FAIL  engine.enrich\n        ${err.stack}`); }
+
+// ===========================================================================
+// MODE ADAPTIVITY — permanent regression tests (contract A-D, docs/GAMEMODES.md)
+//
+// Same pattern as every block above: plain `assert`, no framework, no new
+// dependency, nothing written into the project directory. The Laserball block
+// is the guard rail of the whole project: it pins goals, assists, passes,
+// clears, steals, blocks, resets and the ballHolderId history to the values the
+// parser produced BEFORE the mode rework, so a future change on the SM5 side
+// cannot damage Laserball unnoticed.
+// ===========================================================================
+
+/** Feed a stream through a fresh engine. Returns engine, events and snapshot. */
+function feedEngine(lines, opts = {}) {
+  const { Engine } = require('../src/engine');
+  const evts = [];
+  const eng = new Engine({ logger: null, ...opts });
+  eng.on('event', (e) => evts.push(e));
+  for (const l of lines) eng.processLogLine(l);
+  return { eng, evts, state: eng.snapshot() };
+}
+/** Turn a tab-delimited stream into a whitespace-delimited one. */
+const toSpaces = (lines) => lines.map((l) => l.replace(/\t/g, ' '));
+/** Drop the `;` schema-comment lines. */
+const noSchema = (lines) => lines.filter((l) => !l.startsWith(';'));
+/** First column (line type) of a stream line, tab- or space-delimited. */
+const lineType = (l) => String(l).split(/\s+/)[0];
+
+/**
+ * A complete Laserball match, tab-delimited, with `;` schema comments.
+ * Mission description AND team names contain spaces on purpose — that is
+ * exactly what a naive column index gets wrong.
+ */
+const LASERBALL_MATCH = [
+  '0\t2.006\tlf-sim\tTesthalle',
+  ';1/mission\ttype\tdesc\tstart\tduration\tpenalty',
+  '1\t28\tLaserball Ranked\t20260916094500\t900\t0',
+  ';2/team\tindex\tdesc\tcolour-enum\tcolour-desc\tcolour',
+  '2\t0\tRote Kugeln\t1\tRed\t#ff0000',
+  '2\t1\tBlaue Kugeln\t4\tBlue\t#0000ff',
+  '4\t0\t0100',
+  ';3/entity-start\ttime\tid\ttype\tdesc\tteam\tlevel\tcategory\tbattlesuit',
+  '3\t100\t#1001\tplayer\tAnna Maria\t0\t3\t0\tSuit-A',
+  '3\t100\t#1002\tplayer\tBen\t0\t3\t0\tSuit-B',
+  '3\t100\t#2001\tplayer\tCara\t1\t3\t0\tSuit-C',
+  '3\t100\t#2002\tplayer\tDave\t1\t3\t0\tSuit-D',
+  ';4/event\ttime\ttype\tplayer\taction\tplayer',
+  '4\t1000\t1107\t#1001',                       // get ball
+  '4\t2000\t1100\t#1001\tpasses to\t#1002',      // pass
+  '4\t3000\t1101\t#1002',                        // goal, assisted by 1001
+  '4\t9000\t1103\t#2001\tsteals from\t#1002',    // steal
+  '4\t10000\t1109\t#2001\tclears to\t#2002',     // clear
+  '4\t12000\t1101\t#2002',                       // goal, assisted by 2001
+  '4\t15000\t110A\t#1001',                       // failed clear
+  '4\t16000\t1107\t#2001',
+  '9\t17000\t#2001\t2',                          // 2001 is down -> next 1104 is a RESET
+  '4\t18000\t1104\t#1001\tresets\t#2001',
+  '4\t20000\t1104\t#1002\tblocks\t#2002',        // target is up -> BLOCK
+  '4\t30000\t0101',
+];
+
+/** ballHolderId after every type-4 / type-9 line of LASERBALL_MATCH. */
+const LASERBALL_HOLDERS = [
+  null,      // 0100
+  '1001',    // 1107 get ball
+  '1002',    // 1100 pass -> receiver holds
+  null,      // 1101 goal
+  '2001',    // 1103 steal -> thief holds
+  '2002',    // 1109 clear -> receiver holds
+  null,      // 1101 goal
+  null,      // 110A failed clear does not change the holder
+  '2001',    // 1107
+  '2001',    // type-9 status does not change the holder
+  '2001',    // 1104 reset does not change the holder
+  '2001',    // 1104 block does not change the holder
+  null,      // 0101
+];
+
+/** Every Laserball counter of LASERBALL_MATCH, exactly as before the rework. */
+function assertLaserballCounters(state, label) {
+  const p = state.players;
+  const eq = (pid, field, want) => assert.strictEqual(p[pid][field], want, `${label}: ${pid}.${field} == ${want}`);
+  assert.strictEqual(Object.keys(p).length, 4, `${label}: 4 players`);
+  // goals + assists (the 10 s window)
+  eq('1002', 'goals', 1); eq('2002', 'goals', 1);
+  eq('1001', 'goals', 0); eq('2001', 'goals', 0);
+  eq('1001', 'assists', 1); eq('2001', 'assists', 1);
+  eq('1002', 'assists', 0); eq('2002', 'assists', 0);
+  // passes
+  eq('1001', 'passesDone', 1); eq('1002', 'passesReceived', 1);
+  eq('1002', 'passesDone', 0); eq('2001', 'passesReceived', 0);
+  // clears
+  eq('2001', 'clearsDone', 1); eq('2002', 'clearsReceived', 1);
+  eq('1001', 'clearsDone', 0);
+  // steals
+  eq('2001', 'stealsDone', 1); eq('1002', 'stealsReceived', 1);
+  eq('1001', 'stealsDone', 0);
+  // blocks vs. resets — decided by the target status (type-9)
+  eq('1001', 'resetsDone', 1); eq('2001', 'resetsReceived', 1);
+  eq('1001', 'blocksDone', 0); eq('2001', 'blocksReceived', 0);
+  eq('1002', 'blocksDone', 1); eq('2002', 'blocksReceived', 1);
+  eq('1002', 'resetsDone', 0); eq('2002', 'resetsReceived', 0);
+  // the own count owns the score here — no type-5 line in this stream
+  assert.strictEqual(state.scoreSource, 'internal', `${label}: scoreSource internal`);
+  assert.deepStrictEqual(state.scores, { 0: 1, 1: 1 }, `${label}: scores from the own count`);
+  // not one SM5 counter may leak into a Laserball player
+  assert.strictEqual(p['1001'].shotsFired, undefined, `${label}: no SM5 fields on a Laserball player`);
+  assert.strictEqual(p['1001'].deactivations, undefined, `${label}: no SM5 fields on a Laserball player`);
+}
+
+try {
+  const { Engine } = require('../src/engine');
+  const eng = new Engine({ logger: null });
+  const evts = [];
+  const holders = [];
+  eng.on('event', (e) => evts.push(e));
+  for (const l of LASERBALL_MATCH) {
+    eng.processLogLine(l);
+    const t = lineType(l);
+    if (t === '4' || t === '9') holders.push(eng.gameState.ballHolderId);
+  }
+  const state = eng.snapshot();
+
+  // mode + clock
+  assert.strictEqual(state.mode.number, 28, 'mission 28');
+  assert.strictEqual(state.mode.key, 'laserball_ranked', 'mode key');
+  assert.strictEqual(state.mode.family, 'laserball', 'family laserball');
+  assert.strictEqual(state.mode.known, true, 'mode is in the registry');
+  assert.strictEqual(state.mode.source, 'tdf', 'mode came from the type-1 line');
+  assert.strictEqual(state.mode.label, 'Laserball Ranked', 'label from the stream');
+  assert.strictEqual(state.duration, 900000, 'duration 900 s -> 900000 ms');
+  assert.strictEqual(state.durationKnown, true, 'duration known');
+  assert.strictEqual(state.remainingMs, 870000, 'remainingMs = duration - elapsed');
+  assert.strictEqual(state.missionActive, false, 'mission ended');
+  // names with spaces survive
+  assert.strictEqual(state.teams['0'].name, 'Rote Kugeln', 'team name with a space');
+  assert.strictEqual(state.teams['1'].name, 'Blaue Kugeln', 'second team name with a space');
+  assert.strictEqual(state.players['1001'].name, 'Anna Maria', 'player name with a space');
+  assert.strictEqual(state.players['1001'].battlesuit, 'Suit-A', 'battlesuit read via the schema line');
+
+  assertLaserballCounters(state, 'laserball');
+  assert.deepStrictEqual(holders, LASERBALL_HOLDERS, 'ballHolderId history unchanged');
+  assert.strictEqual(state.ballHolderId, null, 'ball is free after the match end');
+
+  // the events of the Laserball path, unchanged
+  const goals = evts.filter((e) => e.type === 'goal');
+  assert.strictEqual(goals.length, 2, 'two goal events');
+  assert.strictEqual(goals[0].assistId, '1001', 'first goal credits the passer');
+  assert.strictEqual(goals[0].assistName, 'Anna Maria', 'assist name on the goal event');
+  assert.strictEqual(goals[1].assistId, '2001', 'second goal credits the clearing player');
+  assert.ok(evts.some((e) => e.type === 'pass' && e.code === '1100'), 'pass event');
+  assert.ok(evts.some((e) => e.type === 'clear' && e.code === '1109'), 'clear event');
+  assert.ok(evts.some((e) => e.type === 'steal' && e.code === '1103'), 'steal event');
+  assert.ok(evts.some((e) => e.type === 'reset' && e.code === '1104' && e.targetId === '2001'), 'reset event');
+  assert.ok(evts.some((e) => e.type === 'block' && e.code === '1104' && e.targetId === '2002'), 'block event');
+  assert.ok(evts.some((e) => e.type === 'failed_clear' && e.code === '110A'), 'failed_clear event');
+  assert.ok(evts.some((e) => e.type === 'mode_change' && e.mode.family === 'laserball'), 'mode_change emitted');
+  assert.ok(evts.every((e) => !/<\/?[a-z][\s\S]*>/i.test(e.text || '')), 'no HTML in any event text');
+  console.log('  ok    engine.laserballRegression');
+} catch (err) { failed++; console.error(`  FAIL  engine.laserballRegression\n        ${err.stack}`); }
+
+try {
+  // The 10 s assist window, pinned on BOTH sides: 9 s counts, 10 s (the exact
+  // boundary) still counts, 11 s does not. Widening or narrowing the window in
+  // engine.js breaks one of these three.
+  const assistAfter = (goalAt) => {
+    const { state, evts } = feedEngine([
+      '1 28 Laserball Ranked 0 900 0',
+      '2 0 Rot 1 Red #ff0000',
+      '4 0 0100',
+      '3 100 event @1 player Passer 0 3 0',
+      '3 100 event @2 player Scorer 0 3 0',
+      '4 1000 1100 @1 @2',
+      `4 ${1000 + goalAt} 1101 @2`,
+    ]);
+    const goal = evts.find((e) => e.type === 'goal');
+    return { assists: state.players['1'].assists, assistId: goal ? goal.assistId : undefined };
+  };
+  assert.strictEqual(assistAfter(9000).assists, 1, 'a pass 9 s before the goal is an assist');
+  assert.strictEqual(assistAfter(9000).assistId, '1', 'and the goal event names the passer');
+  assert.strictEqual(assistAfter(10000).assists, 1, '10 s exactly is still inside the window');
+  assert.strictEqual(assistAfter(11000).assists, 0, 'a pass 11 s before the goal is NOT an assist');
+  assert.strictEqual(assistAfter(11000).assistId, null, 'and the goal event carries no assist');
+  // a clear (1109) feeds the same window
+  const { state: cl } = feedEngine([
+    '1 28 Laserball Ranked 0 900 0', '2 0 Rot 1 Red #ff0000', '4 0 0100',
+    '3 100 event @1 player Clearer 0 3 0', '3 100 event @2 player Scorer 0 3 0',
+    '4 1000 1109 @1 @2', '4 10000 1101 @2',
+  ]);
+  assert.strictEqual(cl.players['1'].assists, 1, 'a clear inside the window is an assist too');
+  // a steal between pass and goal wipes the pass history
+  const { state: st } = feedEngine([
+    '1 28 Laserball Ranked 0 900 0', '2 0 Rot 1 Red #ff0000', '2 1 Blau 4 Blue #0000ff', '4 0 0100',
+    '3 100 event @1 player Passer 0 3 0', '3 100 event @2 player Scorer 0 3 0',
+    '3 100 event @3 player Dieb 1 3 0',
+    '4 1000 1100 @1 @2', '4 2000 1103 @3 @2', '4 3000 1101 @2',
+  ]);
+  assert.strictEqual(st.players['1'].assists, 0, 'a steal in between voids the assist');
+  console.log('  ok    engine.assistWindow');
+} catch (err) { failed++; console.error(`  FAIL  engine.assistWindow\n        ${err.stack}`); }
+
+try {
+  const { resolveMode, familyOf, statFields, csvColumns, newPlayerStats, scoreboardColumns, roleLabel } = require('../src/gameModes');
+  // registry
+  assert.strictEqual(resolveMode(28).family, 'laserball', 'type 28 -> laserball');
+  assert.strictEqual(resolveMode(28).key, 'laserball_ranked', 'type 28 key');
+  assert.strictEqual(resolveMode('28').known, true, 'type 28 is known (string form too)');
+  assert.strictEqual(resolveMode(5).family, 'sm5', 'type 5 -> sm5');
+  assert.strictEqual(resolveMode(5).key, 'sm5', 'type 5 key');
+  // unknown number -> not known, but still counted as sm5 (shared 0xxx code set)
+  const unknown = resolveMode(14, null);
+  assert.strictEqual(unknown.known, false, 'unknown number -> known:false');
+  assert.strictEqual(unknown.family, 'sm5', 'unknown number -> family sm5');
+  assert.strictEqual(unknown.key, 'mode_14', 'unknown number keeps a stable slug');
+  assert.strictEqual(unknown.number, 14, 'unknown number is kept');
+  assert.strictEqual(unknown.source, 'tdf', 'the number still came from the stream');
+  // label from the type-1 description, registry label only as fallback
+  assert.strictEqual(resolveMode(28, 'Hausrunde Freitag').label, 'Hausrunde Freitag', 'stream description wins');
+  assert.strictEqual(resolveMode(28, '   ').label, 'Laserball Ranked', 'blank description -> registry label');
+  assert.strictEqual(resolveMode(14, 'Nexus Turnier').label, 'Nexus Turnier', 'unknown mode labelled from the stream');
+  // no number at all
+  const none = resolveMode(null, null);
+  assert.deepStrictEqual(none, {
+    number: null, key: 'unknown', label: 'Unbekannter Modus', family: 'sm5', known: false, source: 'default',
+  }, 'no type-1 line -> unknown/default');
+  assert.strictEqual(resolveMode('nicht-numerisch').known, false, 'garbage number -> unknown');
+  assert.strictEqual(resolveMode('99999999').known, false, 'out-of-range number -> unknown');
+  // code -> family
+  assert.strictEqual(familyOf('1100'), 'laserball', '11xx is laserball');
+  assert.strictEqual(familyOf('110C'), 'laserball', '110C is laserball');
+  assert.strictEqual(familyOf('0205'), 'sm5', '02xx is sm5');
+  assert.strictEqual(familyOf('0B03'), 'sm5', '0Bxx is sm5');
+  assert.strictEqual(familyOf('0100'), 'all', 'match control belongs to both');
+  assert.strictEqual(familyOf('0101'), 'all', 'match end belongs to both');
+  assert.strictEqual(familyOf('0201'), 'all', 'a miss exists in both families');
+  assert.strictEqual(familyOf(null), 'all', 'no code -> no family claim');
+  // counter sets are disjoint and stable
+  assert.strictEqual(statFields('laserball').length, 12, '12 Laserball counters');
+  assert.strictEqual(Object.keys(newPlayerStats('sm5')).length, 30, '30 SM5 counters');
+  assert.deepStrictEqual(csvColumns('laserball').slice(0, 4),
+    ['goals', 'assists', 'steals_done', 'steals_received'], 'Laserball CSV order unchanged');
+  assert.ok(!csvColumns('sm5').includes('goals'), 'no Laserball column in the SM5 set');
+  assert.ok(!csvColumns('laserball').includes('shots_fired'), 'no SM5 column in the Laserball set');
+  assert.strictEqual(scoreboardColumns('laserball')[0].key, 'goals', 'Laserball scoreboard starts with goals');
+  assert.strictEqual(roleLabel(1), 'Commander', 'SM5 role from the category column');
+  assert.strictEqual(roleLabel(5), 'Medic', 'SM5 role from the category column');
+  assert.strictEqual(roleLabel('nope'), null, 'unusable category -> no role');
+
+  // the same, through the engine
+  const modeOf = (line) => feedEngine([line]).state.mode;
+  assert.strictEqual(modeOf('1\t28\tLaserball Ranked\t0\t900\t0').family, 'laserball', 'engine: 28 -> laserball');
+  assert.strictEqual(modeOf('1\t5\tSpace Marines 5\t0\t900\t0').family, 'sm5', 'engine: 5 -> sm5');
+  assert.strictEqual(modeOf('1\t5\tSpace Marines 5\t0\t900\t0').label, 'Space Marines 5', 'engine: label out of the stream');
+  const m14 = modeOf('1\t14\t7SM Nexus\t0\t900\t0');
+  assert.strictEqual(m14.known, false, 'engine: unknown number -> known:false');
+  assert.strictEqual(m14.family, 'sm5', 'engine: unknown number -> family sm5');
+  assert.strictEqual(m14.label, '7SM Nexus', 'engine: unknown mode labelled from the description');
+  console.log('  ok    gameModes.detection');
+} catch (err) { failed++; console.error(`  FAIL  gameModes.detection\n        ${err.stack}`); }
+
+try {
+  // Runtime self-correction: a mode announced as sm5 that ships 11xx codes
+  // flips to laserball exactly once and marks itself `inferred`.
+  const { state, evts } = feedEngine([
+    '1\t5\tSpace Marines 5\t0\t900\t0',
+    '2\t0\tRot\t1\tRed\t#ff0000',
+    '4\t0\t0100',
+    '3\t100\t#1\tplayer\tA\t0\t3\t0',
+    '3\t100\t#2\tplayer\tB\t0\t3\t0',
+    '4\t1000\t1100\t#1\t#2',
+    '4\t2000\t1101\t#2',
+    '4\t3000\t1100\t#2\t#1',
+    '4\t4000\t1103\t#1\t#2',
+  ]);
+  assert.strictEqual(state.mode.family, 'laserball', '11xx codes correct the family');
+  assert.strictEqual(state.mode.source, 'inferred', 'the correction marks itself inferred');
+  assert.strictEqual(state.mode.number, 5, 'the announced number is kept');
+  assert.strictEqual(state.mode.key, 'sm5', 'the key is kept — only the family changed');
+  assert.strictEqual(evts.filter((e) => e.type === 'mode_change' && e.mode.source === 'inferred').length, 1,
+    'the correction fires exactly once per match');
+  assert.strictEqual(state.players['2'].goals, 1, 'the goal is counted after the correction');
+  assert.strictEqual(state.players['1'].passesDone, 1, 'Laserball counters run after the correction');
+
+  // No flapping: once corrected, a later code of the OTHER family must not flip
+  // the mode back — otherwise every stray 02xx would re-bucket a running match.
+  const flap = feedEngine([
+    '1\t99\tHausmodus\t0\t900\t0',
+    '2\t0\tRot\t1\tRed\t#ff0000',
+    '4\t0\t0100',
+    '3\t100\t#1\tplayer\tA\t0\t3\t0',
+    '3\t100\t#2\tplayer\tB\t0\t3\t0',
+    '4\t1000\t1100\t#1\t#2',   // -> laserball, inferred
+    '4\t2000\t0205\t#1\t#2',   // a stray SM5 code must NOT flip it back
+    '4\t3000\t0206\t#1\t#2',
+    '4\t4000\t1101\t#2',
+  ]);
+  assert.strictEqual(flap.state.mode.family, 'laserball', 'a later SM5 code does not flip the family back');
+  assert.strictEqual(flap.evts.filter((e) => e.type === 'mode_change' && e.mode.source === 'inferred').length, 1,
+    'the family is corrected at most once per match, never repeatedly');
+  assert.strictEqual(flap.state.players['2'].goals, 1, 'the match keeps counting as Laserball');
+
+  // The counter-proof: mission 28 is Laserball by definition and must NEVER be
+  // demoted to sm5, whatever 02xx codes turn up.
+  const lb = feedEngine([
+    '1\t28\tLaserball Ranked\t0\t900\t0',
+    '2\t0\tRot\t1\tRed\t#ff0000',
+    '4\t0\t0100',
+    '3\t100\t#1\tplayer\tA\t0\t3\t0',
+    '3\t100\t#2\tplayer\tB\t0\t3\t0',
+    '4\t1000\t0205\t#1\t#2',
+    '4\t1100\t0206\t#1\t#2',
+    '4\t1200\t0306\t#1\t#2',
+    '4\t1300\t0600\t#1',
+    '4\t1400\t1100\t#1\t#2',
+  ]);
+  assert.strictEqual(lb.state.mode.family, 'laserball', 'mission 28 stays laserball');
+  assert.strictEqual(lb.state.mode.source, 'tdf', 'mission 28 keeps source:tdf');
+  assert.strictEqual(lb.state.players['1'].shotsFired, undefined, 'no SM5 counting inside a Laserball match');
+  assert.strictEqual(lb.state.players['2'].timesHit, undefined, 'no SM5 counting inside a Laserball match');
+  assert.strictEqual(lb.evts.filter((e) => e.type === 'mode_change').length, 1, 'only the initial mode_change');
+  assert.strictEqual(lb.state.players['1'].passesDone, 1, 'the Laserball pass is still counted');
+  console.log('  ok    engine.familyInference');
+} catch (err) { failed++; console.error(`  FAIL  engine.familyInference\n        ${err.stack}`); }
+
+try {
+  // Adaptive game clock (contract C1/C2).
+  const known = feedEngine([
+    '1\t28\tLaserball Ranked\t20260916094500\t900\t0',
+    '2\t0\tRot\t1\tRed\t#ff0000',
+    '4\t0\t0100',
+    '3\t100\t#1\tplayer\tA\t0\t3\t0',
+  ]);
+  assert.strictEqual(known.state.durationKnown, true, 'reported duration -> durationKnown');
+  assert.strictEqual(known.state.duration, 900000, 'duration in ms');
+  const first = known.state.remainingMs;
+  known.eng.processLogLine('4\t120000\t1107\t#1');
+  const second = known.eng.snapshot().remainingMs;
+  assert.strictEqual(first, 899900, 'remainingMs after 100 ms');
+  assert.strictEqual(second, 780000, 'remainingMs after 120 s');
+  assert.ok(second < first, 'remainingMs counts DOWN while the duration is known');
+
+  const unknownDur = feedEngine([
+    '1\t14\t7SM Nexus\t20260916094500',
+    '2\t0\tRot\t1\tRed\t#ff0000',
+    '4\t0\t0100',
+    '3\t100\t#1\tplayer\tA\t0\t3\t0',
+    '4\t60000\t0201\t#1',
+  ]);
+  assert.strictEqual(unknownDur.state.durationKnown, false, 'no duration -> durationKnown:false');
+  assert.strictEqual(unknownDur.state.remainingMs, null, 'no duration -> remainingMs null');
+  assert.strictEqual(unknownDur.state.duration, 720000, 'duration falls back to the default');
+  assert.strictEqual(unknownDur.state.elapsedTime, 60000, 'elapsedTime counts UP instead');
+  unknownDur.eng.processLogLine('4\t130000\t0201\t#1');
+  assert.strictEqual(unknownDur.eng.snapshot().elapsedTime, 130000, 'elapsedTime keeps rising');
+  assert.strictEqual(unknownDur.eng.snapshot().remainingMs, null, 'remainingMs stays null');
+
+  // unit heuristic + plausibility window
+  const dur = (line) => feedEngine([line]).state;
+  assert.strictEqual(dur('1\t5\tX\t0\t900\t0').duration, 900000, '900 is read as seconds');
+  assert.strictEqual(dur('1\t5\tX\t0\t900000\t0').duration, 900000, '900000 is read as milliseconds');
+  // the plausibility window is 1 min - 2 h; both edges are pinned
+  assert.strictEqual(dur('1\t5\tX\t0\t60\t0').duration, 60000, 'the shortest plausible mission');
+  assert.strictEqual(dur('1\t5\tX\t0\t59\t0').durationKnown, false, 'just under a minute is discarded');
+  assert.strictEqual(dur('1\t5\tX\t0\t7200\t0').duration, 7200000, 'two hours exactly is still accepted');
+  assert.strictEqual(dur('1\t5\tX\t0\t7201\t0').durationKnown, false, 'just over two hours is discarded');
+  assert.strictEqual(dur('1\t5\tX\t0\t5\t0').durationKnown, false, '5 s is not a plausible mission');
+  assert.strictEqual(dur('1\t5\tX\t0\t5\t0').duration, 720000, 'and the default is used instead');
+  assert.strictEqual(dur('1\t5\tX\t0\t99999999\t0').durationKnown, false, 'more than 2 h is discarded');
+  assert.strictEqual(dur('1\t5\tX\t0\t-900\t0').durationKnown, false, 'a negative duration is discarded');
+  assert.strictEqual(dur('1\t5\tX\t0\tabc\t0').durationKnown, false, 'a non-numeric duration is discarded');
+  assert.strictEqual(dur('1\t5\tX\t20260916094500').durationKnown, false, 'TDF 2.000 has no duration column');
+  assert.strictEqual(dur('1\t5\tX\t20260916094500\t900').duration, 900000, 'duration without a penalty column');
+  assert.strictEqual(dur('1\t5\tX\t20260916094500\t900\t0').duration, 900000, 'the start timestamp is never a duration');
+  console.log('  ok    engine.gameClock');
+} catch (err) { failed++; console.error(`  FAIL  engine.gameClock\n        ${err.stack}`); }
+
+try {
+  // Score authority (contract C3).
+  const internal = feedEngine([
+    '1\t28\tLaserball Ranked\t0\t900\t0',
+    '2\t0\tRot\t1\tRed\t#ff0000', '2\t1\tBlau\t4\tBlue\t#0000ff',
+    '4\t0\t0100',
+    '3\t100\t#1\tplayer\tA\t0\t3\t0', '3\t100\t#2\tplayer\tB\t1\t3\t0',
+    '4\t1000\t1101\t#1', '4\t2000\t1101\t#1',
+  ]);
+  assert.strictEqual(internal.state.scoreSource, 'internal', 'without type-5 the own count is the authority');
+  assert.deepStrictEqual(internal.state.scores, { 0: 2, 1: 0 }, 'the own count produced the score');
+  assert.strictEqual(internal.state.players['1'].goals, 2, 'goals counted');
+
+  const { eng, state } = feedEngine([
+    '1\t5\tSpace Marines 5\t0\t900\t0',
+    '2\t0\tRot\t1\tRed\t#ff0000', '2\t1\tBlau\t4\tBlue\t#0000ff',
+    '4\t0\t0100',
+    '3\t100\t#1001\tplayer\tA\t0\t3\t1', '3\t100\t#2001\tplayer\tB\t1\t3\t1',
+    ';5/score\ttime\tentity\told\tdelta\tnew',
+    '5\t1000\t0\t0\t3400\t3400',
+    '5\t1000\t1\t0\t1200\t1200',
+    '5\t1100\t#1001\t0\t2200\t2200',
+  ]);
+  assert.strictEqual(state.scoreSource, 'tdf', 'a type-5 line makes the arena the authority');
+  assert.strictEqual(state.scores['0'], 3400, 'team score straight from the arena');
+  assert.strictEqual(state.scores['1'], 1200, 'team score straight from the arena');
+  assert.strictEqual(state.players['1001'].score, 2200, 'player score straight from the arena');
+  // once the arena owns the score, the own goal count must not add on top
+  eng.processLogLine('4\t2000\t1101\t#1001');
+  const after = eng.snapshot();
+  assert.strictEqual(after.scores['0'], 3400, 'the own count does not add onto an arena score');
+  assert.strictEqual(after.players['1001'].goals, 1, 'the goal itself is still counted');
+
+  // 0100 resets the authority — a match never inherits it from its predecessor
+  eng.processLogLine('1\t28\tLaserball Ranked\t0\t900\t0');
+  eng.processLogLine('4\t0\t0100');
+  assert.strictEqual(eng.snapshot().scoreSource, 'internal', '0100 resets scoreSource');
+  eng.processLogLine('3\t100\t#1001\tplayer\tA\t0\t3\t0');
+  eng.processLogLine('4\t1000\t1101\t#1001');
+  assert.strictEqual(eng.snapshot().scores['0'], 1, 'the new match counts for itself again');
+  assert.strictEqual(eng.snapshot().scoreSource, 'internal', 'and stays on the own count');
+
+  // DOCUMENTED precedence: a type-5 `entity` that is also a player id is read as
+  // the PLAYER, not as the team index. Real Laserforce ids are long, so this
+  // only bites a hand-built stream — but it has to stay deliberate.
+  const clash = feedEngine([
+    '1\t5\tX\t0\t900\t0',
+    '2\t0\tRot\t1\tRed\t#ff0000', '2\t1\tBlau\t4\tBlue\t#0000ff',
+    '4\t0\t0100',
+    '3\t100\t#1\tplayer\tA\t0\t3\t1',
+    '5\t1000\t1\t0\t1200\t1200',
+  ]).state;
+  assert.strictEqual(clash.players['1'].score, 1200, 'entity matching a player id -> player score');
+  assert.strictEqual(clash.scores['1'], 0, 'and NOT the team score');
+  console.log('  ok    engine.scoreAuthority');
+} catch (err) { failed++; console.error(`  FAIL  engine.scoreAuthority\n        ${err.stack}`); }
+
+try {
+  // Type-7 official end block (contract C4).
+  const SM5_BASE = [
+    '1\t5\tSpace Marines 5\t20260916094500\t900\t0',
+    '2\t0\tRot\t1\tRed\t#ff0000', '2\t1\tGruen\t2\tGreen\t#00ff00',
+    '4\t0\t0100',
+    ';3/entity-start\ttime\tid\ttype\tdesc\tteam\tlevel\tcategory\tbattlesuit',
+    '3\t100\t#1001\tplayer\tAnna Maria\t0\t3\t1\tSuit-A',
+    '3\t100\t#2001\tplayer\tCara\t1\t3\t3\tSuit-C',
+    '4\t1000\t0205\t#1001\thits\t#2001',
+    '4\t1500\t0206\t#1001\tdeactivates\t#2001',
+    '4\t2000\t0600\t#2001',
+  ];
+  const TYPE7 = [
+    ';7/sm5-stats\tid\tshotsHit\tshotsFired\ttimesZapped\ttimesMissiled\tmissileHits\tnukesDetonated\tnukesActivated\tnukesCancelled\tmedicHits\townMedicHits\tmedicNukes\tscoutRapid\tlifeBoost\tammoBoost\tlivesLeft\tshotsLeft\tpenalties\tshot3Hit\townNukeCancels\tshotOpponent\tshotTeam\tmissiledOpponent\tmissiledTeam',
+    '7\t#1001\t42\t130\t7\t1\t3\t1\t1\t0\t0\t0\t0\t0\t0\t0\t3\t12\t0\t5\t0\t18\t2\t3\t0',
+    '7\t#2001\t12\t90\t19\t3\t0\t0\t0\t0\t0\t0\t0\t2\t0\t0\t0\t4\t1\t1\t0\t6\t1\t0\t0',
+  ];
+
+  // live counting first — the values the official block has to overwrite
+  const live = feedEngine([...SM5_BASE, '4\t3000\t0101']).state;
+  assert.strictEqual(live.players['1001'].statsSource, 'live', 'without type-7 the live count stands');
+  assert.strictEqual(live.players['1001'].shotsHit, 2, 'live shotsHit');
+  assert.strictEqual(live.players['1001'].shotsFired, 2, 'live shotsFired is only a lower bound');
+  assert.strictEqual(live.players['1001'].deactivations, 1, 'live deactivations');
+  assert.strictEqual(live.players['2001'].timesDeactivated, 1, 'live timesDeactivated');
+  assert.strictEqual(live.players['2001'].penalties, 1, 'live penalties');
+  assert.strictEqual(live.players['1001'].roleLabel, 'Commander', 'SM5 role resolved');
+  assert.strictEqual(live.players['2001'].roleLabel, 'Scout', 'SM5 role resolved');
+
+  const { state, evts } = feedEngine([...SM5_BASE, ...TYPE7, '4\t3000\t0101']);
+  const p = state.players['1001'];
+  assert.strictEqual(p.statsSource, 'tdf7', 'after the type-7 block the arena owns the stats');
+  assert.strictEqual(state.players['2001'].statsSource, 'tdf7', 'for every player of the block');
+  assert.strictEqual(p.shotsHit, 42, 'official shotsHit overwrote the live value');
+  assert.strictEqual(p.shotsFired, 130, 'official shotsFired overwrote the lower bound');
+  assert.strictEqual(p.timesDeactivated, 7, 'timesZapped -> timesDeactivated');
+  assert.strictEqual(p.deactivations, 18, 'shotOpponent -> deactivations');
+  assert.strictEqual(p.shotTeam, 2, 'shotTeam');
+  assert.strictEqual(p.missileHits, 3, 'missiledOpponent -> missileHits');
+  assert.strictEqual(p.nukesDetonated, 1, 'nukesDetonated');
+  assert.strictEqual(state.players['2001'].penalties, 1, 'penalties from the block');
+  assert.strictEqual(state.players['2001'].timesDeactivated, 19, 'the block also corrects the target counters');
+  assert.strictEqual(p.official.livesLeft, 3, 'the raw official block is kept');
+  assert.strictEqual(p.official.shotsLeft, 12, 'the raw official block is complete');
+  assert.ok(live.players['1001'].shotsFired < p.shotsFired, 'the official number is higher than the live lower bound');
+  // the event, and its position: it must arrive BEFORE match_end so the stats
+  // writer files the official numbers
+  const i7 = evts.findIndex((e) => e.type === 'sm5_stats' && e.actorId === '1001');
+  const iEnd = evts.findIndex((e) => e.type === 'match_end');
+  assert.ok(i7 >= 0, 'sm5_stats event emitted');
+  assert.ok(i7 < iEnd, 'sm5_stats arrives before match_end');
+  assert.strictEqual(evts[i7].category, 'player', 'sm5_stats is a player event');
+  console.log('  ok    engine.type7EndBlock');
+} catch (err) { failed++; console.error(`  FAIL  engine.type7EndBlock\n        ${err.stack}`); }
+
+try {
+  // Tab vs. whitespace, and with vs. without the `;` schema comments.
+  // The mission description AND the team names carry spaces on purpose.
+  const STREAM = [
+    '0\t2.006\tlf-sim\tTesthalle',
+    ';1/mission\ttype\tdesc\tstart\tduration\tpenalty',
+    '1\t5\tSpace Marines 5\t20260916094500\t900\t0',
+    ';2/team\tindex\tdesc\tcolour-enum\tcolour-desc\tcolour',
+    '2\t0\tRote Kugeln\t1\tRed\t#ff0000',
+    '2\t1\tBlaue Kugeln\t4\tBlue\t#0000ff',
+    '4\t0\t0100',
+    ';3/entity-start\ttime\tid\ttype\tdesc\tteam\tlevel\tcategory\tbattlesuit',
+    '3\t100\t#1001\tplayer\tAnna Maria\t0\t3\t1\tSuit-A',
+    '3\t100\t#2001\tplayer\tCara\t1\t3\t3\tSuit-C',
+    '4\t1000\t0205\t#1001\thits\t#2001',
+    '4\t1500\t0206\t#1001\tdeactivates\t#2001',
+    '4\t2000\t0500\t#2001\tresupplies\t#1001',
+    '4\t3000\t0101',
+  ];
+  // battlesuit / memberId are the only fields that NEED a schema line, so they
+  // are compared separately.
+  const shape = (s) => JSON.stringify({
+    mode: s.mode, duration: s.duration, durationKnown: s.durationKnown,
+    missionDesc: s.missionDesc, scores: s.scores, scoreSource: s.scoreSource,
+    teams: s.teams,
+    players: Object.fromEntries(Object.entries(s.players).map(([k, v]) => {
+      const { battlesuit, memberId, ...rest } = v; return [k, rest];
+    })),
+  });
+  const tabbed = feedEngine(STREAM).state;
+  const spaced = feedEngine(toSpaces(STREAM)).state;
+  const tabbedNoSchema = feedEngine(noSchema(STREAM)).state;
+
+  assert.strictEqual(tabbed.teams['0'].name, 'Rote Kugeln', 'team name with a space (tab)');
+  assert.strictEqual(spaced.teams['0'].name, 'Rote Kugeln', 'team name with a space (whitespace)');
+  assert.strictEqual(tabbed.players['1001'].name, 'Anna Maria', 'player name with a space (tab)');
+  assert.strictEqual(tabbed.mode.label, 'Space Marines 5', 'mission description with spaces AND a trailing number');
+  assert.strictEqual(tabbed.missionDesc, 'Space Marines 5', 'missionDesc kept verbatim');
+  assert.strictEqual(tabbed.duration, 900000, 'duration read through the schema');
+
+  assert.strictEqual(shape(spaced), shape(tabbed), 'tab-fed and space-fed streams agree');
+  assert.strictEqual(shape(tabbedNoSchema), shape(tabbed), 'with and without the `;` schema lines the result agrees');
+  assert.strictEqual(tabbed.players['1001'].battlesuit, 'Suit-A', 'battlesuit via the schema (tab)');
+  assert.strictEqual(spaced.players['1001'].battlesuit, 'Suit-A', 'battlesuit via the schema (whitespace)');
+  assert.strictEqual(tabbedNoSchema.players['1001'].battlesuit, null, 'no schema, no battlesuit — by design');
+
+  // DOCUMENTED LIMIT (see CORE-API.md): with neither tabs nor schema lines a
+  // description ENDING in a number loses that last token. Everything that
+  // matters for counting still agrees — this pins the limit so it cannot widen.
+  const spacedNoSchema = feedEngine(toSpaces(noSchema(STREAM))).state;
+  assert.strictEqual(spacedNoSchema.mode.number, 5, 'limit case: mode number still right');
+  assert.strictEqual(spacedNoSchema.mode.family, 'sm5', 'limit case: family still right');
+  assert.strictEqual(spacedNoSchema.duration, 900000, 'limit case: duration still right');
+  assert.strictEqual(spacedNoSchema.durationKnown, true, 'limit case: durationKnown still right');
+  assert.strictEqual(spacedNoSchema.mode.label, 'Space Marines', 'limit case: trailing number of the description is lost');
+  assert.strictEqual(
+    JSON.stringify(spacedNoSchema.players['1001'].shotsFired),
+    JSON.stringify(tabbed.players['1001'].shotsFired),
+    'limit case: player counting is unaffected',
+  );
+  // a description that does NOT end in a number survives even that combination
+  const plain = feedEngine(toSpaces(noSchema([
+    '1\t28\tLaserball Ranked Abend\t20260916094500\t900\t0',
+  ]))).state;
+  assert.strictEqual(plain.mode.label, 'Laserball Ranked Abend', 'a normal description survives space+no-schema');
+  console.log('  ok    engine.tabWhitespaceEquivalence');
+} catch (err) { failed++; console.error(`  FAIL  engine.tabWhitespaceEquivalence\n        ${err.stack}`); }
+
+try {
+  // Robustness: the parser reads an unsecured TCP feed. Garbage, truncated
+  // lines, absurd numbers and prototype-pollution attempts must neither crash
+  // nor poison the state.
+  const before = Object.keys(Object.prototype).length;
+  const junk = [
+    '', '   ', '1', '1\t\t\t', '1\t\t', ';', ';;', ';1/mission', ';\t\t',
+    '2', '2\t99\tX\t1\tRed\t#fff', '2\t-1\tX\t1\tRed\t#fff', '2\t__proto__\tX\t1\tRed\t#fff',
+    '2\tconstructor\tX\t1\tRed\t#fff', '2\t1e3\tX\t1\tRed\t#fff',
+    '3', '3\tplayer', '3\t100\t#1\tplayer',
+    '4', '4\tx\ty\tz', '4\t0\t1101\t#ghost', '4\t0\t\t', '4\t0\t110\t#1',
+    '5', '5\t0\t__proto__\t0\t1\t99', '5\t0\tconstructor\t0\t1\t99', '5\t0\tprototype\t0\t1\t7',
+    '5\t0\t999\t0\t1\t5', '5\t0\t0\t0\t1\t99999999999999999999',
+    '6', '7', '7\t#nope\t1\t2', '9', '9\t0\t#ghost\t2',
+    'völliger Unsinn ohne Zahlen', '\t\t\t', '4\t0\t0100\t'.repeat(3),
+  ];
+  const { state } = feedEngine(junk);
+  assert.strictEqual(({}).polluted, undefined, 'no prototype pollution');
+  assert.strictEqual(({}).X, undefined, 'no prototype pollution through a team line');
+  assert.strictEqual(Object.keys(Object.prototype).length, before, 'Object.prototype untouched');
+  assert.ok(!Object.prototype.hasOwnProperty.call(state.scores, '__proto__'), 'no __proto__ score key');
+  assert.ok(!Object.prototype.hasOwnProperty.call(state.scores, 'constructor'), 'no constructor score key');
+  assert.ok(!Object.prototype.hasOwnProperty.call(state.scores, '999'), 'an implausible team key is rejected');
+  assert.ok(!Object.prototype.hasOwnProperty.call(state.teams, '__proto__'), 'no __proto__ team');
+  assert.ok(!Object.prototype.hasOwnProperty.call(state.teams, '99'), 'a team index out of bounds is rejected');
+  assert.ok(Object.keys(state.teams).length <= 1, 'the hostile feed did not grow the team table');
+  assert.ok(Object.keys(state.scores).length <= 1, 'the hostile feed did not grow the score table');
+  assert.strictEqual(state.mode.known, false, 'a broken type-1 line leaves the mode unknown');
+  assert.ok(typeof state.remainingMs === 'object' || typeof state.remainingMs === 'number', 'remainingMs stays well-formed');
+
+  // A hostile type-7 schema: dangerous column names must not reach the player
+  // object, harmless ones still must.
+  const hostile = feedEngine([
+    '1\t5\tX\t0\t900\t0',
+    '4\t0\t0100',
+    '3\t100\t#1001\tplayer\tA\t0\t3\t1',
+    ';7/stats\tid\t__proto__\tconstructor\tprototype\tshotsHit',
+    '7\t#1001\t9\t9\t9\t42',
+  ]);
+  const off = hostile.state.players['1001'].official;
+  // `constructor` / `prototype` are dropped outright; `__proto__` survives only
+  // as the harmless key `proto`, because the camelCase normalization strips the
+  // underscores BEFORE the unsafe-key check. Both paths are pinned here.
+  assert.deepStrictEqual(Object.keys(off), ['proto', 'shotsHit'], 'unsafe type-7 column names never land as such');
+  assert.ok(!Object.prototype.hasOwnProperty.call(off, '__proto__'), 'no literal __proto__ key');
+  assert.strictEqual(Object.getPrototypeOf(off), Object.prototype, 'the official block keeps its prototype');
+  assert.strictEqual(off.constructor, Object, 'constructor was not overwritten');
+  assert.strictEqual(hostile.state.players['1001'].shotsHit, 42, 'the safe column still lands');
+  assert.strictEqual(hostile.state.players['1001'].proto, undefined, 'a dropped column reaches no live counter');
+  assert.strictEqual(({}).polluted, undefined, 'still no prototype pollution');
+
+  // absurd numbers in a type-4 line
+  const absurd = feedEngine([
+    '1\t28\tX\t0\t900\t0', '2\t0\tRot\t1\tRed\t#ff0000', '4\t0\t0100',
+    '3\t100\t#1\tplayer\tA\t0\t3\t0',
+    '4\t99999999999999999999\t1101\t#1',
+    '4\t-5\t1101\t#1',
+  ]);
+  assert.strictEqual(absurd.state.players['1'].goals, 2, 'absurd timestamps do not stop the counting');
+  assert.ok(Number.isFinite(absurd.state.elapsedTime), 'elapsedTime stays a finite number');
+
+  // a truncated stream (cut mid-line by the socket) must not corrupt anything
+  const cut = feedEngine([
+    '1\t28\tLaserball Ranked\t0\t900\t0', '2\t0\tRot\t1\tRed\t#ff0000', '4\t0\t0100',
+    '3\t100\t#1\tplayer\tA\t0\t3\t0', '4\t1000\t110',
+  ]);
+  assert.strictEqual(cut.state.players['1'].goals, 0, 'a truncated code counts nothing');
+  assert.strictEqual(cut.state.mode.family, 'laserball', 'and does not change the family');
+  console.log('  ok    engine.robustness');
+} catch (err) { failed++; console.error(`  FAIL  engine.robustness\n        ${err.stack}`); }
+
+try {
+  // CSV family separation (contract D), driven through the REAL engine and the
+  // REAL stats writer, wired exactly as src/index.js does. Everything lands in
+  // an OS temp directory and is removed again.
+  const { Engine } = require('../src/engine');
+  const { StatsWriter, splitCsv } = require('../src/statsWriter');
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'lfmodes-'));
+  const DELIM = ';';
+  const quiet = { debug() {}, info() {}, warn() {}, error() {} };
+  const eng = new Engine({ logger: null });
+  const sw = new StatsWriter({
+    logger: quiet,
+    getConfig: () => ({ csv: { enabled: true, dir, delimiter: DELIM, bom: true, writeEvents: false, writeLive: false } }),
+  });
+  eng.on('change', () => sw.onChange(eng.gameState));
+  eng.on('event', (e) => sw.onEvent(e));
+  eng.on('match_start', () => sw.onMatchStart(eng.snapshot()));
+  eng.on('match_end', () => sw.onMatchEnd(eng.snapshot()));
+
+  // matchId is Date.now().toString(36) — two matches inside the same
+  // millisecond would collide, so the test waits a few ms between missions.
+  const pause = () => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 3);
+  const feedMatch = (lines) => { pause(); for (const l of lines) eng.processLogLine(l); };
+  const rowsOf = (name) => {
+    const text = fs.readFileSync(path.join(dir, name), 'utf8').replace(/^﻿/, '');
+    const lines = text.split(/\r?\n/).filter(Boolean);
+    const head = splitCsv(lines[0], DELIM);
+    return lines.slice(1).map((l) => {
+      const c = splitCsv(l, DELIM);
+      const o = {};
+      head.forEach((h, i) => (o[h] = c[i]));
+      return o;
+    });
+  };
+  const headOf = (name) => splitCsv(
+    fs.readFileSync(path.join(dir, name), 'utf8').replace(/^﻿/, '').split(/\r?\n/)[0], DELIM,
+  );
+
+  // (a) Laserball: Anna + Ben
+  feedMatch([
+    '1 28 Laserball Ranked 0 300 0',
+    '2 0 Rote Kugeln 5 solid #ef4444', '2 1 Blaue Kugeln 5 solid #3b82f6',
+    '4 100 0100',
+    '3 1000 event @1001 player Anna 0 3 1', '3 1100 event @2001 player Ben 1 3 1',
+    '4 5000 1100 @1001 @2001', '4 9000 1101 @1001',
+    '4 300000 0101',
+  ]);
+  // (b) SM5: Anna again + Cleo
+  feedMatch([
+    '1 5 Space Marines 5 0 900 0',
+    '2 0 Rote Kugeln 5 solid #ef4444', '2 1 Blaue Kugeln 5 solid #3b82f6',
+    '4 400 0100',
+    '3 1000 event @1001 player Anna 0 3 1', '3 1100 event @3001 player Cleo 1 3 2',
+    '4 5000 0205 @1001 @3001', '4 6000 0206 @1001 @3001',
+    '5 8000 0 0 4200 4200', '5 8000 1 0 3100 3100',
+    '4 900000 0101',
+  ]);
+
+  const files = fs.readdirSync(dir).filter((n) => n.endsWith('.csv')).sort();
+  assert.deepStrictEqual(files, [
+    'all_players_laserball.csv', 'all_players_sm5.csv', 'matches.csv',
+    'player_modes.csv', 'totals_laserball.csv', 'totals_sm5.csv',
+  ], 'the two families land in separate files');
+  assert.ok(!fs.existsSync(path.join(dir, 'all_players.csv')), 'no un-suffixed player file is written');
+  assert.ok(!fs.existsSync(path.join(dir, 'totals.csv')), 'no un-suffixed totals file is written');
+
+  // the column sets are disjoint
+  assert.ok(headOf('all_players_laserball.csv').includes('goals'), 'laserball file counts goals');
+  assert.ok(!headOf('all_players_laserball.csv').includes('shots_fired'), 'laserball file has no SM5 columns');
+  assert.ok(headOf('all_players_sm5.csv').includes('shots_fired'), 'sm5 file counts shots');
+  assert.ok(!headOf('all_players_sm5.csv').includes('goals'), 'sm5 file has no Laserball columns');
+
+  // matches.csv: one row per match, with the right family
+  const matches = rowsOf('matches.csv');
+  assert.strictEqual(matches.length, 2, 'one row per match');
+  assert.deepStrictEqual(matches.map((r) => r.family), ['laserball', 'sm5'], 'family per match');
+  assert.deepStrictEqual(matches.map((r) => r.mode_key), ['laserball_ranked', 'sm5'], 'mode_key per match');
+  assert.deepStrictEqual(matches.map((r) => r.score_source), ['internal', 'tdf'], 'score authority per match');
+  assert.strictEqual(new Set(matches.map((r) => r.match_id)).size, 2, 'two distinct match ids');
+
+  // the player rows went to the right file
+  const lbRows = rowsOf('all_players_laserball.csv');
+  const smRows = rowsOf('all_players_sm5.csv');
+  assert.strictEqual(lbRows.length, 2, 'laserball match: 2 player rows');
+  assert.strictEqual(smRows.length, 2, 'sm5 match: 2 player rows');
+  assert.strictEqual(lbRows.find((r) => r.name === 'Anna').goals, '1', 'Anna scored in the laserball match');
+  assert.strictEqual(lbRows.find((r) => r.name === 'Anna').passes_done, '1', 'and passed once');
+  assert.strictEqual(smRows.find((r) => r.name === 'Anna').team_score, '4200', 'sm5 row carries the arena points');
+  assert.ok(!('goals' in smRows[0]), 'an sm5 row has no goals column at all');
+
+  // player_modes.csv: Anna played BOTH families -> two rows
+  const pm = rowsOf('player_modes.csv');
+  const annaRows = pm.filter((r) => r.player_id === '1001');
+  assert.strictEqual(annaRows.length, 2, 'a player who played both modes gets TWO rows');
+  assert.deepStrictEqual(annaRows.map((r) => r.mode_key).sort(), ['laserball_ranked', 'sm5'], 'one row per mode');
+  assert.deepStrictEqual(annaRows.map((r) => r.family).sort(), ['laserball', 'sm5'], 'each row carries its family');
+  assert.ok(annaRows.every((r) => r.matches === '1'), 'one match per mode');
+  assert.strictEqual(pm.filter((r) => r.player_id === '2001').length, 1, 'Ben only ever played laserball');
+  assert.strictEqual(pm.find((r) => r.player_id === '2001').family, 'laserball', 'and is filed there');
+  assert.strictEqual(pm.filter((r) => r.player_id === '3001').length, 1, 'Cleo only ever played sm5');
+  assert.strictEqual(pm.find((r) => r.player_id === '3001').family, 'sm5', 'and is filed there');
+
+  // the per-family totals stay separate
+  assert.strictEqual(rowsOf('totals_laserball.csv').find((r) => r.name === 'Anna').goals, '1', 'laserball totals');
+  assert.ok(rowsOf('totals_sm5.csv').every((r) => r.goals === undefined), 'sm5 totals carry no Laserball columns');
+  assert.deepStrictEqual(sw.totalsFamilies().sort(), ['laserball', 'sm5'], 'both families are reported');
+
+  fs.rmSync(dir, { recursive: true, force: true });
+  console.log('  ok    statsWriter.familySplit');
+} catch (err) { failed++; console.error(`  FAIL  statsWriter.familySplit\n        ${err.stack}`); }
+
+try {
+  const { listEventLogFiles, eventLogNameOk } = require('../src/apiServer');
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'lfevlog-'));
+  fs.writeFileSync(path.join(dir, 'events-2026-09-10.log'), 'line one\n');
+  fs.writeFileSync(path.join(dir, 'events.log'), 'x\n');
+  fs.writeFileSync(path.join(dir, 'notes.txt'), 'ignore me\n');
+  const files = listEventLogFiles(dir);
+  assert.strictEqual(files.length, 2, 'lists only events*.log files');
+  assert.ok(files.every((f) => typeof f.size === 'number' && typeof f.mtime === 'number' && typeof f.name === 'string'), 'entries carry name/size/mtime');
+  assert.deepStrictEqual(listEventLogFiles(path.join(dir, 'missing')), [], 'missing dir -> []');
+  assert.ok(eventLogNameOk('events-2026-09-10.log'), 'valid name accepted');
+  assert.ok(!eventLogNameOk('../secrets.log'), 'traversal rejected');
+  assert.ok(!eventLogNameOk('sub/events.log'), 'path separator rejected');
+  assert.ok(!eventLogNameOk('totals.csv'), 'non-events name rejected');
+  fs.rmSync(dir, { recursive: true, force: true });
+  console.log('  ok    apiServer.eventLogList');
+} catch (err) { failed++; console.error(`  FAIL  apiServer.eventLogList\n        ${err.stack}`); }
+
+try {
+  const { parseCookies, SessionStore, LoginGuard, isHash, generatePassword, passwordProblem } = require('../src/auth');
+
+  assert.deepStrictEqual(parseCookies('a=1; lf_sess=abc%3Dd; junk'), { a: '1', lf_sess: 'abc=d' }, 'cookie header parsed');
+  assert.deepStrictEqual(parseCookies(undefined), {}, 'missing cookie header -> {}');
+
+  const s = new SessionStore({ ttlMs: 50, max: 3 });
+  const { token } = s.create({ ip: '1.2.3.4' });
+  assert.ok(s.get(token), 'fresh session valid');
+  assert.ok(!s.get('etwas-anderes'), 'unknown token invalid');
+  s.destroy(token);
+  assert.ok(!s.get(token), 'destroyed session invalid');
+  const short = s.create({}).token;
+  assert.ok(!Array.from(s.map.values()).some((v) => JSON.stringify(v).includes(short)), 'raw token is not stored');
+  s.stop();
+
+  const g = new LoginGuard({ maxFails: 3, lockoutMs: 60000 });
+  assert.strictEqual(g.lockedFor('9.9.9.9'), 0, 'unknown ip not locked');
+  g.fail('9.9.9.9'); g.fail('9.9.9.9');
+  assert.strictEqual(g.lockedFor('9.9.9.9'), 0, 'below the limit, no lockout');
+  g.fail('9.9.9.9');
+  assert.ok(g.lockedFor('9.9.9.9') > 0, 'lockout after maxFails');
+  g.succeed('9.9.9.9');
+  assert.strictEqual(g.lockedFor('9.9.9.9'), 0, 'success clears the lockout');
+
+  const { RecoveryCode } = require('../src/auth');
+  const rc = new RecoveryCode({ ttlMs: 60000, cooldownMs: 1000 });
+  assert.strictEqual(rc.consume('irgendwas'), false, 'no code issued -> nothing to consume');
+  assert.strictEqual(rc.cooldownLeft(), 0, 'first code can be requested at once');
+  const { code } = rc.issue();
+  assert.ok(/^[A-Z0-9]{4}(-[A-Z0-9]{4}){2}$/.test(code), 'code is short and readable');
+  assert.ok(rc.cooldownLeft() > 0, 'cooldown starts after issuing');
+  assert.ok(rc.pending, 'code is pending');
+  assert.strictEqual(rc.consume('AAAA-BBBB-CCCC'), false, 'wrong code rejected');
+  assert.strictEqual(rc.consume(code.toLowerCase()), true, 'code is case-insensitive');
+  assert.strictEqual(rc.consume(code), false, 'code works exactly once');
+  assert.ok(!rc.pending, 'nothing pending afterwards');
+  const rc2 = new RecoveryCode({ ttlMs: -1 });
+  const expired = rc2.issue().code;
+  assert.strictEqual(rc2.consume(expired), false, 'expired code rejected');
+
+  assert.ok(/^[A-Za-z0-9]{4}(-[A-Za-z0-9]{4}){3}$/.test(generatePassword()), 'generated password is readable');
+  assert.notStrictEqual(generatePassword(), generatePassword(), 'generated passwords differ');
+  assert.ok(passwordProblem('kurz'), 'short password refused');
+  assert.strictEqual(passwordProblem('lang-genug-123'), null, 'long enough password accepted');
+  assert.ok(!isHash('hunter2') && !isHash('') && !isHash(null), 'plaintext is never mistaken for a hash');
+  console.log('  ok    auth.sessions');
+} catch (err) { failed++; console.error(`  FAIL  auth.sessions\n        ${err.stack}`); }
+
+(async () => {
+  try {
+    const { hashPassword, verifyPassword, isHash } = require('../src/auth');
+    const h = await hashPassword('Geheim-123');
+    assert.ok(isHash(h) && h.startsWith('scrypt$'), 'hash has the expected shape');
+    assert.ok(!h.includes('Geheim'), 'hash does not contain the password');
+    assert.strictEqual(await verifyPassword('Geheim-123', h), true, 'correct password verifies');
+    assert.strictEqual(await verifyPassword('Geheim-124', h), false, 'wrong password fails');
+    assert.strictEqual(await verifyPassword('Geheim-123', 'kaputt'), false, 'broken hash fails closed');
+    assert.strictEqual(await verifyPassword('', ''), false, 'empty hash fails closed');
+    assert.notStrictEqual(await hashPassword('x'.repeat(10)), await hashPassword('x'.repeat(10)), 'salt makes every hash unique');
+    console.log('  ok    auth.password');
+  } catch (err) { failed++; console.error(`  FAIL  auth.password\n        ${err.stack}`); }
+
+  try {
+    const { normalize } = require('../src/config');
+    const c = normalize({
+      admin: { passwordHash: 'nicht-wirklich-ein-hash', sessionHours: '9999' },
+      notify: { ntfy: { topic: 'bad/topic name' }, discordWebhook: 'ftp://nope', email: { port: '70000' } },
+    });
+    assert.strictEqual(c.admin.passwordHash, '', 'a non-hash never reaches the stored config');
+    assert.strictEqual(c.admin.sessionHours, 720, 'session hours clamped');
+    assert.strictEqual(c.notify.ntfy.topic, 'badtopicname', 'ntfy topic reduced to one safe segment');
+    assert.strictEqual(c.notify.discordWebhook, '', 'non-http webhook url rejected');
+    assert.strictEqual(c.notify.email.port, 65535, 'smtp port clamped');
+    const round = normalize(normalize({}));
+    assert.strictEqual(JSON.stringify(round), JSON.stringify(normalize({})), 'normalize is idempotent');
+    console.log('  ok    config.adminNotify');
+  } catch (err) { failed++; console.error(`  FAIL  config.adminNotify\n        ${err.stack}`); }
+
+  try {
+    const { reachability } = require('../src/netinfo');
+    const r = reachability({ http: { host: '0.0.0.0', port: 8080 }, tcp: { host: '0.0.0.0', port: 9000 }, streamServer: {} });
+    assert.ok(Array.isArray(r.addresses), 'addresses listed');
+    assert.ok(r.urls[0].startsWith('http://localhost:8080'), 'localhost url first');
+    assert.strictEqual(r.http.lanOpen, true, '0.0.0.0 counts as LAN-open');
+    const local = reachability({ http: { host: '127.0.0.1', port: 8080 }, tcp: {}, streamServer: {} });
+    assert.strictEqual(local.http.lanOpen, false, '127.0.0.1 is not LAN-open');
+    assert.ok(!local.urls.some((u) => /\b\d+\.\d+\.\d+\.\d+/.test(u) && !u.includes('127.0.0.1')), 'no LAN url when bound to localhost');
+    console.log('  ok    netinfo.reachability');
+  } catch (err) { failed++; console.error(`  FAIL  netinfo.reachability\n        ${err.stack}`); }
+
+  try {
+    const { Notifier, accessSummary, asciiHeader } = require('../src/notify');
+    const cfg = {
+      admin: { enabled: true, passwordHash: 'scrypt$1$2$3$a$b' }, apiToken: '',
+      http: { host: '0.0.0.0', port: 8080 }, tcp: { host: '0.0.0.0', port: 9000 }, streamServer: {},
+      notify: { enabled: true, name: 'Halle 1', ntfy: { server: 'https://ntfy.sh', topic: 'lf-test' }, email: {}, telegram: {}, webhook: {} },
+    };
+    const n = new Notifier({ logger: { info() {}, warn() {} }, getConfig: () => cfg });
+    assert.deepStrictEqual(n.channels().map((c) => c.id), ['ntfy'], 'only configured channels are listed');
+    assert.strictEqual(n.label(), 'Halle 1', 'name overrides the hostname');
+    const m = n.startupMessage(['Extra-Zeile']);
+    assert.ok(m.title.includes('Halle 1') && m.text.includes(':8080') && m.text.includes('Extra-Zeile'), 'startup message carries name, port and extras');
+    assert.ok(!m.text.includes('lf-test'), 'startup message carries no channel secrets');
+    assert.strictEqual(accessSummary(cfg), 'Admin-Passwort erforderlich', 'access summary reflects the login');
+    assert.strictEqual(accessSummary({ admin: {}, apiToken: '' }), 'OFFEN — kein Passwort gesetzt!', 'open instance is called out');
+    assert.strictEqual(asciiHeader('Größe — ok'), 'Groesse  ok', 'header transliterated to ascii');
+    assert.strictEqual(n.channels().length, 1, 'channel list is derived, not cached');
+    console.log('  ok    notify.channels');
+  } catch (err) { failed++; console.error(`  FAIL  notify.channels\n        ${err.stack}`); }
+
+  try {
+    const { buildMessage, encodeHeader } = require('../src/smtp');
+    assert.strictEqual(encodeHeader('plain ascii'), 'plain ascii', 'ascii header left alone');
+    assert.ok(encodeHeader('Grüße').startsWith('=?UTF-8?B?'), 'non-ascii header encoded');
+    const msg = buildMessage({ from: 'a@b.c', to: ['d@e.f'], subject: 'Test', text: 'Zeile 1\nZeile 2' });
+    assert.ok(msg.includes('\r\nTo: d@e.f\r\n') && msg.includes('Content-Transfer-Encoding: base64'), 'headers written with CRLF');
+    assert.ok(msg.split('\r\n\r\n')[1].trim().length > 0, 'body present');
+    const inject = buildMessage({ from: 'a@b.c\r\nBcc: x@y.z', to: ['d@e.f'], subject: 'a\nb', text: 'x' });
+    assert.ok(!/\r\nBcc:/i.test(inject), 'a CRLF in the sender cannot start a new header');
+    assert.ok(/\r\nSubject: a b\r\n/.test(inject), 'newline in the subject is folded to a space');
+    console.log('  ok    smtp.message');
+  } catch (err) { failed++; console.error(`  FAIL  smtp.message\n        ${err.stack}`); }
+
+  console.log(failed ? `\n${failed} check(s) failed` : '\nAll checks passed');
+  process.exit(failed ? 1 : 0);
+})();
