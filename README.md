@@ -101,6 +101,7 @@ Zwei Ebenen, die spätere gewinnt:
 | `LF_EVENTLOG_DIR` | `data/logs` | Zielordner der Event-Log-Datei |
 | `LF_EVENTLOG_ROTATE` | `daily` | `daily` (pro Tag) · `match` (pro Match) · `none` (eine Datei) |
 | `LF_EMIT_UNKNOWN_EVENTS` | `true` | zusätzlich ein generisches `lf_event` für jeden nicht ausgewerteten Typ-4-Code |
+| `LF_CAPTURE_ENABLED` | `false` | rohen Laserforce-Stream byteweise mitschneiden — Diagnose, kein Dauerbetrieb ([docs/CAPTURE.md](docs/CAPTURE.md)) |
 | `LF_LOCAL_ROSTER_ENABLED` | `false` | eigene Namensliste nutzen |
 | `LF_LOCAL_ROSTER_FILE` | `data/roster.csv` | deren Pfad |
 | `LF_MATCH_DURATION_MS` | `720000` | Fallback bis Laserforce die Dauer meldet |
@@ -160,6 +161,7 @@ src/
   outputs.js      ausgehende Ziele: webhook / tcp / udp
   statsWriter.js  Statistik → CSV
   eventLog.js     lesbare Event-Log-Datei (data/logs/)
+  capture.js      Roh-Mitschnitt des TCP-Streams (data/capture/, standardmäßig aus)
   eventCatalog.js Event-Code-Nachschlagewerk (Label, Kategorie, Klartext)
   localRoster.js  optionale Namensliste (CSV)
   web/            die Konsole (statisch, kein Build)
@@ -168,6 +170,7 @@ scripts/
   itest.js        End-to-End-Test       npm run itest
   setpw.js        Admin-Passwort setzen/zurücksetzen   npm run setpw
   inspect.js      Laserforce-Feed katalogisieren   node scripts/inspect.js [port]
+  replay.js       Mitschnitt zurückspielen   node scripts/replay.js <datei.tdf>
 docs/
   CONFIG.md       jede Einstellung, Dienst-Setup, Firewall
   SECURITY.md     Sicherheitsmodell, Login, Härtung
@@ -179,6 +182,7 @@ docs/
   GAMEMODES.md    Spielmodi: Erkennung, Zähler je Familie, neuen Modus eintragen
   STATS.md        CSV-Dateien, Spalten, Auswertung
   LOGGING.md      lesbare Event-Log-Datei: Zeilenformat, Rotation
+  CAPTURE.md      Roh-Mitschnitt: aufzeichnen, Grenzen, zurückspielen
 ```
 
 Der Test-Kit `../lf_simulate` (Match-Generator + Event-Monitor + E2E-Verify)

@@ -2,6 +2,9 @@ node_modules/
 .env
 config.json
 data/
+# covers data/capture/ — raw stream recordings (docs/CAPTURE.md) carry player
+# names and Laserforce member ids and must never reach a repository
+*.tdf
 *.log
 *.tmp
 inspect-report.json

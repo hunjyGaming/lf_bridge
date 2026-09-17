@@ -3,7 +3,11 @@
 const fs = require('fs');
 const path = require('path');
 const { readable } = require('./eventCatalog');
-const { FAMILIES, DEFAULT_FAMILY, csvColumns, statFields, resolveMode } = require('./gameModes');
+const {
+  FAMILIES, DEFAULT_FAMILY, FAMILY_DEFAULT_PROFILE, counterColumns, statFields,
+  csvColumns, profileFields, profileSort, profileOf, withProfile,
+  normProfile, resolveModeWithProfile, SM5_OFFICIAL_FIELDS, snake,
+} = require('./gameModes');
 
 /**
  * Match statistics -> CSV files on this PC. Nothing leaves the machine.
@@ -24,9 +28,16 @@ const { FAMILIES, DEFAULT_FAMILY, csvColumns, statFields, resolveMode } = requir
  * `gameState.mode.family`.
  *
  * MIGRATION: a pre-mode `all_players.csv` (Laserball history, no mode columns) is
- * read ONCE at startup so its totals survive — `csvColumns('laserball')` is
- * column-identical to that old set. The old file is never written, renamed or
- * deleted; it is only ever read.
+ * read ONCE at startup so its totals survive — `counterColumns('laserball')` is
+ * column-identical to that old set, and it is what the replay reads by NAME, so
+ * neither the added columns nor the new column ORDER touch the import. The old
+ * file is never written, renamed or deleted; it is only ever read.
+ *
+ * WHICH COLUMNS a player row gets is the DISPLAY PROFILE's business, not the
+ * family's — see src/gameModes.js. The per-match file follows the match's
+ * profile; the append-only `all_players_<family>.csv` follows the family's
+ * default profile, because its header is fixed on first write and two profiles
+ * of one family would otherwise collide.
  *
  * A match is finalized on the Laserforce "mission end" (0101). If the operator
  * starts a new match without an end, the previous one is still finalized from
@@ -41,25 +52,51 @@ const LEGACY_ALL_PLAYERS = 'all_players.csv';
 const LEGACY_MODE = { key: 'laserball_legacy', label: 'Laserball (Altbestand)', number: null, family: FAMILIES.LASERBALL };
 
 /**
- * Common head of every player row (contract D). `mode_number` is carried as
- * well — it is the only stable handle on a mode whose number is not in the
- * registry. `stats_source` says whether the counters are the official type-7
- * numbers of the arena (`tdf7`) or lf_live's own live count (`live`);
- * `score_source` likewise for the score the `result` was derived from.
+ * Player rows are ordered by BUSINESS IMPORTANCE, not by accident:
+ *
+ *   1. identity  — HEAD_COLS: which match, when, which mode, who, which team,
+ *                  which role, which level
+ *   2. result    — RESULT_COLS: the points and how the match ended
+ *   3. core      — the profile's leading metrics (profileFields(), front part)
+ *   4. detail    — the profile's remaining counters
+ *   5. provenance— TAIL_COLS: where each block of numbers came from
+ *
+ * `mode_number` is carried as well — it is the only stable handle on a mode
+ * whose number is not in the registry. `profile` says which column set this row
+ * was written with, so a reader never has to guess from the header.
  */
 const HEAD_COLS = [
-  'match_id', 'date', 'mode_key', 'mode_label', 'mode_number', 'family',
-  'player_id', 'name', 'team_id', 'team', 'role',
-  'score', 'team_score', 'opp_score', 'result', 'duration_s',
-  'stats_source', 'score_source',
+  'match_id', 'date',
+  'mode_key', 'mode_label', 'mode_number', 'family', 'profile',
+  'player_id', 'name', 'team_id', 'team', 'role', 'level',
 ];
+
+/** The outcome, right after the identity — what anybody looks at first. */
+const RESULT_COLS = ['score', 'team_score', 'opp_score', 'result', 'duration_s'];
+
+/**
+ * Provenance, always last. `stats_source` says whether the counters are the
+ * official type-7 numbers of the arena (`tdf7`) or lf_live's own live count
+ * (`live`); `score_source` likewise for the score the `result` was derived
+ * from; `accuracy_source` likewise for the hit rate (only where there is one).
+ */
+const TAIL_COLS = ['stats_source', 'score_source'];
+const ACCURACY_SOURCE_COL = 'accuracy_source';
+
+/**
+ * Player-object fields that must land in the CSV as an EMPTY cell when they are
+ * not a number — the official type-7 measurements (they do not exist before the
+ * match has ended) and the derived hit rate (undefined without shots). Writing
+ * a 0 there would pass a missing measurement off as a measured zero.
+ */
+const BLANK_WHEN_MISSING = new Set(SM5_OFFICIAL_FIELDS.concat(['accuracy']));
 
 const TOTAL_HEAD = ['player_id', 'name', 'matches', 'wins', 'losses', 'draws'];
 
 /** One row per match — the index of everything that was recorded. */
 const MATCH_COLS = [
   'match_id', 'date', 'started_at', 'ended_at', 'duration_s',
-  'mode_key', 'mode_label', 'mode_number', 'family',
+  'mode_key', 'mode_label', 'mode_number', 'family', 'profile',
   'players', 'teams', 'scores', 'winner_team', 'winner_score', 'score_source', 'events',
 ];
 
@@ -76,15 +113,21 @@ const EVENT_COLS = [
 ];
 
 /**
- * `csvColumns()` / `statFields()` build a fresh array on every call; seeding the
- * totals from a long history calls them once per row, so memoize per family.
- * The cached arrays are read-only for everyone in this module.
+ * `counterColumns()` / `statFields()` / `profileFields()` build a fresh array on
+ * every call; seeding the totals from a long history calls them once per row, so
+ * memoize. The cached arrays are read-only for everyone in this module.
+ *
+ * Two separate caches, because the two axes are separate:
+ *   familyCols/familyFields — the FAMILY's plain counters (aggregates)
+ *   profileCols/profileFlds — the PROFILE's display block (player rows)
  */
 const COL_CACHE = new Map();
 const FIELD_CACHE = new Map();
+const PROFILE_COL_CACHE = new Map();
+const PROFILE_FIELD_CACHE = new Map();
 function familyCols(family) {
   const f = normFamily(family);
-  if (!COL_CACHE.has(f)) COL_CACHE.set(f, csvColumns(f));
+  if (!COL_CACHE.has(f)) COL_CACHE.set(f, counterColumns(f));
   return COL_CACHE.get(f);
 }
 function familyFields(family) {
@@ -92,13 +135,57 @@ function familyFields(family) {
   if (!FIELD_CACHE.has(f)) FIELD_CACHE.set(f, statFields(f));
   return FIELD_CACHE.get(f);
 }
-
-/** Player-row columns for a family: common head + that family's counters. */
-function playerColumns(family) {
-  return HEAD_COLS.concat(familyCols(family));
+function profileCols(profile) {
+  const p = normProfile(profile);
+  if (!PROFILE_COL_CACHE.has(p)) PROFILE_COL_CACHE.set(p, csvColumns(p));
+  return PROFILE_COL_CACHE.get(p);
+}
+function profileFlds(profile) {
+  const p = normProfile(profile);
+  if (!PROFILE_FIELD_CACHE.has(p)) PROFILE_FIELD_CACHE.set(p, profileFields(p));
+  return PROFILE_FIELD_CACHE.get(p);
 }
 
-/** Totals columns for a family. The head is unchanged from the pre-mode file. */
+/**
+ * The profile a FAMILY's append-only aggregate file is written with.
+ *
+ * `all_players_<family>.csv` is append-only, so its header is fixed on first
+ * write and every later row must fit it. Two modes of the same family may use
+ * different display profiles (`standard` and `sm5` both speak family `sm5`), so
+ * the shared file uses the family's DEFAULT profile — which is the widest of
+ * that family's profiles. The per-match file uses the match's own profile.
+ */
+function familyProfile(family) {
+  return FAMILY_DEFAULT_PROFILE[normFamily(family)] || normProfile(null);
+}
+
+/** Does this profile show a hit rate? Then its rows carry its provenance too. */
+function profileHasAccuracy(profile) {
+  return profileFlds(profile).includes('accuracy');
+}
+
+/** Provenance block of a profile — always the last columns of a player row. */
+function tailColumns(profile) {
+  return profileHasAccuracy(profile) ? TAIL_COLS.concat([ACCURACY_SOURCE_COL]) : TAIL_COLS.slice();
+}
+
+/**
+ * Player-row columns for a display PROFILE: identity, result, the profile's
+ * counter block, provenance.
+ *
+ * BACK-COMPAT: a family name still works — `playerColumns('laserball')` yields
+ * the Laserball profile, exactly as before.
+ */
+function playerColumns(profile) {
+  const p = normProfile(profile);
+  return HEAD_COLS.concat(RESULT_COLS, profileCols(p), tailColumns(p));
+}
+
+/**
+ * Totals columns for a FAMILY — deliberately not profile-aware. The head is
+ * unchanged from the pre-mode file, and so is the counter block: a total is a
+ * sum, and neither a derived rate nor a type-7-only measurement may be summed.
+ */
 function totalColumns(family) {
   const f = normFamily(family);
   const derived = f === FAMILIES.LASERBALL ? 'goals_per_match' : 'score_per_match';
@@ -220,11 +307,12 @@ class StatsWriter {
     try {
       const mode = this._match?.mode || pickMode(state) || fallbackMode(state);
       const family = normFamily(mode.family);
+      const profile = profileOf(mode);
       this._match.mode = mode;
       this._match.endedAt = new Date().toISOString();
       fs.mkdirSync(path.join(this.dir(), 'matches'), { recursive: true });
       const rows = this._playerRows(state, mode, family);
-      this._writeMatchPlayers(state, true, rows, family);
+      this._writeMatchPlayers(state, true, rows, family, profile);
       if (this.cfg.writeEvents) this._writeMatchEvents(mode);
       this._appendAll(rows, family);
       this._appendMatchRow(state, mode, family, rows);
@@ -245,15 +333,22 @@ class StatsWriter {
     this._match = null;
   }
 
+  /**
+   * One row per player, ordered the way a human reads a result sheet:
+   * by team, and inside a team by score, best first.
+   */
   _playerRows(state, mode, family) {
     const m = this._match;
     const date = m.startedAt.slice(0, 10);
     const durationS = Math.round((state.elapsedTime || 0) / 1000);
     const scores = state.scores || {};
     const scoreSource = state.scoreSource === 'tdf' ? 'tdf' : 'internal';
-    const fields = familyFields(family);
-    const cols = familyCols(family);
-    return Object.values(state.players || {}).map((p) => {
+    const profile = profileOf(mode);
+    // Fill the union of the match profile's block and the family file's block:
+    // the same row object is written to the per-match file (match profile) and
+    // to the append-only family file (family default profile).
+    const fields = [...new Set(profileFlds(profile).concat(profileFlds(familyProfile(family))))];
+    const rows = Object.values(state.players || {}).map((p) => {
       const teamScore = num(scores[p.teamId]);
       const oppScore = Math.max(0, ...Object.entries(scores)
         .filter(([k]) => k !== String(p.teamId))
@@ -261,33 +356,46 @@ class StatsWriter {
       const result = teamScore > oppScore ? 'win' : teamScore < oppScore ? 'loss' : 'draw';
       const team = state.teams?.[p.teamId]?.name || `Team ${p.teamId}`;
       const row = {
+        // identity
         match_id: m.matchId, date,
         mode_key: mode.key, mode_label: mode.label, mode_number: mode.number == null ? '' : mode.number,
-        family,
-        player_id: p.id, name: p.name, team_id: p.teamId, team, role: p.roleLabel || '',
+        family, profile,
+        player_id: p.id, name: p.name, team_id: p.teamId, team,
+        role: p.roleLabel || '', level: blank(p.level),
+        // result
         score: num(p.score),
         team_score: teamScore, opp_score: oppScore, result,
         duration_s: durationS,
+        // provenance
         stats_source: p.statsSource === 'tdf7' ? 'tdf7' : 'live',
         score_source: scoreSource,
+        accuracy_source: p.accuracySource === 'tdf7' ? 'tdf7' : 'live',
       };
-      // Counters, by family. `fields` (camelCase, player object) and `cols`
-      // (snake_case, CSV) are index-aligned by contract B.
-      for (let i = 0; i < fields.length; i++) row[cols[i]] = num(p[fields[i]]);
+      // Counter block. A field the arena has not measured YET (the type-7-only
+      // values, and the hit rate of a player who never fired) stays EMPTY —
+      // writing 0 there would sell a missing measurement as a measured zero.
+      for (const f of fields) {
+        row[snakeCol(f)] = BLANK_WHEN_MISSING.has(f) ? blank(p[f]) : num(p[f]);
+      }
       return row;
     });
+    // Team first, then the better score on top; the name only breaks ties so
+    // the order is stable between two runs over the same match.
+    return rows.sort((a, b) =>
+      String(a.team_id).localeCompare(String(b.team_id), 'en', { numeric: true })
+      || num(b.score) - num(a.score)
+      || String(a.name).localeCompare(String(b.name), 'de', { sensitivity: 'base' }));
   }
 
-  _writeMatchPlayers(state, final, rows, family) {
+  _writeMatchPlayers(state, final, rows, family, profile) {
     if (!this._match) return;
-    if (!family) {
-      const mode = this._match.mode || pickMode(state) || fallbackMode(state);
-      family = normFamily(mode.family);
-    }
-    rows = rows || this._playerRows(state, this._match.mode || fallbackMode(state), family);
+    const mode = this._match.mode || pickMode(state) || fallbackMode(state);
+    if (!family) family = normFamily(mode.family);
+    if (!profile) profile = profileOf(mode);
+    rows = rows || this._playerRows(state, mode, family);
     const file = path.join(this.dir(), 'matches', `${this._match.stamp}_${safe(this._match.matchId)}_players.csv`);
     fs.mkdirSync(path.dirname(file), { recursive: true });
-    this._writeCsv(file, playerColumns(family), rows, false);
+    this._writeCsv(file, playerColumns(profile), rows, false);
   }
 
   _writeMatchEvents(mode) {
@@ -304,8 +412,13 @@ class StatsWriter {
     this._writeCsv(file, EVENT_COLS, rows, false);
   }
 
+  /**
+   * The append-only per-family file. Its header is fixed on first write, so it
+   * always uses the family's default profile — never the match's, which may be
+   * a narrower profile of the same family.
+   */
   _appendAll(rows, family) {
-    this._writeCsv(this.file(`all_players_${family}.csv`), playerColumns(family), rows, true);
+    this._writeCsv(this.file(`all_players_${family}.csv`), playerColumns(familyProfile(family)), rows, true);
   }
 
   /** One row per match — `matches.csv`, append-only. */
@@ -323,7 +436,7 @@ class StatsWriter {
       started_at: m.startedAt, ended_at: m.endedAt || new Date().toISOString(),
       duration_s: Math.round((state.elapsedTime || 0) / 1000),
       mode_key: mode.key, mode_label: mode.label, mode_number: mode.number == null ? '' : mode.number,
-      family,
+      family, profile: profileOf(mode),
       players: rows.length, teams: Object.keys(teams).length,
       scores: entries.map((e) => `${e.name}:${e.score}`).join(' | '),
       winner_team: tied || !entries.length ? '' : best.name,
@@ -499,17 +612,23 @@ class StatsWriter {
     }
   }
 
-  /** Write totals_<family>.csv from the in-memory Map. */
+  /**
+   * Write totals_<family>.csv from the in-memory Map.
+   *
+   * Ranked by the profile's most important metric first, then its runner-up
+   * (`profileSort()` in gameModes.js — one place, next to the columns).
+   */
   _writeTotals(family) {
     const f = normFamily(family);
     const laserball = f === FAMILIES.LASERBALL;
+    const [first, second] = profileSort(familyProfile(f)).map(snakeCol);
     const rows = [...this._totalsFor(f).values()]
       .map((a) => (laserball
         ? { ...a, goals_per_match: a.matches ? +(num(a.goals) / a.matches).toFixed(2) : 0 }
         : { ...a, score_per_match: a.matches ? +(num(a.score) / a.matches).toFixed(2) : 0 }))
-      .sort(laserball
-        ? (x, y) => num(y.goals) - num(x.goals) || num(y.assists) - num(x.assists)
-        : (x, y) => num(y.score) - num(x.score) || num(y.deactivations) - num(x.deactivations));
+      .sort((x, y) => num(y[first]) - num(x[first])
+        || num(y[second]) - num(x[second])
+        || String(x.name).localeCompare(String(y.name), 'de', { sensitivity: 'base' }));
     this._writeCsv(this.file(`totals_${f}.csv`), totalColumns(f), rows, false);
     if (f === FAMILIES.LASERBALL) this._legacyPending = false;
   }
@@ -650,14 +769,15 @@ function normFamily(family) {
 function pickMode(state) {
   const m = state && state.mode;
   if (!m || typeof m !== 'object' || !m.key) return null;
-  return {
+  return withProfile({
     number: m.number == null ? null : m.number,
     key: String(m.key),
     label: String(m.label == null ? '' : m.label),
     family: normFamily(m.family),
+    profile: m.profile,
     known: !!m.known,
     source: String(m.source == null ? '' : m.source),
-  };
+  });
 }
 
 /**
@@ -666,15 +786,19 @@ function pickMode(state) {
  * players carry SM5 counters, Laserball players never do.
  */
 function fallbackMode(state) {
-  const mode = { ...resolveMode(null, null) };
+  const mode = { ...resolveModeWithProfile(null, null) };
   try {
     const players = Object.values((state && state.players) || {});
     const sm5 = players.some((p) => p && typeof p.shotsFired === 'number');
-    if (players.length && !sm5) mode.family = FAMILIES.LASERBALL;
+    if (players.length && !sm5) {
+      mode.family = FAMILIES.LASERBALL;
+      // the display profile follows the inferred family
+      delete mode.profile;
+    }
   } catch (_err) {
     /* keep the default family */
   }
-  return mode;
+  return withProfile(mode);
 }
 
 /** Unambiguous composite key for the player/mode history map. */
@@ -701,6 +825,25 @@ function splitCsv(line, delim) {
   return out;
 }
 function num(v) { const n = parseFloat(v); return Number.isFinite(n) ? n : 0; }
+/**
+ * A number, or an EMPTY cell when there is none.
+ *
+ * Used for every value that may legitimately not exist yet — the official
+ * type-7 measurements (`livesLeft`, `shotsLeft`, …), the derived hit rate, the
+ * player level of a feed that does not report one. `num()` would turn all of
+ * those into a 0, and a 0 in a statistics table is read as a measurement.
+ */
+function blank(v) {
+  if (v == null || v === '') return '';
+  const n = typeof v === 'number' ? v : parseFloat(v);
+  return Number.isFinite(n) ? n : '';
+}
+/** Memoized camelCase -> snake_case; called once per field per row. */
+const SNAKE_CACHE = new Map();
+function snakeCol(field) {
+  if (!SNAKE_CACHE.has(field)) SNAKE_CACHE.set(field, snake(field));
+  return SNAKE_CACHE.get(field);
+}
 function safe(s) { return String(s).replace(/[^a-zA-Z0-9_-]/g, '').slice(0, 40) || 'match'; }
 function stampOf(d) {
   const p = (n) => String(n).padStart(2, '0');
@@ -709,8 +852,8 @@ function stampOf(d) {
 
 module.exports = {
   StatsWriter,
-  playerColumns, totalColumns,
-  HEAD_COLS, EVENT_COLS, MATCH_COLS, PLAYER_MODE_COLS,
+  playerColumns, totalColumns, tailColumns, familyProfile,
+  HEAD_COLS, RESULT_COLS, TAIL_COLS, EVENT_COLS, MATCH_COLS, PLAYER_MODE_COLS,
   // kept for compatibility with anything that imported the old constant names
   PLAYER_COLS: playerColumns(FAMILIES.LASERBALL),
   TOTAL_COLS: totalColumns(FAMILIES.LASERBALL),

@@ -8,13 +8,18 @@ Die Protokollgrundlage (Zeilentypen, Event-Codes, Modus-Nummern) steht in
 
 - [Kurzfassung](#kurzfassung)
 - [Die zwei Familien](#die-zwei-familien)
+- [Die drei Anzeigeprofile](#die-drei-anzeigeprofile)
 - [Wie der Modus erkannt wird](#wie-der-modus-erkannt-wird)
 - [Das `mode`-Objekt](#das-mode-objekt)
 - [Die Registry](#die-registry)
+- [„Standard" eintragen — die eine Zeile](#standard-eintragen--die-eine-zeile)
 - [Unbekannter Modus — warum das trotzdem funktioniert](#unbekannter-modus--warum-das-trotzdem-funktioniert)
 - [Laufzeit-Selbstkorrektur (`inferred`)](#laufzeit-selbstkorrektur-inferred)
 - [Zählerfelder: Familie `laserball`](#zählerfelder-familie-laserball)
 - [Zählerfelder: Familie `sm5`](#zählerfelder-familie-sm5)
+- [Die Trefferquote — und warum sie live zu hoch ist](#die-trefferquote--und-warum-sie-live-zu-hoch-ist)
+- [Die amtlichen Typ-7-Felder](#die-amtlichen-typ-7-felder)
+- [Spaltenbeschriftungen](#spaltenbeschriftungen)
 - [Warum die SM5-Live-Zahlen eine Untergrenze sind](#warum-die-sm5-live-zahlen-eine-untergrenze-sind)
 - [Punktestand: woher kommt er?](#punktestand-woher-kommt-er)
 - [Die Spieluhr](#die-spieluhr)
@@ -33,9 +38,12 @@ Die Protokollgrundlage (Zeilentypen, Event-Codes, Modus-Nummern) steht in
    (Space Marines 5) und `28` (Laserball Ranked).
 3. Jeder Modus gehört zu einer von **zwei Familien** — `sm5` oder `laserball`.
    Die Familie entscheidet, welche Zähler ein Spieler hat.
-4. Eine **unbekannte** Nummer läuft als Familie `sm5`. Das Spiel wird trotzdem
-   korrekt gezählt; niemand muss vorher etwas eintragen.
-5. Widersprechen die Event-Codes der Typ-1-Zeile, **korrigiert sich lf_live
+4. Jeder Modus hat außerdem ein **Anzeigeprofil** — `standard`, `sm5` oder
+   `laserball`. Das Profil entscheidet, welche **Spalten** angezeigt und
+   geschrieben werden. Familie und Profil sind **zwei verschiedene Dinge**.
+5. Eine **unbekannte** Nummer läuft als Familie `sm5` mit Profil `sm5`. Das
+   Spiel wird trotzdem korrekt gezählt; niemand muss vorher etwas eintragen.
+6. Widersprechen die Event-Codes der Typ-1-Zeile, **korrigiert sich lf_live
    während des laufenden Matches selbst** (`source: 'inferred'`).
 
 ---
@@ -54,12 +62,79 @@ Die Familie ist **nicht** kosmetisch. Sie steuert:
 
 - welche Zählerfelder ein Spielerobjekt bekommt,
 - welcher Zählzweig in der Engine überhaupt läuft,
-- welche Spalten das Scoreboard der Web-Konsole zeigt
-  (`scoreboardColumns(family)`, ausgeliefert über `GET /api/modes`),
-- welche CSV-Spalten zur Familie gehören (`csvColumns(family)`).
+- in welche Sammel- und Summendatei ein Match abgelegt wird
+  (`all_players_<familie>.csv`, `totals_<familie>.csv`).
 
-`csvColumns('laserball')` ist **exakt** der bisherige Laserball-Spaltensatz —
-vorhandene Laserball-CSVs bleiben spaltenkompatibel.
+Was die Familie **nicht mehr** steuert: welche Spalten man zu sehen bekommt.
+Das macht seit dieser Version das Anzeigeprofil.
+
+---
+
+## Die drei Anzeigeprofile
+
+**Warum überhaupt getrennt?** „Standard" und „SM5" sprechen dasselbe Protokoll.
+Beide sind Familie `sm5`, beide füllen dieselben 30 Zähler — aber der
+Hallenbetreiber will für sie **unterschiedliche Spalten** sehen. Mit der Familie
+allein ließe sich das nicht ausdrücken. Deshalb gibt es zwei unabhängige Achsen:
+
+| Achse | Beantwortet die Frage | Werte |
+|---|---|---|
+| **Familie** | Welche Zähler kann das **Protokoll** überhaupt füllen? | `sm5`, `laserball` |
+| **Profil** | Welche Spalten werden **angezeigt und geschrieben**, in welcher Reihenfolge, mit welcher Beschriftung? | `standard`, `sm5`, `laserball` |
+
+Jeder Registry-Eintrag darf ein `profile` nennen. Fehlt es, gilt das
+**Standardprofil der Familie**:
+
+| Familie | Profil ohne ausdrücklichen Eintrag |
+|---|---|
+| `sm5` | `sm5` |
+| `laserball` | `laserball` |
+
+### Was jedes Profil zeigt
+
+| Profil | Anzeigename | Scoreboard-Spalten (in dieser Reihenfolge) |
+|---|---|---|
+| `standard` | Standard | Punkte · Spielerlevel · Abgegebene Schüsse · Erzielte Treffer · Trefferquote |
+| `sm5` | SM5 | Punkte · Spielerlevel · Rolle · Abgegebene Schüsse · Erzielte Treffer · Trefferquote · Leben übrig · Munition übrig · Gegner abgeschossen · Selbst getroffen worden · Gegner mit Rakete getroffen · Nukes gezündet · Munition ausgegeben · Leben ausgegeben · Strafen |
+| `laserball` | Laserball | Tore · Vorlagen · Ball abgenommen · Gegner geblockt · Gegner zurückgesetzt · Befreiungspässe gespielt · Pässe gespielt · Punkte · Spielerlevel |
+
+Die **Anzeigenamen der Profile** stehen in `src/gameModes.js`, Tabelle
+`PROFILE_LABELS`, und werden über `profileLabel()` abgerufen — die API erfindet
+keine eigenen mehr.
+
+Die ersten **sieben** Laserball-Spalten stehen in derselben Reihenfolge da, wo
+sie immer standen — nur ausgeschrieben statt abgekürzt (aus „Steals" wurde „Ball
+abgenommen", aus „Clears" wurde „Befreiungspässe gespielt"). Die
+**CSV-Spaltennamen sind unverändert**; geändert hat sich allein der Anzeigetext.
+`Punkte` und `Spielerlevel` kommen hinten dazu. Laserball hat
+**keinen Schusszähler** — der `11xx`-Codesatz protokolliert keine Schüsse, also
+gibt es in Laserball auch nichts Ehrliches, was in einer Spalte „Schüsse"
+stehen könnte.
+
+Die CSV-Spaltensätze je Profil stehen in [STATS.md](STATS.md#spalten-spieler-zeilen).
+
+### Wo das im Code steht
+
+Alles in [`src/gameModes.js`](../src/gameModes.js), Konstante `PROFILE_DEFS` —
+Scoreboard-Spalten, CSV-Block und Sortierkennzahl eines Profils stehen dort
+nebeneinander in **einem** Objekt.
+
+| Funktion | Liefert |
+|---|---|
+| `scoreboardColumns(profil)` | Scoreboard-Spalten mit Bezeichnung, Erklärtext, Gruppe und Format |
+| `csvColumns(profil)` | CSV-Zählerblock (snake_case) |
+| `profileFields(profil)` | dieselben Spalten als Feldnamen des Spielerobjekts |
+| `profileSort(profil)` | die wichtigste Kennzahl des Profils zuerst |
+| `counterColumns(familie)` | die **reinen** Zähler einer Familie — das, was Gesamtwertungen summieren dürfen |
+| `profileLabel(profil)` | den deutschen Anzeigenamen des Profils |
+| `listProfiles()` | alle drei Profile am Stück, für die API — je Profil auch `label` |
+
+> **Abwärtskompatibel.** `scoreboardColumns()` und `csvColumns()` nehmen weiterhin
+> einen **Familiennamen** entgegen: `'sm5'` und `'laserball'` sind in beiden
+> Namensräumen gültig und bedeuten dort dasselbe. Nur `'standard'` gibt es
+> ausschließlich als Profil. `csvColumns('laserball')` ist **exakt** der
+> bisherige Laserball-Spaltensatz — vorhandene Laserball-CSVs bleiben
+> spaltenkompatibel.
 
 ---
 
@@ -105,7 +180,8 @@ Steht im Zustands-Snapshot unter `gameState.mode` und wird über
 | `number` | Zahl oder `null` | Modus-Nummer aus der Typ-1-Zeile. `null` = keine Typ-1-Zeile gesehen. |
 | `key` | Text | Stabiler Kurzname für CSV und API: `sm5`, `laserball_ranked`, sonst `mode_<nummer>`, ohne Nummer `unknown`. |
 | `label` | Text | Anzeigename. **Bevorzugt die Beschreibung aus dem Stream**, sonst der Registry-Name, sonst `Modus <nummer>`. |
-| `family` | `sm5` \| `laserball` | Steuert Zähler, Scoreboard und CSV-Spalten. |
+| `family` | `sm5` \| `laserball` | Protokollfamilie. Steuert die Zähler und die Ablagedatei. |
+| `profile` | `standard` \| `sm5` \| `laserball` | **Neu, additiv.** Anzeigeprofil: steuert Scoreboard-, Tabellen- und CSV-Spalten. Fehlt in der Registry ein Profil, steht hier das Standardprofil der Familie. |
 | `known` | `true` / `false` | `false` = Nummer steht nicht in der Registry. |
 | `source` | `tdf` \| `inferred` \| `default` | Woher die Angabe stammt — siehe Tabelle unten. |
 
@@ -114,6 +190,12 @@ Steht im Zustands-Snapshot unter `gameState.mode` und wird über
 | `tdf` | Aus der Typ-1-Zeile der Anlage gelesen. Der Normalfall. |
 | `inferred` | Die Familie wurde **während des Matches** anhand der Event-Codes korrigiert. Die Typ-1-Zeile fehlte oder passte nicht. |
 | `default` | Noch keine Typ-1-Zeile gesehen (Programmstart). Familie `sm5`, `known: false`. |
+
+> **Wo `profile` angehängt wird.** `resolveMode()` behält seine seit jeher
+> sechsfeldrige Form — sie ist ein festgenagelter öffentlicher Vertrag. Das
+> Profil hängt `withProfile()` an, und jede Stelle, die einen Modus tatsächlich
+> **speichert** (Engine-Zustand, Statistik-Schreiber, API), läuft darüber. Wer
+> beides in einem Schritt will, nimmt `resolveModeWithProfile()`.
 
 > `label` und die Missionsbeschreibung **kommen aus dem Stream**. Sie werden auf
 > 64 Zeichen gekürzt und von Steuerzeichen befreit, sind aber trotzdem fremde
@@ -125,16 +207,44 @@ Steht im Zustands-Snapshot unter `gameState.mode` und wird über
 
 [`src/gameModes.js`](../src/gameModes.js), Konstante `REGISTRY`. Stand heute:
 
-| Nummer | `key` | `label` | Familie | Status |
-|---|---|---|---|---|
-| `5` | `sm5` | Space Marines 5 | `sm5` | verified |
-| `28` | `laserball_ranked` | Laserball Ranked | `laserball` | verified |
+| Nummer | `key` | `label` | Familie | Profil | Status |
+|---|---|---|---|---|---|
+| `5` | `sm5` | Space Marines 5 | `sm5` | `sm5` | verified |
+| `28` | `laserball_ranked` | Laserball Ranked | `laserball` | `laserball` | verified |
 
 Das ist die **gesamte** öffentlich belegte Modus-Nummerierung. Alles andere —
-7SM/Nexus, Junior, Zombies, VIP, Attack & Defend, Zone Control, sämtliche
-Laserball-Varianten — hat Nummern, die nirgends dokumentiert sind. Sie zu
-ermitteln ist Sache des Hallenbetreibers, siehe
+„Standard", 7SM/Nexus, Junior, Zombies, VIP, Attack & Defend, Zone Control,
+sämtliche Laserball-Varianten — hat Nummern, die nirgends dokumentiert sind. Sie
+zu ermitteln ist Sache des Hallenbetreibers, siehe
 [unten](#eigene-modus-nummern-ermitteln-und-eintragen).
+
+---
+
+## „Standard" eintragen — die eine Zeile
+
+Der Modus **„Standard"** hat ein fertiges Anzeigeprofil (`standard`), aber
+**seine Modus-Nummer ist unbekannt.** Sie wird an der Anlage gemessen; hier wird
+sie **nicht geraten**, weil ein falscher Registry-Eintrag schlechter ist als gar
+keiner (ein unbekannter Modus läuft ohnehin sauber als Familie `sm5`).
+
+**Die Stelle:** [`src/gameModes.js`](../src/gameModes.js), Konstante `REGISTRY`.
+Direkt darüber steht ein Kommentarkasten mit genau dieser Zeile. Sobald die
+Nummer per [`scripts/inspect.js`](../scripts/inspect.js) gemessen ist
+([Anleitung unten](#eigene-modus-nummern-ermitteln-und-eintragen)), wird `<NR>`
+ersetzt und die Zeile in `REGISTRY` eingefügt:
+
+```js
+const REGISTRY = {
+  5:  { number: 5,  key: 'sm5',              label: 'Space Marines 5',  family: FAMILIES.SM5,       profile: PROFILES.SM5 },
+  28: { number: 28, key: 'laserball_ranked', label: 'Laserball Ranked', family: FAMILIES.LASERBALL, profile: PROFILES.LASERBALL },
+
+  // ▼ hier, sobald die Nummer gemessen ist — <NR> ersetzen, sonst nichts ändern:
+  <NR>: { number: <NR>, key: 'standard', label: 'Standard', family: FAMILIES.SM5, profile: PROFILES.STANDARD },
+};
+```
+
+Mehr ist nicht zu tun: Familie `sm5` (dasselbe Protokoll wie SM5), Profil
+`standard` (die schlanke Spaltenauswahl). Danach lf_live neu starten.
 
 ---
 
@@ -144,7 +254,7 @@ Eine Nummer, die nicht in der Registry steht, bekommt:
 
 ```
 number: 14,  key: 'mode_14',  label: <Beschreibung aus dem Stream> oder 'Modus 14',
-family: 'sm5',  known: false,  source: 'tdf'
+family: 'sm5',  profile: 'sm5',  known: false,  source: 'tdf'
 ```
 
 Die Familie ist **absichtlich** `sm5`. Begründung: alle SM5-Varianten und
@@ -175,6 +285,10 @@ angehören:
 Passt ein Code nicht zur gesetzten Familie, wird die Familie umgestellt,
 `source` auf `inferred` gesetzt und ein `mode_change`-Event ausgelöst.
 
+**Das Anzeigeprofil zieht mit.** Wird die Familie korrigiert, springt das Profil
+auf das Standardprofil der **neuen** Familie — ein in der Registry eingetragenes
+Profil gehörte zu der Familie, die sich gerade als falsch herausgestellt hat.
+
 Regeln:
 
 - Die Korrektur greift **höchstens einmal pro Match**. Sie wird bei jeder
@@ -202,20 +316,20 @@ schaltet beim ersten `11xx`-Code selbständig um.
 Unverändert gegenüber dem bisherigen Verhalten — gleiche Namen, gleiche
 Bedeutung, gleiche Zählweise.
 
-| Feld | CSV-Spalte | Was die Zahl bedeutet | Auslöser |
-|---|---|---|---|
-| `goals` | `goals` | Erzielte Tore | `1101` / `1102` |
-| `assists` | `assists` | Vorlagen: Pass oder Clear an den Torschützen, höchstens 10 s vor dem Tor | `1100` / `1109` + `1101` |
-| `passesDone` | `passes_done` | Gespielte Pässe | `1100` (Actor) |
-| `passesReceived` | `passes_received` | Empfangene Pässe | `1100` (Ziel) |
-| `clearsDone` | `clears_done` | Gespielte Clears (defensiver Befreiungspass) | `1109` (Actor) |
-| `clearsReceived` | `clears_received` | Empfangene Clears | `1109` (Ziel) |
-| `stealsDone` | `steals_done` | Dem Gegner den Ball abgenommen | `1103` (Actor) |
-| `stealsReceived` | `steals_received` | Selbst den Ball verloren | `1103` (Ziel) |
-| `blocksDone` | `blocks_done` | Gegner geblockt (Ziel war **nicht** im Reset-Status) | `1104`, Ziel-Status ≠ 2 |
-| `blocksReceived` | `blocks_received` | Selbst geblockt worden | `1104` (Ziel) |
-| `resetsDone` | `resets_done` | Gegner resettet (Ziel **war** im Reset-Status 2) | `1104`, Ziel-Status = 2 |
-| `resetsReceived` | `resets_received` | Selbst resettet worden | `1104` (Ziel) |
+| Feld | CSV-Spalte | Bezeichnung | Was die Zahl bedeutet | Auslöser |
+|---|---|---|---|---|
+| `goals` | `goals` | Tore | Bälle, die dieser Spieler im gegnerischen Tor versenkt hat | `1101` / `1102` |
+| `assists` | `assists` | Vorlagen | Pass oder Befreiungspass, nach dem der Empfänger binnen 10 s ein Tor erzielt hat | `1100` / `1109` + `1101` |
+| `passesDone` | `passes_done` | Pässe gespielt | Ball an einen Mitspieler abgegeben | `1100` (Actor) |
+| `passesReceived` | `passes_received` | Pässe erhalten | Ball von einem Mitspieler bekommen | `1100` (Ziel) |
+| `clearsDone` | `clears_done` | Befreiungspässe gespielt | Ball aus der eigenen Gefahrenzone herausgespielt (im Spiel „Clear") | `1109` (Actor) |
+| `clearsReceived` | `clears_received` | Befreiungspässe erhalten | Ball aus dem Befreiungspass eines Mitspielers bekommen | `1109` (Ziel) |
+| `stealsDone` | `steals_done` | Ball abgenommen | Einem Gegner den Ball abgenommen | `1103` (Actor) |
+| `stealsReceived` | `steals_received` | Ball verloren | Ein Gegner hat diesem Spieler den Ball abgenommen | `1103` (Ziel) |
+| `blocksDone` | `blocks_done` | Gegner geblockt | Einen noch aktiven Gegner abgeschossen und damit gestoppt | `1104`, Ziel-Status ≠ 2 |
+| `blocksReceived` | `blocks_received` | Selbst geblockt worden | Ein Gegner hat diesen Spieler im aktiven Zustand gestoppt | `1104` (Ziel) |
+| `resetsDone` | `resets_done` | Gegner zurückgesetzt | Einen bereits ausgeschalteten Gegner erneut getroffen, seine Wartezeit läuft neu | `1104`, Ziel-Status = 2 |
+| `resetsReceived` | `resets_received` | Selbst zurückgesetzt worden | Im ausgeschalteten Zustand erneut getroffen worden, Wartezeit läuft neu | `1104` (Ziel) |
 
 Der Unterschied zwischen Block und Reset hängt allein am `status` des Ziels aus
 der Typ-9-Zeile. Die expliziten Reset-Codes `110B` / `110C` erzeugen ein
@@ -230,58 +344,65 @@ Typ-7-Endblock korrigiert (siehe [nächster Abschnitt](#warum-die-sm5-live-zahle
 
 ### Schießen
 
-| Feld | CSV-Spalte | Was die Zahl bedeutet | Auslöser |
-|---|---|---|---|
-| `shotsFired` | `shots_fired` | Abgegebene Schüsse. **Untergrenze** — siehe unten. | `0201` `0202` `0203` `0204` `0205` `0206` |
-| `shotsHit` | `shots_hit` | Schüsse, die getroffen haben (Gegner oder Ziel) | `0203` `0204` `0205` `0206` (nur gegen Gegner) |
-| `misses` | `misses` | Fehlschüsse | `0201` `0202` |
-| `deactivations` | `deactivations` | Gegner deaktiviert (abgeschossen) | `0206` gegen Gegner |
-| `timesDeactivated` | `times_deactivated` | Selbst deaktiviert worden | `0206` (Ziel), `0209` (Warbot) |
-| `timesHit` | `times_hit` | Von einem Gegner getroffen worden | `0205` / `0206` (Ziel) |
-| `shotTeam` | `shot_team` | Auf **eigene** Mitspieler geschossen (Eigenbeschuss) | `0205` / `0206`, gleiches Team |
-| `timesHitByTeam` | `times_hit_by_team` | Vom eigenen Team getroffen worden | `0205` / `0206` (Ziel), gleiches Team |
+| Feld | CSV-Spalte | Bezeichnung | Was die Zahl bedeutet | Auslöser |
+|---|---|---|---|---|
+| `shotsFired` | `shots_fired` | Abgegebene Schüsse | Wie oft der Spieler geschossen hat. Live eine **Untergrenze** — siehe unten | `0201` `0202` `0203` `0204` `0205` `0206` |
+| `shotsHit` | `shots_hit` | Erzielte Treffer | Schüsse, die einen Gegner oder ein Ziel getroffen haben | `0203` `0204` `0205` `0206` (nur gegen Gegner) |
+| `accuracy` | `accuracy` | Trefferquote | **Abgeleitet:** `shotsHit / shotsFired`. Live eine Näherung und systematisch **zu hoch** — siehe [eigener Abschnitt](#die-trefferquote--und-warum-sie-live-zu-hoch-ist) | berechnet |
+| `misses` | `misses` | Fehlschüsse | Schüsse, die die Anlage ausdrücklich als Fehlschuss gemeldet hat | `0201` `0202` |
+| `deactivations` | `deactivations` | Gegner abgeschossen | Wie oft der Spieler einen Gegner **ausgeteilt** aus dem Spiel genommen hat | `0206` gegen Gegner |
+| `timesDeactivated` | `times_deactivated` | Selbst abgeschossen worden | Das Gegenstück: wie oft der Spieler selbst ausfiel | `0206` (Ziel), `0209` (Warbot) |
+| `timesHit` | `times_hit` | Selbst getroffen worden | Gegnerische Treffer, auch solche ohne Ausfall | `0205` / `0206` (Ziel) |
+| `shotTeam` | `shot_team` | Eigene Mitspieler getroffen | Eigenbeschuss, **ausgeteilt** | `0205` / `0206`, gleiches Team |
+| `timesHitByTeam` | `times_hit_by_team` | Vom eigenen Team getroffen worden | Eigenbeschuss, **erhalten** | `0205` / `0206` (Ziel), gleiches Team |
+
+> **Ausgeteilt gegen erhalten.** Bei jedem Paar sagt schon die Bezeichnung, in
+> welche Richtung es geht: „Gegner abgeschossen" gegen „Selbst abgeschossen
+> worden", „Eigene Mitspieler getroffen" gegen „Vom eigenen Team getroffen
+> worden", „Ball abgenommen" gegen „Ball verloren". Wer nur eine Spalte sieht,
+> weiß trotzdem, was sie zählt.
 
 ### Nicht-Spieler-Ziele
 
-| Feld | CSV-Spalte | Was die Zahl bedeutet | Auslöser |
-|---|---|---|---|
-| `targetHits` | `target_hits` | Treffer auf ein Nicht-Spieler-Ziel (3 Treffer zerstören es) | `0203` |
-| `targetDestroys` | `target_destroys` | Nicht-Spieler-Ziel zerstört | `0204` |
-| `beaconClaims` | `beacon_claims` | Beacon-Ziel final beansprucht | `0B00` |
-| `baseAwards` | `base_awards` | Automatisch zugesprochenes Ziel bei vorzeitigem Spielende | `0B03` |
+| Feld | CSV-Spalte | Bezeichnung | Was die Zahl bedeutet | Auslöser |
+|---|---|---|---|---|
+| `targetHits` | `target_hits` | Ziele getroffen | Treffer auf ein festes Ziel in der Arena; 3 Treffer zerstören es | `0203` |
+| `targetDestroys` | `target_destroys` | Ziele zerstört | Festes Ziel in der Arena zerstört | `0204` |
+| `beaconClaims` | `beacon_claims` | Beacons erobert | Ein Beacon endgültig für sich entschieden | `0B00` |
+| `baseAwards` | `base_awards` | Basen zugesprochen | Bei vorzeitigem Spielende automatisch gutgeschriebenes Ziel | `0B03` |
 
 ### Raketen
 
-| Feld | CSV-Spalte | Was die Zahl bedeutet | Auslöser |
-|---|---|---|---|
-| `missileLocks` | `missile_locks` | Auf ein Ziel aufgeschaltet | `0300` |
-| `missileHits` | `missile_hits` | Rakete hat einen Gegner getroffen | `0306` |
-| `missileMisses` | `missile_misses` | Rakete daneben | `0301` `0304` |
-| `missileDestroys` | `missile_destroys` | Nicht-Spieler-Ziel mit Rakete zerstört | `0303` |
-| `timesMissiled` | `times_missiled` | Selbst von einer Rakete getroffen worden | `0306` / `0308` (Ziel) |
-| `missileTeam` | `missile_team` | Rakete auf einen eigenen Mitspieler | `0308` |
+| Feld | CSV-Spalte | Bezeichnung | Was die Zahl bedeutet | Auslöser |
+|---|---|---|---|---|
+| `missileLocks` | `missile_locks` | Raketen aufgeschaltet | Der Schritt unmittelbar vor dem Abschuss | `0300` |
+| `missileHits` | `missile_hits` | Gegner mit Rakete getroffen | Eigene Rakete hat einen Gegner erwischt | `0306` |
+| `missileMisses` | `missile_misses` | Raketen daneben | Eigene Rakete ohne Ziel | `0301` `0304` |
+| `missileDestroys` | `missile_destroys` | Ziele mit Rakete zerstört | Festes Ziel in der Arena per Rakete zerstört | `0303` |
+| `timesMissiled` | `times_missiled` | Selbst von Rakete getroffen worden | Das Gegenstück: gegnerische Rakete hat getroffen | `0306` / `0308` (Ziel) |
+| `missileTeam` | `missile_team` | Rakete auf eigenes Team | Eigene Rakete hat einen Mitspieler getroffen | `0308` |
 
 ### Spezialfähigkeiten und Versorgung
 
-| Feld | CSV-Spalte | Was die Zahl bedeutet | Auslöser |
-|---|---|---|---|
-| `nukesActivated` | `nukes_activated` | Nuke gestartet (Commander) | `0404` |
-| `nukesDetonated` | `nukes_detonated` | Nuke tatsächlich detoniert | `0405` |
-| `rapidFires` | `rapid_fires` | Dauerfeuer aktiviert (Scout) | `0400` |
-| `ammoResupplies` | `ammo_resupplies` | Einen Mitspieler mit Munition versorgt | `0500` (Actor) |
-| `ammoReceived` | `ammo_received` | Selbst Munition bekommen | `0500` (Ziel) |
-| `livesResupplies` | `lives_resupplies` | Einem Mitspieler Leben gegeben (Medic) | `0502` (Actor) |
-| `livesReceived` | `lives_received` | Selbst Leben bekommen | `0502` (Ziel) |
-| `teamAmmoResupplies` | `team_ammo_resupplies` | Team-Munition ausgelöst (Ammo-Carrier-Spezial) | `0510` |
-| `teamLivesResupplies` | `team_lives_resupplies` | Team-Leben ausgelöst (Medic-Spezial) | `0512` |
+| Feld | CSV-Spalte | Bezeichnung | Was die Zahl bedeutet | Auslöser |
+|---|---|---|---|---|
+| `nukesActivated` | `nukes_activated` | Nukes gestartet | Nuke ausgelöst; nur der Commander hat sie | `0404` |
+| `nukesDetonated` | `nukes_detonated` | Nukes gezündet | Davon tatsächlich hochgegangen — abwehrbar | `0405` |
+| `rapidFires` | `rapid_fires` | Dauerfeuer eingesetzt | Dauerfeuer ausgelöst; nur der Scout hat es | `0400` |
+| `ammoResupplies` | `ammo_resupplies` | Munition ausgegeben | Einen einzelnen Mitspieler versorgt | `0500` (Actor) |
+| `ammoReceived` | `ammo_received` | Munition erhalten | Das Gegenstück: selbst versorgt worden | `0500` (Ziel) |
+| `livesResupplies` | `lives_resupplies` | Leben ausgegeben | Einem einzelnen Mitspieler ein Leben gegeben (Medic) | `0502` (Actor) |
+| `livesReceived` | `lives_received` | Leben erhalten | Das Gegenstück: selbst ein Leben bekommen | `0502` (Ziel) |
+| `teamAmmoResupplies` | `team_ammo_resupplies` | Munition für das ganze Team | Spezialfähigkeit des Ammo Carriers, versorgt alle auf einmal | `0510` |
+| `teamLivesResupplies` | `team_lives_resupplies` | Leben für das ganze Team | Spezialfähigkeit des Medics, versorgt alle auf einmal | `0512` |
 
 ### Sonstiges
 
-| Feld | CSV-Spalte | Was die Zahl bedeutet | Auslöser |
-|---|---|---|---|
-| `penalties` | `penalties` | Schiedsrichter-Strafen gegen diesen Spieler | `0600` |
-| `achievements` | `achievements` | Erreichte Ingame-Achievements | `0900` `0901` |
-| `rewards` | `rewards` | Standort-Belohnungen (z. B. Freispiel) | `0902` |
+| Feld | CSV-Spalte | Bezeichnung | Was die Zahl bedeutet | Auslöser |
+|---|---|---|---|---|
+| `penalties` | `penalties` | Strafen | Strafen der Aufsicht gegen diesen Spieler | `0600` |
+| `achievements` | `achievements` | Erfolge | Auszeichnungen, die die Anlage im Spiel zuerkennt | `0900` `0901` |
+| `rewards` | `rewards` | Belohnungen | Belohnungen des Standorts, z. B. ein Freispiel | `0902` |
 
 ### Rolle, Level, Weste
 
@@ -300,6 +421,170 @@ Typ-3-Zeile: `level`, `category` und den aufgelösten `roleLabel`, dazu
 
 In Laserball ist `category` immer `0`.
 
+`level` und `roleLabel` sind **keine** Familiensache: beide stehen in jedem
+Modus im Zustand, in jedem Profil im Scoreboard (Rolle nur im Profil `sm5`, weil
+sie in Laserball leer bliebe) und in jeder Spieler-CSV-Zeile.
+
+---
+
+## Die Trefferquote — und warum sie live zu hoch ist
+
+`accuracy` = `shotsHit / shotsFired`. Die Zahl wird nirgends gezählt, sondern
+von der Engine bei jedem Zustandswechsel neu berechnet.
+
+### Die Richtung des Fehlers
+
+Die **Live**-Quote ist **systematisch zu hoch**, nicht zu niedrig. Der Grund
+steckt in der Zusammensetzung von Zähler und Nenner:
+
+- Der **Nenner** `shotsFired` steigt nur bei Ereignissen, die beweisen, dass ein
+  Schuss stattgefunden hat: `0201` `0202` `0203` `0204` `0205` `0206`. Ein
+  Schuss, den die Anlage **gar nicht** meldet, fehlt darin.
+- Der **Zähler** `shotsHit` steigt bei `0203` `0204` `0205` `0206`. Jeder
+  Treffer **erzeugt** zwangsläufig eines dieser Ereignisse — im Zähler fehlt
+  also nichts.
+
+Ein vollständiger Zähler über einem zu kleinen Nenner ergibt einen **zu großen**
+Quotienten. Beispiel: ein Spieler schießt 100-mal, trifft 30-mal, und 40
+Fehlschüsse werden von der Anlage nicht protokolliert. Live steht dann 30/60 =
+**50 %** statt der tatsächlichen 30/100 = **30 %**.
+
+> **Korrektur einer früheren Fassung dieser Doku.** Hier stand, die Quote falle
+> „zu niedrig" aus. Das war falsch herum. Richtig ist: **`shotsFired` ist zu
+> niedrig — und genau deshalb ist die daraus gebildete Quote zu hoch.** Die
+> Untergrenzen-Aussage gilt für den Zähler `shotsFired`, nicht für das Verhältnis.
+
+### Wie lf_live damit umgeht
+
+Die Näherung wird geliefert, aber **als Näherung gekennzeichnet**, damit keine
+Oberfläche sie als Messwert ausgibt:
+
+| Feld | Während des Matches | Nach dem Typ-7-Endblock |
+|---|---|---|
+| `accuracy` | Näherung aus der Eigenzählung | neu berechnet aus den **amtlichen** `shotsHit`/`shotsFired` |
+| `accuracyIsEstimate` | `true` | `false` |
+| `accuracySource` | `live` | `tdf7` |
+
+`accuracyIsEstimate` ist genau dafür da, dass die Oberfläche die Näherung
+sichtbar machen kann (Sternchen, Tilde, ausgegrauter Wert — was auch immer).
+
+Zwei Sonderfälle, bewusst so:
+
+- **`shotsFired = 0` ⇒ `accuracy = null`**, nicht `0`. Wer nie geschossen hat,
+  hat keine messbare Quote; eine `0` läse sich wie „hat nie getroffen".
+- In **Laserball** gibt es die Felder gar nicht — dort wird kein Schuss gezählt.
+
+In der CSV stehen **zwei getrennte Spalten**: `accuracy` (die Quote) und
+`accuracy_source` (ihre Herkunft, `live` oder `tdf7`).
+
+---
+
+## Die amtlichen Typ-7-Felder
+
+Der Typ-7-Endblock liefert je Spieler **alle 23** amtlichen Felder. Sie liegen
+roh unter `players[id].official`. Elf davon haben **keine** Entsprechung unter
+den Live-Zählern — es gibt sie schlicht erst, wenn das Match vorbei ist. Diese
+elf werden zusätzlich direkt auf das Spielerobjekt gehoben:
+
+| Feld | CSV-Spalte | Bezeichnung | Bedeutung | Belegt? |
+|---|---|---|---|---|
+| `livesLeft` | `lives_left` | Leben übrig | Leben, die dem Spieler am Schluss geblieben sind | aus dem Namen klar |
+| `shotsLeft` | `shots_left` | Munition übrig | Schuss Munition, die dem Spieler am Schluss geblieben sind | aus dem Namen klar |
+| `medicHits` | `medic_hits` | Gegnerische Medics getroffen | Treffer auf Medics des gegnerischen Teams | **unbestätigt** |
+| `ownMedicHits` | `own_medic_hits` | Eigene Medics getroffen | Treffer auf Medics des eigenen Teams | **unbestätigt** |
+| `medicNukes` | `medic_nukes` | Nukes gegen Medics | Nukes, die einen Medic betroffen haben | **unbestätigt** |
+| `scoutRapid` | `scout_rapid` | Dauerfeuer des Scouts | Dauerfeuer-Einsätze des Scouts; Abgrenzung zu `rapidFires` unklar | **unbestätigt** |
+| `lifeBoost` | `life_boost` | Leben-Boosts erhalten | Erhaltene Leben-Boosts; Abgrenzung zu `livesReceived` unklar | **unbestätigt** |
+| `ammoBoost` | `ammo_boost` | Munitions-Boosts erhalten | Erhaltene Munitions-Boosts; Abgrenzung zu `ammoReceived` unklar | **unbestätigt** |
+| `nukesCancelled` | `nukes_cancelled` | Gegnerische Nukes abgewehrt | Verhinderte Nukes des Gegners | **unbestätigt** |
+| `ownNukeCancels` | `own_nuke_cancels` | Nukes des eigenen Teams abgewehrt | Verhinderte Nukes aus dem eigenen Team | **unbestätigt** |
+| `shot3Hit` | `shot3_hit` | Dreifach-Treffer (unbestätigt) | **Nicht belegt.** Was gezählt wird, sagt der Feldname nicht; die Zahl wird unverändert durchgereicht | **unbestätigt** |
+
+Die Spalte „Belegt?" ist der Grund, warum die **Erklärtexte** dieser neun Felder
+in der Konsole ausdrücklich sagen, dass ihre Bedeutung aus der
+Protokollbeschreibung erschlossen und an einer echten Anlage nicht geprüft ist.
+Bei `shot3Hit` steht die Unsicherheit sogar in der Bezeichnung selbst, weil der
+Feldname allein gar keine Bedeutung hergibt — geraten wird hier nicht.
+
+`livesLeft` und `shotsLeft` stehen im Scoreboard des Profils `sm5`; alle elf
+stehen in der CSV des Profils `sm5`.
+
+> **Vor dem Matchende sind diese Felder `null` — und in der CSV eine LEERE
+> Zelle, keine `0`.** Das ist Absicht. Eine `0` in einer Statistiktabelle liest
+> sich als Messwert („dieser Spieler hatte null Leben übrig"); leer heißt
+> ehrlich „noch nicht gemessen". Dasselbe gilt für `accuracy`, solange niemand
+> geschossen hat, und für `level`, wenn die Anlage keines meldet.
+>
+> Die Feldbedeutungen stammen aus der lfstats-Spezifikation und sind **nicht**
+> gegen eine echte Anlage geprüft — siehe
+> [Bekannte Lücken](#bekannte-lücken--unbestätigt).
+
+---
+
+## Spaltenbeschriftungen
+
+**Alle** Beschriftungen für Scoreboard, Statistiktabelle, Legende und CSV-Kopf
+stehen an **einer** Stelle: Konstante `METRICS` in
+[`src/gameModes.js`](../src/gameModes.js). Je Kennzahl:
+
+| Teil | Wofür |
+|---|---|
+| `label` | die **ausgeschriebene Bezeichnung**. Sie ist der Normalfall in jedem Tabellenkopf und muss ohne Vorwissen verständlich sein |
+| `short` | Notreserve für sehr enge Stellen. Wird **nicht** mehr bevorzugt |
+| `help` | ein bis zwei deutsche Sätze: **was die Zahl bedeutet und wie sie entsteht**. Wird als Tooltip **und** in der Legende angezeigt |
+| `group` | in welchen Abschnitt der Legende die Kennzahl gehört (siehe unten) |
+| `format` | `int` · `text` · `percent` — wie der Wert darzustellen ist |
+| `csv` | die CSV-Schreibweise, wo sie von `snake(key)` abweicht (`roleLabel` → `role`) |
+
+> **Die CSV-Spaltennamen ändern sich nie.** Sie sind eine Schnittstelle: der
+> Betreiber hat bereits Dateien und Auswertungen damit. Geändert wurden
+> ausschließlich die **Anzeigetexte** (`label`, `short`, `help`).
+
+### Die Gruppen — damit die Legende keine Liste aus vierzig Zeilen wird
+
+Jede Kennzahl nennt genau **eine** Gruppe. Die Konsole druckt ihre Legende
+abschnittsweise, in genau dieser Reihenfolge (Konstante `METRIC_GROUPS`):
+
+| Gruppe | Überschrift | Was darin steht |
+|---|---|---|
+| `identity` | Spiel und Spieler | Wer hat wann in welchem Modus gespielt |
+| `result` | Ergebnis | Punkte und Ausgang des Matches |
+| `attack` | Angriff | Was der Spieler **ausgeteilt** hat — inklusive Tore und Vorlagen |
+| `defense` | Verteidigung | Was er **einstecken** musste oder abgewehrt hat |
+| `possession` | Ballbesitz | Nur Laserball: Pässe, Befreiungspässe, abgenommene und verlorene Bälle |
+| `targets` | Ziele in der Arena | Feste Ziele, Beacons, Basen — keine Spieler |
+| `missiles` | Raketen | Alles rund um die Rakete |
+| `equipment` | Ausrüstung und Spezialfähigkeiten | Munition, Leben, Nuke, Dauerfeuer, Restbestände |
+| `misc` | Sonstiges | Strafen, Erfolge, Belohnungen |
+| `totals` | Gesamtwertung | Summen und Schnitte über mehrere Matches |
+| `provenance` | Herkunft der Zahlen | Woher ein Wert stammt und wie belastbar er ist |
+
+Abrufbar über:
+
+| Funktion | Liefert |
+|---|---|
+| `metricLabels()` | die ganze Tabelle, **doppelt verschlüsselt**: unter dem camelCase-Feldnamen *und* unter der snake_case-CSV-Spalte |
+| `metricInfo(key)` | einen Eintrag samt `group` und `groupLabel`, egal in welcher der beiden Schreibweisen gefragt wird |
+| `metricLabel(key)` | nur die Bezeichnung |
+| `metricGroups()` | die Abschnitte der Legende in Anzeigereihenfolge: `[{group,label,help}]` |
+
+`scoreboardColumns()` setzt Bezeichnung, Erklärtext, Gruppe und Format bereits
+in seine Spaltenobjekte ein — ein Consumer braucht dafür nichts nachzuschlagen.
+
+### Wie die Legende in die Oberfläche kommt
+
+`GET /api/modes` liefert alles, was eine Legende braucht, ohne dass die Konsole
+eine eigene Texttabelle führt:
+
+- `metrics` — die ganze `METRICS`-Tabelle je Eintrag mit `label`, `short`,
+  `help`, `group`, `groupLabel`, `format`, `csv`
+- `metricGroups` — die Abschnitte in Anzeigereihenfolge
+- `scoreboard[<profil>]` — die Spalten des Profils, jede schon mit `group`
+
+Die Konsole gruppiert die Spalten des **laufenden** Profils nach `group`, druckt
+die Abschnitte in der Reihenfolge von `metricGroups` und je Kennzahl `label` und
+`help`. Details: [API.md](API.md#get-apimodes).
+
 ---
 
 ## Warum die SM5-Live-Zahlen eine Untergrenze sind
@@ -313,9 +598,19 @@ Schuss stattgefunden hat. Alles, was die Anlage nicht als Ereignis meldet —
 etwa Schüsse gegen ein bereits deaktiviertes Ziel oder ins Leere, die die Anlage
 nicht als `0201` protokolliert — fehlt in der Live-Zahl.
 
-**Konsequenz:** Während des Matches sind `shotsFired` und die davon abgeleitete
-Trefferquote **zu niedrig**, nie zu hoch. Dasselbe gilt abgeschwächt für alle
-übrigen SM5-Live-Zähler.
+**Konsequenz, und hier muss man genau hinsehen:**
+
+| Größe | Richtung des Fehlers |
+|---|---|
+| `shotsFired` (der **Zähler**stand) | **zu niedrig** — es fehlen Schüsse, die nie gemeldet wurden |
+| `accuracy` (die **Quote** daraus) | **zu hoch** — der Nenner ist zu klein, der Zähler vollständig |
+
+Das ist kein Widerspruch, sondern dieselbe Ursache aus zwei Blickwinkeln: was im
+Nenner fehlt, sind ausschließlich **Nicht**-Treffer. Ausführlich mit Rechenbeispiel:
+[Die Trefferquote](#die-trefferquote--und-warum-sie-live-zu-hoch-ist).
+
+Für alle übrigen SM5-Live-Zähler gilt abgeschwächt dasselbe wie für
+`shotsFired`: sie sind Untergrenzen.
 
 ### Der Typ-7-Endblock korrigiert das
 
@@ -325,8 +620,12 @@ sie und:
 
 1. legt die **kompletten Rohwerte** der Anlage unter `players[id].official` ab,
 2. **überschreibt** die passenden Live-Zähler mit den offiziellen Werten,
-3. setzt `players[id].statsSource` von `live` auf **`tdf7`**,
-4. löst ein `sm5_stats`-Ereignis aus.
+3. hebt die elf Felder **ohne** Live-Pendant direkt auf das Spielerobjekt
+   ([Tabelle oben](#die-amtlichen-typ-7-felder)) — vorher stehen sie auf `null`,
+4. setzt `players[id].statsSource` von `live` auf **`tdf7`**, berechnet
+   `accuracy` aus den amtlichen Zahlen neu und setzt `accuracyIsEstimate` auf
+   `false`,
+5. löst ein `sm5_stats`-Ereignis aus.
 
 Überschrieben werden:
 
@@ -347,6 +646,10 @@ sie und:
 Alle übrigen Live-Zähler (`misses`, `targetHits`, `missileLocks`,
 `ammoResupplies`, `achievements` …) haben **keine** Entsprechung im Typ-7-Block
 und bleiben die Live-Zahlen — also weiterhin Untergrenzen.
+
+Umgekehrt haben elf **amtliche** Felder kein Live-Pendant — `livesLeft`,
+`shotsLeft` und der Medic-/Boost-/Nuke-Abwehr-Block. Sie existieren erst ab
+diesem Moment und sind vorher leer: [Die amtlichen Typ-7-Felder](#die-amtlichen-typ-7-felder).
 
 > **Das ist der Grund, warum sich Zahlen am Spielende ändern können.** Wenn auf
 > dem Scoreboard während des Matches 240 Schüsse stehen und nach dem Abpfiff
@@ -446,18 +749,28 @@ einmal:
 | `matches.csv` | eine Zeile je Match mit `mode_key`, `mode_label`, `mode_number`, `family` |
 | `player_modes.csv` | je Spieler und Modus: Anzahl, `first_played`, `last_played`, Bilanz, Spielzeit |
 
-Jede Spieler-Zeile trägt vorne `mode_key`, `mode_label`, `mode_number` und
-`family`, dazu `stats_source` (`live` oder `tdf7`) und `score_source`
-(`internal` oder `tdf`). Die Laserball-Spalten sind zeichengleich mit denen der
-Vorversion. Vollständige Spaltenlisten und der Migrationshinweis für Altdaten:
-[STATS.md](STATS.md).
+Jede Spieler-Zeile trägt vorne `mode_key`, `mode_label`, `mode_number`,
+`family` und `profile`, ganz hinten `stats_source` (`live` oder `tdf7`),
+`score_source` (`internal` oder `tdf`) und — wo es eine Quote gibt —
+`accuracy_source`. Die Laserball-Zählerspalten sind zeichengleich mit denen der
+Vorversion. Vollständige Spaltenlisten, die Spalten- und Zeilensortierung und
+der Migrationshinweis für Altdaten: [STATS.md](STATS.md).
+
+> **Welches Profil eine Datei hat.** Die Datei zu **einem** Match nimmt die
+> Spalten **ihres** Profils. Die anhängende Sammeldatei
+> `all_players_<familie>.csv` kann das nicht: ihr Kopf steht ab der ersten Zeile
+> fest, und zwei Profile derselben Familie (`standard` und `sm5`) hätten
+> verschiedene Köpfe. Sie nimmt deshalb immer das **Standardprofil der Familie**
+> — das ist zugleich das breiteste. Die Spalte `profile` in jeder Zeile sagt,
+> mit welchem Profil das Match gespielt wurde.
 
 ### API
 
 `GET /api/status` liefert unter `match` zusätzlich `mode`, `durationKnown`,
 `remainingMs` und `scoreSource`; `GET /api/state` dieselben Felder im Snapshot.
-Der Endpunkt `GET /api/modes` gibt die Registry, den aktuell erkannten Modus und
-die Scoreboard-Spalten beider Familien zurück. Details: [API.md](API.md#get-apimodes).
+Der Endpunkt `GET /api/modes` gibt die Registry (jeder Eintrag jetzt mit
+`profile`), den aktuell erkannten Modus — dessen `mode.profile` — und die
+Scoreboard-Spalten zurück. Details: [API.md](API.md#get-apimodes).
 
 ### Web-Konsole
 
@@ -558,8 +871,8 @@ ergänzen:
 
 ```js
 const REGISTRY = {
-  5:  { number: 5,  key: 'sm5',              label: 'Space Marines 5',  family: FAMILIES.SM5 },
-  28: { number: 28, key: 'laserball_ranked', label: 'Laserball Ranked', family: FAMILIES.LASERBALL },
+  5:  { number: 5,  key: 'sm5',              label: 'Space Marines 5',  family: FAMILIES.SM5,       profile: PROFILES.SM5 },
+  28: { number: 28, key: 'laserball_ranked', label: 'Laserball Ranked', family: FAMILIES.LASERBALL, profile: PROFILES.LASERBALL },
   14: { number: 14, key: 'sm7_nexus',        label: '7SM Nexus',        family: FAMILIES.SM5 },
 };
 ```
@@ -574,6 +887,11 @@ Regeln für den Eintrag:
   überschrieben, sofern die Anlage eine schickt.
 - **`family`** — `FAMILIES.LASERBALL` **nur**, wenn im Inspektor `11xx`-Codes
   aufgetaucht sind. In allen anderen Fällen `FAMILIES.SM5`.
+- **`profile`** — **optional.** Weglassen heißt: Standardprofil der Familie
+  (`sm5` → `sm5`, `laserball` → `laserball`). Nur angeben, wenn der Modus
+  bewusst einen **anderen** Spaltensatz zeigen soll als seine Familie —
+  `PROFILES.STANDARD` ist genau dafür da (siehe
+  [„Standard" eintragen](#standard-eintragen--die-eine-zeile)).
 
 Danach lf_live neu starten. Ohne Eintrag funktioniert der Modus trotzdem — er
 heißt dann nur `mode_14` statt `sm7_nexus` und ist als unbekannt markiert.
@@ -601,6 +919,10 @@ Im Stil der übrigen Doku: hier steht ehrlich, was **nicht** belegt ist.
 | **Typ-7-Zuordnung auf Live-Zähler** | Welches Typ-7-Feld welchem Live-Zähler entspricht, ist aus den Feldnamen erschlossen. `missileHits` vs. `missiledOpponent` sind beide plausibel; lf_live lässt `missiledOpponent` gewinnen. Nicht gegen eine echte Anlage geprüft. | unbestätigt |
 | **SM5-Live-Zähler ohne Typ-7-Pendant** | `misses`, `targetHits`, `targetDestroys`, `missileLocks`, `missileMisses`, `missileDestroys`, `rapidFires`, alle Resupply-Zähler, `beaconClaims`, `baseAwards`, `achievements`, `rewards`, `timesHit`, `timesHitByTeam` bleiben Untergrenzen — die Anlage liefert dafür keine offizielle Endzahl. | bekannte Grenze |
 | **`shotsFired` live** | Laserforce meldet keinen Schuss-Event. Die Live-Zahl ist systematisch zu niedrig. | bekannte Grenze |
+| **Trefferquote live** | Weil nur der Nenner unvollständig ist, fällt die Live-Quote systematisch **zu hoch** aus. Sie ist deshalb als Näherung gekennzeichnet (`accuracyIsEstimate`) und wird nach dem Typ-7-Block amtlich. Wie groß der Fehler an einer echten Anlage ist, ist **nicht** gemessen. | bekannte Grenze |
+| **Modus-Nummer „Standard"** | Nicht belegt. Wird an der Anlage gemessen; das Anzeigeprofil `standard` steht bereit, die Registry-Zeile fehlt bewusst. | offen |
+| **Bedeutung der elf amtlichen Typ-7-Felder** | `livesLeft` und `shotsLeft` sind aus den Namen klar. Für `medicHits`, `ownMedicHits`, `medicNukes`, `scoutRapid`, `lifeBoost`, `ammoBoost`, `nukesCancelled`, `ownNukeCancels`, `shot3Hit` ist die Bedeutung aus der lfstats-Spezifikation erschlossen und nicht gegen eine Anlage geprüft. Die Zahlen werden roh durchgereicht. | unbestätigt |
+| **Anzeigeprofil in der Web-Konsole** | `GET /api/modes` liefert die Scoreboard-Spalten heute unter den beiden **Familien**-Schlüsseln. Für ein Profil `standard` müsste der Endpunkt zusätzlich nach Profil ausliefern; solange keine Modus-Nummer auf `standard` zeigt, fällt das nicht an. | offen |
 | **Gesamtwertung in der Web-Konsole** | Die Tabelle „Gesamtwertung" im Statistik-Tab zeigt fest die Laserball-Spalten. Bei einer SM5-Gesamtwertung bleiben sie leer; die Zahlen stehen vollständig in `totals_sm5.csv`, die im selben Tab zum Download bereitsteht. Auch `GET /api/stats/totals` hat keinen Familien-Parameter. | offen |
 | **Keine Typ-1-Zeile** | Sendet eine Anlage gar keine Typ-1-Zeile, bleibt der Modus dauerhaft `unknown`. Eine Möglichkeit, die Familie von Hand zu erzwingen, gibt es bewusst (noch) nicht. | bewusst offen |
 | **Beschreibung endet auf einer Zahl** | Kommt ein Stream **ohne** Tabulatoren **und ohne** Schema-Zeilen, und endet die Missionsbeschreibung auf einer Zahl, kann dieses letzte Token verlorengehen. Mit Tabulator oder mit Schema-Zeile korrekt. | bekannte Grenze |

@@ -194,6 +194,8 @@ Stream-Server, `envPins`, Match-Kurzinfo. Für Monitoring.
     "source": "tdf"             // 'tdf' | 'inferred' | 'default'
   },
   "scoreSource": "tdf",         // 'tdf' = Punkte von der Anlage | 'internal' = Eigenzählung
+  "endReason": null,            // wie das letzte Match endete (siehe unten), sonst null
+  "endedAt": null,              // Zeitpunkt des Endes (ms seit Epoche), sonst null
   "players": 8,
   "teams":  { "0": { "name": "Rot", "color": "#ef4444" } },
   "scores": { "0": 3, "1": 2 }
@@ -202,6 +204,24 @@ Stream-Server, `envPins`, Match-Kurzinfo. Für Monitoring.
 
 `mode` ist `null`, solange die Engine noch gar keinen Zustand hat. Alle vorher
 vorhandenen Felder sind unverändert geblieben.
+
+#### Matchende — `endReason` / `endedAt`
+
+Rein additiv, und ebenso in `/api/state` (`gameState.endReason`,
+`gameState.endedAt`). Solange ein Match läuft, sind beide `null`.
+
+| `endReason` | Bedeutung | Anzeige der Konsole |
+|---|---|---|
+| `mission_end` | die Anlage hat das Ende selbst gemeldet (Code `0101`) | „regulär beendet" |
+| `watchdog` | kein Ende im Stream — Zeit abgelaufen bzw. anhaltende Stille | „vom Spielleiter beendet bzw. Zeitüberschreitung" |
+| `stream_lost` | die Verbindung zur Anlage brach während des Matches ab | „Verbindung verloren" |
+| `next_match` | die Anlage startete ein neues Match, ohne das alte zu beenden | „durch neues Match abgelöst" |
+| `shutdown` | der Dienst wurde beendet, während das Match lief | „Dienst beendet" |
+
+**Eine Uhr darf nie über das Matchende hinaus weiterlaufen.** Ist
+`active: false`, steht sie — auch dann, wenn danach gar nichts mehr
+hereinkommt. Die mitgelieferte Konsole hält sie zusätzlich an, sobald der Dienst
+länger als zwölf Sekunden nichts Frisches mehr geliefert hat.
 
 > **`label` kommt aus dem Stream** (bereinigt, max. 64 Zeichen), ebenso wie Team-
 > und Spielernamen. In einer Weboberfläche ausschließlich als Text einsetzen, nie
@@ -238,32 +258,75 @@ Auth-, CORS-, Token- und Rate-Limit-Behandlung wie jeder andere GET-Endpunkt.
   "data": {
     "families": ["laserball", "sm5"],
     "defaultFamily": "sm5",          // Familie für unbekannte Modus-Nummern
+    "profiles": [                     // die Anzeigeprofile — was GEZEIGT wird
+      { "profile": "standard",  "label": "Standard",  "family": "sm5",       "sort": ["score", "shotsHit"] },
+      { "profile": "sm5",       "label": "SM5",       "family": "sm5",       "sort": ["score", "deactivations"] },
+      { "profile": "laserball", "label": "Laserball", "family": "laserball", "sort": ["goals", "assists"] }
+    ],
+    "defaultProfile": "sm5",
     "modes": [                        // die bekannten Modi der Registry
-      { "number": 5,  "key": "sm5",              "label": "Space Marines 5",  "family": "sm5" },
-      { "number": 28, "key": "laserball_ranked", "label": "Laserball Ranked", "family": "laserball" }
+      { "number": 5,  "key": "sm5",              "label": "Space Marines 5",  "family": "sm5",       "profile": "sm5" },
+      { "number": 28, "key": "laserball_ranked", "label": "Laserball Ranked", "family": "laserball", "profile": "laserball" }
     ],
     "current": { "number": 28, "key": "laserball_ranked", "label": "Laserball Ranked",
-                 "family": "laserball", "known": true, "source": "tdf" },
+                 "family": "laserball", "profile": "laserball", "known": true, "source": "tdf" },
     "scoreboard": {
-      "laserball": [ { "key": "goals", "label": "Tore", "short": "T" },
+      // FAMILIEN-Schlüssel (unverändert) UND PROFIL-Schlüssel. "sm5" und
+      // "laserball" heißen in beiden Namensräumen gleich und meinen dort
+      // dasselbe; neu ist allein "standard".
+      "laserball": [ { "key": "goals", "label": "Tore", "short": "T",
+                       "help": "Erzielte Tore.", "format": "int" },
                      { "key": "stealsDone", "label": "Steals", "short": "St",
+                       "help": "Dem Gegner den Ball abgenommen.", "format": "int",
                        "received": "stealsReceived" } ],
-      "sm5":       [ { "key": "score", "label": "Punkte", "short": "Pkt" },
-                     { "key": "deactivations", "label": "Deaktivierungen", "short": "D",
-                       "received": "timesDeactivated" } ]
+      "sm5":       [ { "key": "roleLabel", "label": "Rolle", "short": "Rolle",
+                       "help": "SM5-Rolle aus der Typ-3-Zeile …", "format": "text" },
+                     { "key": "accuracy", "label": "Trefferquote", "short": "Quote",
+                       "help": "Treffer geteilt durch abgegebene Schüsse …", "format": "percent" },
+                     { "key": "livesLeft", "label": "Leben übrig", "short": "Lb⌀",
+                       "help": "… vor dem Matchende leer, nicht 0.", "format": "int" } ],
+      "standard":  [ { "key": "score", "label": "Punkte", "short": "Pkt",
+                       "help": "Punktestand dieses Spielers …", "format": "int" } ]
+    },
+    "metrics": {                      // die Beschriftungstabelle, doppelt verschlüsselt
+      "shotsFired":  { "key": "shotsFired", "csv": "shots_fired", "label": "Schüsse",
+                       "short": "Sch", "help": "Abgegebene Schüsse …", "format": "int" },
+      "shots_fired": { "key": "shotsFired", "csv": "shots_fired", "label": "Schüsse",
+                       "short": "Sch", "help": "Abgegebene Schüsse …", "format": "int" }
     }
   }
 }
 ```
 
 - `current` ist derselbe Wert wie `match.mode` aus `/api/status`, oder `null`.
+- **Zwei getrennte Achsen:** die **Familie** (`laserball`/`sm5`) bestimmt, was
+  überhaupt gezählt werden kann; das **Profil** (`standard`/`sm5`/`laserball`)
+  bestimmt, was angezeigt wird. Ein Modus nennt sein Profil, sonst gilt das
+  Standardprofil seiner Familie ([GAMEMODES.md](GAMEMODES.md)).
 - **`scoreboard` liefert die Spaltendefinitionen gleich mit**, weil eine
   Weboberfläche Browser-Code ist und `src/gameModes.js` nicht laden kann. Damit
   gibt es genau eine Quelle für die Spaltenreihenfolge, und ein neuer Zähler
   taucht in jeder Anzeige auf, ohne dass jemand eine Spaltenliste nachpflegt.
+  Die beiden Familien-Schlüssel bleiben erhalten — entfernt wurde nichts.
 - Ein Eintrag hat `key` (Feld im Spielerobjekt), `label`, `short` (schmale
-  Kopfzeile) und optional `received` — das Gegenstück-Feld für eine
-  „gemacht / kassiert"-Darstellung.
+  Kopfzeile), `help` (ein Satz, taugt als Tooltip), `format` und optional
+  `received` — das Gegenstück-Feld für eine „gemacht / kassiert"-Darstellung.
+- **`format` sagt, wie zu rendern ist**, und ist bindend:
+
+  | `format` | Wert | Darstellung |
+  |---|---|---|
+  | `int` | Zahl | Zahl, wie bisher |
+  | `text` | Zeichenkette | Text (z. B. die Rolle „Commander") |
+  | `percent` | Anteil 0…1 | Prozentwert (`0.43` → `43 %`) |
+  | alle | `null` | **leer** — nie `0`, nie ein Strich |
+
+  `null` heißt „noch nicht gemeldet", nicht „null gemessen": `livesLeft` und
+  `shotsLeft` kommen erst mit dem Typ-7-Endblock der Anlage, und eine 0 sähe
+  aus wie „keine Leben mehr".
+- **`metrics` ist die komplette Beschriftungstabelle** (`metricLabels()` aus
+  `src/gameModes.js`), verschlüsselt sowohl unter dem camelCase-Feldnamen als
+  auch unter der snake_case-CSV-Spalte. Damit braucht kein Verbraucher — auch
+  die mitgelieferte Konsole nicht — eine eigene Liste von Spaltennamen.
 - Die Antwort enthält **nur** Registry-Daten: keine Pfade, keine Dateien, keine
   Konfiguration.
 
@@ -314,12 +377,60 @@ Siehe [STATS.md](STATS.md).
 
 Die CSV-Ablage ist seit der Modus-Adaptivität **nach Familie getrennt**
 (`totals_laserball.csv`, `totals_sm5.csv`, dazu `matches.csv` und
-`player_modes.csv`). `/api/stats/totals` liefert **eine** Familie — die des
-zuletzt aufgezeichneten Matches, sonst die zuletzt geschriebene Gesamtwertung,
-sonst die alte `totals.csv`. Einen Parameter zur Auswahl gibt es nicht; wer
-gezielt eine Familie braucht, holt sie über
-`/api/stats/file?name=totals_sm5.csv`. `/api/stats/files` listet alle neuen
-Dateien automatisch mit.
+`player_modes.csv`). `/api/stats/totals` liefert immer **eine** Familie.
+
+| Aufruf | Was zurückkommt |
+|---|---|
+| `/api/stats/totals` | wie bisher: die Familie des zuletzt aufgezeichneten Matches, sonst die zuletzt geschriebene Gesamtwertung, sonst die alte `totals.csv` |
+| `?family=sm5` | genau diese Familie |
+| `?profile=sm5` | das **Anzeigeprofil**, aufgelöst auf seine Familie |
+
+Beide Parameter werden gegen die Registry geprüft; alles andere fällt auf den
+Standard zurück, `family` gewinnt bei beiden. Ein Aufruf **ohne** Parameter
+verhält sich unverändert.
+
+```jsonc
+{
+  "data": [ { "name": "Mara", "matches": "3", "score": "4200", … } ],
+  "family": "sm5",              // null, wenn nichts ausgewählt wurde
+  "families": ["sm5", "laserball"],
+  "profile": "sm5",             // Profil, unter dem diese Zeilen gezeigt werden
+  "profiles": [                 // je Familie mit Daten genau ein Eintrag
+    { "profile": "sm5", "label": "SM5", "family": "sm5" },
+    { "profile": "laserball", "label": "Laserball", "family": "laserball" }
+  ]
+}
+```
+
+Summiert wird weiter **je Familie** — eine Summe über die Zähler einer anderen
+Familie wäre sinnlos. Profile derselben Familie (`standard` und `sm5`) teilen
+sich deshalb eine Datei, und `profiles` nennt je Familie genau ein Profil. Die
+Spaltenbeschriftungen der Gesamtwertung stehen in `metrics` aus `/api/modes`.
+`/api/stats/files` listet alle neuen Dateien automatisch mit.
+
+### `GET /api/capture/files` · `GET /api/capture/file?name=` · `GET /api/capture/bundle` · `POST /api/capture/delete`
+
+Die [Roh-Mitschnitte](CAPTURE.md) des TCP-Streams — Liste, einzelne Datei,
+alles als ZIP, und Löschen. Standardmäßig ist der Mitschnitt aus, dann ist die
+Liste leer.
+
+```json
+{ "data": [ { "name": "2026-09-16_143012_mode28_laserball-ranked_abc123.tdf",
+              "size": 422400, "mtime": 1789567812000, "kind": "tdf",
+              "mode": { "number": 28, "label": "laserball-ranked" },
+              "recording": false } ],
+  "status": { "enabled": true, "recording": false, "file": null, "lines": 0 } }
+```
+
+`name` muss ein reiner Dateiname nach dem Muster `[A-Za-z0-9._-]+.(tdf|txt)`
+sein — `..`, Pfadtrenner oder absolute Pfade → `400`/`404`, genau wie bei
+`/api/stats/file`. `bundle` liefert `413`, wenn der Ordner die 64-MB-Grenze des
+im Speicher gebauten ZIPs überschreitet.
+
+`POST /api/capture/delete` nimmt `{"name":"…"}` oder `{"all":true}`; es ist ein
+schreibender Vorgang und braucht dieselbe Absicherung wie `/api/config`
+(Session/Token **und** `Sec-Fetch-Site: same-origin` bzw. `X-LF-Console: 1`).
+Eine gerade laufende Aufzeichnung wird nicht gelöscht (`400 recording`).
 
 ### `GET /api/logs?limit=<n>`
 

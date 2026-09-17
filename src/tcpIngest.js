@@ -11,6 +11,11 @@ const MAX_LINE_BYTES = 1 << 20; // 1 MiB guard against a peer that never sends a
  * (split on \r?\n, keep the trailing partial in a buffer). Hardened with
  * per-socket error handling and a buffer-size guard so nothing can crash the
  * service mid-event.
+ *
+ * ADDITIVE: besides the parsed `line` events it emits the UNTOUCHED bytes as
+ * `data` and a `stream-end` when the peer goes away. The raw recorder
+ * (src/capture.js) hangs off those two — nothing else listens, and with no
+ * listener attached the emit is free.
  */
 class TcpIngest extends EventEmitter {
   constructor({ logger, getConfig }) {
@@ -18,7 +23,7 @@ class TcpIngest extends EventEmitter {
     this.log = logger;
     this.getConfig = getConfig;
     this.server = null;
-    this.stats = { listening: false, host: null, port: null, connections: 0, bytes: 0, lines: 0, lastLineAt: null, connected: 0 };
+    this.stats = { listening: false, host: null, port: null, connections: 0, bytes: 0, lines: 0, lastLineAt: null, connected: 0, lastDisconnectAt: null };
   }
 
   start() {
@@ -31,10 +36,19 @@ class TcpIngest extends EventEmitter {
         this.stats.connected++;
         const peer = `${socket.remoteAddress}:${socket.remotePort}`;
         this.log.info('tcp', `Laserforce connected (${peer})`);
+        // ADDITIVE: counterpart of `stream-end`. A reconnect inside the grace
+        // period must call off a pending `stream_lost` (src/index.js).
+        try { this.emit('stream-start', { peer }); }
+        catch (err) { this.log.warn('tcp', `connect handler threw: ${err.message}`); }
         let buffer = '';
 
         socket.on('data', (data) => {
           this.stats.bytes += data.length;
+          // Raw bytes first and unchanged — a recorder must see exactly what the
+          // arena sent, including tabs, \r\n and the `;` schema lines. It can
+          // never disturb the parsing below.
+          try { this.emit('data', data); }
+          catch (err) { this.log.warn('tcp', `raw handler threw: ${err.message}`); }
           buffer += data.toString('utf8');
           if (buffer.length > MAX_LINE_BYTES) {
             this.log.warn('tcp', `line buffer over ${MAX_LINE_BYTES} bytes without a newline; dropping`);
@@ -54,7 +68,13 @@ class TcpIngest extends EventEmitter {
         });
 
         socket.on('error', (err) => this.log.warn('tcp', `socket error (${peer}): ${err.message}`));
-        socket.on('close', () => { this.stats.connected--; this.log.info('tcp', `Laserforce disconnected (${peer})`); });
+        socket.on('close', () => {
+          this.stats.connected--;
+          this.stats.lastDisconnectAt = Date.now();
+          this.log.info('tcp', `Laserforce disconnected (${peer})`);
+          try { this.emit('stream-end'); }
+          catch (err) { this.log.warn('tcp', `raw handler threw: ${err.message}`); }
+        });
       });
 
       server.on('error', (err) => {

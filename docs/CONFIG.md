@@ -50,6 +50,11 @@ Dateirechten `0600` geschrieben.
 > Für die Modus-Erkennung gibt es **keine** eigenen Einstellungen. Dass die
 > CSV-Ablage seit dieser Version je Spielmodus-Familie getrennt schreibt,
 > passiert automatisch — Dateinamen und Spalten: [STATS.md](STATS.md).
+| `LF_CAPTURE_ENABLED` | `false` | `capture.enabled` | rohen TDF-Stream mitschneiden ([CAPTURE.md](CAPTURE.md)) — **Diagnose, kein Dauerbetrieb**; die Dateien enthalten Spielernamen und Mitglieds-IDs. Konsolen-Änderung wirkt sofort |
+| `LF_CAPTURE_DIR` | `data/capture` | `capture.dir` | Zielordner der Mitschnitte |
+| `LF_CAPTURE_MAX_FILE_MB` | `20` | `capture.maxFileMB` | Grenze je Datei; danach endet der Mitschnitt dieser Mission (1–2000) |
+| `LF_CAPTURE_MAX_FILES` | `50` | `capture.maxFiles` | Höchstzahl Dateien, älteste werden gelöscht (1–1000) |
+| `LF_CAPTURE_MAX_TOTAL_MB` | `500` | `capture.maxTotalMB` | Grenze für den ganzen Ordner (1–100000) |
 | `LF_EVENTLOG_ENABLED` | `true` | `eventLog.enabled` | lesbare Event-Log-Datei schreiben ([LOGGING.md](LOGGING.md)) |
 | `LF_EVENTLOG_DIR` | `data/logs` | `eventLog.dir` | Zielordner der Event-Log-Datei (relativ zum Programm) |
 | `LF_EVENTLOG_ROTATE` | `daily` | `eventLog.rotate` | `daily` = `events-YYYY-MM-DD.log` · `match` = `events-<matchId>.log` (neue Datei je Match) · `none` = `events.log` |
@@ -57,6 +62,9 @@ Dateirechten `0600` geschrieben.
 | `LF_LOCAL_ROSTER_ENABLED` | `false` | `localRoster.enabled` | Namensliste nutzen |
 | `LF_LOCAL_ROSTER_FILE` | `data/roster.csv` | `localRoster.file` | deren Pfad (setzt automatisch `enabled=true`) |
 | `LF_MATCH_DURATION_MS` | `720000` | `match.defaultDurationMs` | Platzhalter, solange Laserforce keine Dauer gemeldet hat (Log-Typ 1). **Er wird nicht mehr als Countdown angezeigt**: meldet die Anlage keine Dauer, zählt die Uhr hoch — siehe [GAMEMODES.md](GAMEMODES.md#die-spieluhr) |
+| `LF_MATCH_END_WATCHDOG_SECONDS` | `120` | `matchEnd.watchdogSeconds` | kommt **gar keine** Zeile mehr von der Anlage, gilt das Match nach dieser Zeit als beendet (`endReason: watchdog`). `0` = aus (0–86400) |
+| `LF_MATCH_END_STREAM_LOST_SECONDS` | `30` | `matchEnd.streamLostSeconds` | TCP-Verbindung mitten im Match weg: so lange wird auf eine neue gewartet, danach `endReason: stream_lost`. `0` = aus |
+| `LF_MATCH_END_BLOCK_SECONDS` | `10` | `matchEnd.endBlockSeconds` | Endabrechnung (Typ 6/7) erkannt und **kein** `0101` danach: Frist bis zum Ende. `0` = Erkennung aus, dann greift nur der Watchdog |
 | `LF_LOG_LEVEL` | `info` | `logLevel` | `debug` \| `info` \| `warn` \| `error` |
 | `LF_CONFIG_FILE` | `config.json` | – | wo die Konsolen-Konfiguration liegt |
 | `LF_ENV_FILE` | `.env` | – | alternative .env-Datei |
@@ -100,6 +108,11 @@ Leere Werte (`LF_API_TOKEN=`) zählen als „nicht gesetzt".
   "tcp": { "host": "0.0.0.0", "port": 9000 },
   "streamServer": { "enabled": false, "host": "127.0.0.1", "port": 9100 },
   "match": { "defaultDurationMs": 720000 },
+  "matchEnd": {                              // wann gilt ein Match als beendet? LASERFORCE.md
+    "watchdogSeconds": 120,                  // keine Zeile mehr von der Anlage
+    "streamLostSeconds": 30,                 // Verbindung weg und kommt nicht zurück
+    "endBlockSeconds": 10                    // Endabrechnung (Typ 6/7) ohne folgendes 0101
+  },                                         // je 0 = dieser Weg ist abgeschaltet
   "engine": { "emitUnknownEvents": true },   // generisches lf_event für nicht ausgewertete Typ-4-Codes
   "csv": {
     "enabled": true, "dir": "data/stats", "delimiter": ";",
@@ -109,6 +122,10 @@ Leere Werte (`LF_API_TOKEN=`) zählen als „nicht gesetzt".
     "enabled": true, "dir": "data/logs",
     "rotate": "daily",                       // "daily" | "match" | "none"
     "filenamePrefix": "events"
+  },
+  "capture": {                               // Roh-Mitschnitt, Diagnose — CAPTURE.md
+    "enabled": false, "dir": "data/capture",
+    "maxFileMB": 20, "maxFiles": 50, "maxTotalMB": 500
   },
   "localRoster": { "enabled": false, "file": "data/roster.csv" },
   "outputs": [

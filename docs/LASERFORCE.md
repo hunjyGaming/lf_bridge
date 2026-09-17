@@ -22,6 +22,7 @@ TCP-Stream kommt. Dies ist die **einzige** Protokoll-Referenz des Projekts.
 - [Spielvarianten](#spielvarianten)
 - [Modus-Erkennung](#modus-erkennung)
 - [Assist-Fenster & Ballbesitz](#assist-fenster--ballbesitz)
+- [Wann ein Match als beendet gilt](#wann-ein-match-als-beendet-gilt)
 - [Was lf_live daraus macht](#was-lf_live-daraus-macht)
 - [Bekannte Lücken / unbestätigt](#bekannte-lücken--unbestätigt)
 - [Quellen](#quellen)
@@ -442,7 +443,7 @@ Diese Codes gelten für **alle** Modi (`mode: 'all'`).
 | Code | Label | Kategorie | Bedeutung | Status |
 |---|---|---|---|---|
 | `0100` | Mission Start | match | Beginnt die Mission bei t=0; startet die Spieluhr. Der Parser leert Spielerliste, Ball und Events. | verified |
-| `0101` | Mission End | match | Beendet die Mission. In Laserball zusätzlich alle Spieler-Status → 0. Tatsächliche Dauer = dieser Zeitstempel. | verified |
+| `0101` | Mission End | match | Beendet die Mission (`endReason: mission_end`). In Laserball zusätzlich alle Spieler-Status → 0. Tatsächliche Dauer = dieser Zeitstempel. **Ob die Anlage es auch beim Beenden von Hand schickt, ist nicht belegt** — siehe [Wann ein Match als beendet gilt](#wann-ein-match-als-beendet-gilt). | verified |
 | `0201` | Miss | combat | Schuss/Wurf ins Leere. Sehr häufig, kein Score. Kommt in SM5 **und** Laserball vor. | verified |
 | `0900` | Achievement | other | Ingame-Achievement abgeschlossen. Rein informativ. | verified |
 | `0902` | Reward | other | Standort-Belohnung (z. B. Freispiel). Rein informativ. TDF ab v2.005. | verified |
@@ -588,6 +589,60 @@ Objekt-Formen: [API.md](API.md).
 
 ---
 
+## Wann ein Match als beendet gilt
+
+**Das `0101` ist nicht verlässlich.** Beendet der Spielleiter die Mission an der
+Anlage von Hand, ist bisher nicht belegt, dass überhaupt eines kommt — die
+Dokumentation behauptet es, gemessen wurde es nie. lf_live verlässt sich deshalb
+nicht darauf: ein Match kann auf **vier** Wegen enden, und jeder trägt seine
+Begründung mit.
+
+| `endReason` | Auslöser | Schwellwert |
+|---|---|---|
+| `mission_end` | Typ-4-Code `0101` von der Anlage. Gewinnt immer. | sofort |
+| `watchdog` | **keine einzige Zeile** mehr von der Anlage — oder die erkannte Endabrechnung (Typ 6/7) ist verstrichen, ohne dass ein `0101` kam | `matchEnd.watchdogSeconds` (120 s) bzw. `matchEnd.endBlockSeconds` (10 s) |
+| `stream_lost` | die TCP-Verbindung ist mitten im Match weg und kommt nicht zurück | `matchEnd.streamLostSeconds` (30 s) |
+| `next_match` | ein `0100` kam, während das vorige Match noch lief | sofort |
+| `shutdown` | der Dienst wurde beendet, während ein Match lief | sofort |
+
+Der Zustand führt dazu `gameState.endReason` (einer der Werte oben oder `null`)
+und `gameState.endedAt` (Zeitstempel in ms oder `null`). **`null` heißt: es läuft
+eines oder es lief noch keines** — nur dann darf eine Anzeige die Uhr
+weiterzählen lassen. Dieselben zwei Felder stehen unter `match` in
+`GET /api/status`, und das `match_end`-Ereignis trägt `reason`.
+
+Alle drei Fristen sind in der Konsole und per `.env` einstellbar, **`0` schaltet
+den jeweiligen Weg ab** ([CONFIG.md](CONFIG.md)) — für den Fall, dass eine Anlage
+sich anders verhält als hier beschrieben.
+
+### Endabrechnung ≠ einzelne Elimination
+
+Die Reihenfolge am Matchende ist `6`/`7` (Endabrechnung) → `0101`. Die
+Endabrechnung ist damit das stärkste vorhandene Signal für „Mission vorbei" —
+aber eine **einzelne** Typ-6-Zeile bedeutet nur, dass *eine* Entity ausgeschieden
+ist (Exit-Code `04` eliminiert, `01` Kick, `17` Ref-Kick), und das passiert
+mitten im Spiel. Sie darf das Match **auf keinen Fall** beenden. Unterschieden
+wird deshalb so:
+
+- **Typ 7** kommt ausschließlich am Matchende (und nur in SM5). Eine einzige
+  Zeile genügt als Signal.
+- **Typ 6** zählt nur mit **Exit-Code `02`** („Ende") — der Code, mit dem die
+  Entity die *Mission* verlässt, nicht der, mit dem sie stirbt. Zusätzlich
+  müssen es **mindestens zwei** Entities sein **und** alle, die noch im Match
+  sind; wer vorher mit `04`/`01`/`17` ausgeschieden ist, wird abgezogen, weil er
+  kein zweites Mal meldet. So deckt die Regel auch Laserball ab, wo es keine
+  Typ-7-Zeilen gibt.
+- Das Erkennen **beendet nichts**, es setzt nur eine Frist von
+  `matchEnd.endBlockSeconds`. Kommt das `0101` — es folgt im echten Betrieb
+  Millisekunden später —, gewinnt es und die Begründung ist `mission_end`.
+- Kommt danach noch ein Spiel-Ereignis (Typ 4) oder eine Punktezeile (Typ 5),
+  war es doch keine Endabrechnung: die Frist wird wieder verworfen.
+
+Ein zu spät beendetes Match ist ärgerlich, ein fälschlich mitten im Spiel
+beendetes wäre schlimmer — im Zweifel läuft es weiter und der Watchdog fängt es.
+
+---
+
 ## Was lf_live daraus macht
 
 ### Zeilentypen
@@ -600,8 +655,8 @@ Objekt-Formen: [API.md](API.md).
 | Zeile 2 | `teams[index] = {name, color}` |
 | Zeile 3 (`player`, `team != 5`) | Spieler angelegt; `player_join`-Event; zusätzlich `level`, `category`, `roleLabel`, `battlesuit`, `memberId` und die Zählerfelder der Familie |
 | Zeile 5 (Score) | **autoritativer Punktestand** → `scores[team]` bzw. `players[id].score`, `scoreSource='tdf'`; zusätzlich weiterhin das `score`-Event mit `teamId`/`old`/`new`/`delta` |
-| Zeile 6 (Entity-Ende) | `match_summary`-Event mit `entityId`/`exitCode`/`score` (informativ, kein Zustandswechsel) |
-| Zeile 7 (SM5-Endblock) | `players[id].official` (Rohwerte), überschreibt die SM5-Live-Zähler, `statsSource='tdf7'`, `sm5_stats`-Event |
+| Zeile 6 (Entity-Ende) | `match_summary`-Event mit `entityId`/`exitCode`/`score` (informativ, kein Zustandswechsel); zählt zusätzlich zur [Erkennung der Endabrechnung](#endabrechnung--einzelne-elimination) — **nie allein** |
+| Zeile 7 (SM5-Endblock) | `players[id].official` (Rohwerte), überschreibt die SM5-Live-Zähler, `statsSource='tdf7'`, `sm5_stats`-Event; setzt die Frist der [Endabrechnung](#endabrechnung--einzelne-elimination) |
 | Zeile 9 | `players[id].status`; `status`-Event |
 
 ### Typ-4-Codes: Laserball (`11xx`) — unverändert
@@ -609,7 +664,7 @@ Objekt-Formen: [API.md](API.md).
 | TDF | → lf_live |
 |---|---|
 | `0100` | `match_start`; `players`/`ballHolderId`/`events` geleert, Scores → 0, neue `matchId`, `scoreSource` → `internal`. **`mode` und `duration` bleiben stehen** (Typ 1 kam davor) |
-| `0101` | `match_end`; Ball frei |
+| `0101` | `match_end` mit `reason: mission_end`; Ball frei; `endReason`/`endedAt` gesetzt |
 | `1100` | `pass`; `passesDone/Received++`; Ball→target; Assist-Fenster (10 s) |
 | `1109` | `clear`; `clearsDone/Received++`; Ball→target; Assist-Fenster |
 | `1101` / `1102` | `goal`; `goals++`; Assist wenn Pass/Clear an Schützen ≤ 10 s zuvor. `scores[team]++` **nur solange `scoreSource === 'internal'`** |
@@ -697,6 +752,8 @@ Es ist **erwartet**, dass diese Liste Lücken hat. Alles hier ist entweder nicht
 | **Beschreibung endet auf einer Zahl** | Ohne Tabulatoren **und** ohne Schema-Zeile kann das letzte Token einer auf eine Zahl endenden Missionsbeschreibung verlorengehen. Mit Tabulator oder Schema-Zeile korrekt. | bekannte Grenze |
 | **Offizieller Score / Endstand** | Zeile 5 ist jetzt die Autorität für `gameState.scores` und `players[id].score`, Zeile 7 die Autorität für die SM5-Endstatistik. Nicht übernommen wird weiterhin der Score aus Zeile 6 (bleibt rein informativ). | weitgehend geschlossen |
 | **Farb-Enum → RGB** | Fallback-RGB pro `colour-enum` (für v2.003-Feeds ohne `#rgb`) nicht implementiert. | offen |
+| **`0101` beim Beenden von Hand** | Ob die Anlage den Mission-End-Code auch dann schickt, wenn der Spielleiter die Mission an der Konsole abbricht, ist **nicht gemessen**. Deshalb die vier Beendigungswege in [Wann ein Match als beendet gilt](#wann-ein-match-als-beendet-gilt) — sie greifen unabhängig davon. Gegen einen Mitschnitt (`scripts/inspect.js`) prüfen. | unbestätigt |
+| **Typ-6 am Matchende** | Dass am regulären Ende **jede** verbliebene Entity eine Typ-6-Zeile mit Exit-Code `02` schickt, stammt aus der Spezifikation, nicht aus einer Messung der eigenen Anlage. Trifft es nicht zu, wird die Endabrechnung nicht erkannt und der Watchdog beendet das Match später — nie früher. | unbestätigt |
 
 ---
 

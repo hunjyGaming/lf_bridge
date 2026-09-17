@@ -4,7 +4,8 @@ const { EventEmitter } = require('events');
 const { describe, phrase, readable } = require('./eventCatalog');
 const { TdfSchema } = require('./tdfSchema');
 const {
-  FAMILIES, resolveMode, familyOf, newPlayerStats, roleLabel,
+  FAMILIES, FAMILY_DEFAULT_PROFILE, resolveModeWithProfile, withProfile,
+  familyOf, newPlayerStats, newOfficialStats, SM5_OFFICIAL_FIELDS, roleLabel,
 } = require('./gameModes');
 
 /**
@@ -213,6 +214,70 @@ const TYPE_TO_CATEGORY = {
   missile_lock: 'combat', missile_miss: 'combat', missile_hit: 'combat', missile_destroy: 'combat',
 };
 
+/**
+ * ── Matchende erkennen (docs/LASERFORCE.md, „Reihenfolge im echten Betrieb") ──
+ *
+ * Defaults in milliseconds. The console/.env values are given in SECONDS and
+ * converted by `matchEndMs()` below; `0` switches a path off entirely.
+ *
+ * Why these numbers:
+ *   watchdogMs 120 s   — the longest plausible silence INSIDE a running match.
+ *                        A quiet Laserball possession or an SM5 stand-off
+ *                        produces gaps of seconds, never of minutes, and the
+ *                        watchdog counts ANY line (type 9 status, type 5 score,
+ *                        schema comments), not just scoring events. Two minutes
+ *                        is therefore far outside normal play while costing at
+ *                        most two minutes of a stuck clock.
+ *   endBlockMs  10 s   — `0101` follows the 6/7 end block in the same burst,
+ *                        milliseconds later. Ten seconds is three orders of
+ *                        magnitude of headroom for a slow or fragmented TCP
+ *                        write and still ends the clock ~110 s earlier than the
+ *                        watchdog would.
+ *   streamLostMs 30 s  — a Laserforce export reconnects within seconds. Half a
+ *                        minute survives a reconnect; longer than that and the
+ *                        match is not coming back over this socket.
+ */
+const MATCH_END_DEFAULTS = { watchdogMs: 120000, streamLostMs: 30000, endBlockMs: 10000 };
+
+/** How often the end detection looks at the clock while a match is running. */
+const END_TICK_MS = 1000;
+
+/**
+ * At least this many entities must report a type-6 END exit before the block
+ * counts as an end-of-match summary. A single type-6 is one entity leaving
+ * (eliminated / kicked) and must NEVER end a match — see `_noteEntityEnd()`.
+ */
+const END_BLOCK_MIN_ENTITIES = 2;
+
+/** Exit code of a type-6 line that means "the mission is over for this entity". */
+const EXIT_CODE_END = 2;
+
+/** `endReason` values — the contract other consumers build on. */
+const END_REASONS = ['mission_end', 'watchdog', 'stream_lost', 'next_match', 'shutdown'];
+
+const END_TEXT = {
+  mission_end: 'Match ended',                                   // unchanged wording for `0101`
+  watchdog: 'Match ended (keine Daten mehr von der Anlage)',
+  stream_lost: 'Match ended (Verbindung zur Anlage abgebrochen)',
+  next_match: 'Match ended (das nächste Match hat begonnen)',
+  shutdown: 'Match ended (Dienst wurde beendet)',
+};
+
+/** Seconds from config/.env -> the milliseconds the engine works with. */
+function matchEndMs(cfg) {
+  const s = cfg && typeof cfg === 'object' ? cfg : {};
+  const ms = (v, d) => {
+    const n = Number(v);
+    if (!Number.isFinite(n) || n < 0) return d;
+    return Math.round(n * 1000);
+  };
+  return {
+    watchdogMs: ms(s.watchdogSeconds, MATCH_END_DEFAULTS.watchdogMs),
+    streamLostMs: ms(s.streamLostSeconds, MATCH_END_DEFAULTS.streamLostMs),
+    endBlockMs: ms(s.endBlockSeconds, MATCH_END_DEFAULTS.endBlockMs),
+  };
+}
+
 /** Title-case an engine `type` string for a last-resort `label`. */
 function titleCaseType(s) {
   if (typeof s !== 'string' || !s) return null;
@@ -235,10 +300,13 @@ function titleCaseType(s) {
  * structured fields and a plain-text `text` convenience string.
  */
 class Engine extends EventEmitter {
-  constructor({ logger, defaultDurationMs = 720000, emitUnknownEvents = true } = {}) {
+  constructor({ logger, defaultDurationMs = 720000, emitUnknownEvents = true, matchEnd = null } = {}) {
     super();
     this.log = logger;
     this.defaultDurationMs = defaultDurationMs;
+    /** Thresholds in ms; see MATCH_END_DEFAULTS. 0 switches that path off. */
+    this.matchEnd = { ...MATCH_END_DEFAULTS };
+    this.setMatchEndConfig(matchEnd);
     // Additive only: when true, every type-4 code the core parser does not act on
     // still surfaces as a generic `lf_event`. Never changes an existing branch.
     this.emitUnknownEvents = emitUnknownEvents !== false;
@@ -261,13 +329,19 @@ class Engine extends EventEmitter {
       events: [], // structured, bounded ring (replaces the old HTML `logs`)
       updatedAt: Date.now(),
       // ---- additive (contract C7) --------------------------------------
-      // No type-1 line seen yet: unknown mode, default family `sm5`.
-      mode: resolveMode(null, null),
+      // No type-1 line seen yet: unknown mode, default family `sm5`, default
+      // display profile `sm5`.
+      mode: resolveModeWithProfile(null, null),
       missionDesc: null,
       durationKnown: false,   // false -> the UI counts UP instead of down
       remainingMs: null,      // derived: durationKnown ? duration - elapsed : null
       scoreSource: 'internal', // 'internal' (own count) | 'tdf' (type-5 lines)
+      // ---- additive: how and when the match ended ----------------------
+      // null while a match is running and before the first match ever ran.
+      endReason: null,        // 'mission_end'|'watchdog'|'stream_lost'|'next_match'|'shutdown'
+      endedAt: null,          // ms timestamp of the moment the match was ended
     };
+    this._resetEndDetection();
     this.livePassesStream = [];
     this.playerStatusMap = {};
     this._eventSeq = 0;
@@ -280,6 +354,186 @@ class Engine extends EventEmitter {
 
   setRoster(map) {
     this.dbPlayersMap = map || {};
+  }
+
+  // ─── Matchende erkennen ───────────────────────────────────────────────────
+  //
+  // The arena is NOT trusted to announce the end of a mission. `0101` is one of
+  // four ways a match can end here; the other three are inferred. Everything in
+  // this block is additive: it only ever flips a RUNNING match to ended, never
+  // the other way round, and a wrongly ended match is the one outcome that must
+  // not happen — hence the deliberately generous thresholds.
+
+  /** Apply new thresholds (ms). Unknown/negative values keep the current one. */
+  setMatchEndConfig(cfg) {
+    const c = cfg && typeof cfg === 'object' ? cfg : {};
+    for (const k of ['watchdogMs', 'streamLostMs', 'endBlockMs']) {
+      const n = Number(c[k]);
+      if (Number.isFinite(n) && n >= 0) this.matchEnd[k] = Math.round(n);
+    }
+    return this.matchEnd;
+  }
+
+  /** Per-match bookkeeping of the end detection. Never touches gameState. */
+  _resetEndDetection() {
+    this._stopEndWatch();
+    this._endTimer = null;
+    this._lastLineAt = Date.now();
+    this._streamLostAt = null;   // socket gone since this moment (match still running)
+    this._endBlockAt = null;     // end summary seen at this moment, waiting for `0101`
+    this._endExits = new Set();  // player ids that reported a type-6 END exit
+    this._earlyExits = new Set();// player ids that left mid-game (eliminated/kicked)
+  }
+
+  /** Start the ticker that turns the thresholds into real endings. */
+  _startEndWatch() {
+    if (this._endTimer) return;
+    const m = this.matchEnd;
+    const active = [m.watchdogMs, m.streamLostMs, m.endBlockMs].filter((v) => v > 0);
+    if (!active.length) return;
+    // Fast enough for a short test threshold, never faster than 100 ms.
+    const tick = Math.max(100, Math.min(END_TICK_MS, Math.floor(Math.min(...active) / 3)));
+    this._endTimer = setInterval(() => {
+      try { this.checkMatchEnd(); } catch (_err) { /* the clock must never crash the service */ }
+    }, tick);
+    this._endTimer.unref?.();
+  }
+
+  _stopEndWatch() {
+    if (this._endTimer) { clearInterval(this._endTimer); this._endTimer = null; }
+  }
+
+  /**
+   * Any byte from the arena counts as "the match is alive" — a status line, a
+   * score line, even a `;` schema comment. Called first thing in
+   * processLogLine(), so a line that later fails to parse still feeds it.
+   */
+  noteActivity(now = Date.now()) {
+    this._lastLineAt = now;
+    this._streamLostAt = null;   // data is arriving, so the stream is clearly there
+  }
+
+  /** The TCP connection to the arena went away. */
+  noteStreamLost(now = Date.now()) {
+    if (!this.gameState.missionActive) return;
+    if (this._streamLostAt == null) this._streamLostAt = now;
+    this._startEndWatch();
+  }
+
+  /** The arena connected again — a reconnect must not end the match. */
+  noteStreamResumed() {
+    this._streamLostAt = null;
+  }
+
+  /**
+   * The 6/7 end summary looks like it has been sent. Only ARMS a deadline:
+   * if `0101` still follows, it wins and the reason stays `mission_end`.
+   */
+  _armEndBlock(now = Date.now()) {
+    if (!this.gameState.missionActive) return;
+    if (!(this.matchEnd.endBlockMs > 0)) return;
+    this._endBlockAt = now;      // refreshed by every further end-block line
+    this._startEndWatch();
+  }
+
+  /** Proof that the match is still being played — disarm the end block again. */
+  _liveSignal() {
+    if (this._endBlockAt != null) this._endBlockAt = null;
+  }
+
+  /**
+   * One type-6 line. **A single one must never end the match**: mid-game it
+   * means exactly one entity is out (docs/LASERFORCE.md: exit `04` eliminated,
+   * `01` Kick, `17` Ref-Kick). Only the closing summary is accepted, and only
+   * when all three hold:
+   *   - the exit code is `02` ("Ende"), the code the arena uses when the
+   *     MISSION ends, not when an entity dies,
+   *   - at least two entities have reported it,
+   *   - and every player still in the match has reported it — players that
+   *     already left mid-game with another exit code are discounted, they
+   *     will not report a second time.
+   */
+  _noteEntityEnd(entityId, exitCode) {
+    const gs = this.gameState;
+    if (!gs.missionActive || !entityId || !gs.players[entityId]) return;
+    const code = parseInt(exitCode, 10);
+    if (code === EXIT_CODE_END) this._endExits.add(entityId);
+    else { this._earlyExits.add(entityId); return; }
+
+    const known = Object.keys(gs.players).length;
+    const stillIn = known - this._earlyExits.size;
+    if (this._endExits.size < END_BLOCK_MIN_ENTITIES) return;
+    if (this._endExits.size < stillIn) return;
+    this._armEndBlock();
+  }
+
+  /**
+   * End a running match from the outside (shutdown, tests, a future console
+   * button). Returns false when no match was running.
+   */
+  endMatch(reason) {
+    if (!this.gameState.missionActive) return false;
+    this._endMatch(END_REASONS.includes(reason) ? reason : 'shutdown');
+    return true;
+  }
+
+  /**
+   * The single place a match stops. `0101` and all three inferred endings pass
+   * through here, so the state, the event and the `match_end` emit can never
+   * disagree.
+   */
+  _endMatch(reason) {
+    const gs = this.gameState;
+    gs.missionActive = false;
+    gs.ballHolderId = null;
+    gs.endReason = reason;
+    gs.endedAt = Date.now();
+    this.livePassesStream = [];
+    this._stopEndWatch();
+    this._streamLostAt = null;
+    this._endBlockAt = null;
+    if (reason !== 'mission_end') {
+      this.log?.warn('engine', `MISSION ENDE erkannt (${reason}) — kein 0101 von der Anlage`);
+    }
+    // `code` is the code the ARENA sent. Only a real `0101` may carry it — an
+    // inferred end must never leave a `0101` in the event log that never came
+    // over the wire, so it goes out with an empty code instead.
+    this._pushEvent({
+      type: 'match_end',
+      code: reason === 'mission_end' ? '0101' : '',
+      reason,
+      text: END_TEXT[reason] || END_TEXT.mission_end,
+    });
+    this.emit('match_end', { reason, scores: { ...gs.scores } });
+    this._touch();
+  }
+
+  /**
+   * Decide whether the running match is over. Called by the ticker once a
+   * second; tests call it directly with an explicit `now`, which keeps them
+   * deterministic and instant.
+   */
+  checkMatchEnd(now = Date.now()) {
+    const gs = this.gameState;
+    if (!gs.missionActive) { this._stopEndWatch(); return null; }
+    const m = this.matchEnd;
+
+    // The end summary is the strongest signal we have, so it may end the match
+    // long before the watchdog would — but only after the grace period in which
+    // a `0101` would still have won.
+    if (this._endBlockAt != null && m.endBlockMs > 0 && now - this._endBlockAt >= m.endBlockMs) {
+      this._endMatch('watchdog');
+      return 'watchdog';
+    }
+    if (this._streamLostAt != null && m.streamLostMs > 0 && now - this._streamLostAt >= m.streamLostMs) {
+      this._endMatch('stream_lost');
+      return 'stream_lost';
+    }
+    if (m.watchdogMs > 0 && now - this._lastLineAt >= m.watchdogMs) {
+      this._endMatch('watchdog');
+      return 'watchdog';
+    }
+    return null;
   }
 
   /** Snapshot for API consumers. */
@@ -302,6 +556,48 @@ class Engine extends EventEmitter {
       gs.remainingMs = gs.durationKnown
         ? Math.max(0, (gs.duration || 0) - (gs.elapsedTime || 0))
         : null;
+    } catch (_err) {
+      /* derived fields are best effort */
+    }
+    this._syncAccuracy();
+  }
+
+  /**
+   * ADDITIVE. Hit rate per player: `shotsHit / shotsFired`.
+   *
+   * HONESTY, and this matters: the LIVE value is systematically **too HIGH**.
+   * `shotsFired` only rises on an event that proves a shot happened
+   * (`0201 0202 0203 0204 0205 0206`). Every shot that HITS produces such an
+   * event, so it lands in numerator and denominator alike — but a shot that the
+   * arena never reports at all is missing from the denominator only. The
+   * denominator is therefore short while the numerator is complete, and the
+   * quotient comes out too optimistic.
+   *
+   * So the live value is published as an ESTIMATE: `accuracyIsEstimate: true`
+   * plus `accuracySource: 'live'`, and a UI can mark it. Once the official
+   * type-7 end block has replaced `shotsHit`/`shotsFired` with the arena's own
+   * numbers, `statsSource` flips to `tdf7`, the estimate flag drops and the
+   * rate is recomputed from the official figures.
+   *
+   * `shotsFired === 0` yields `null`, not `0`: no shots means no measurable
+   * rate, and a 0 there would read as "never hit anything".
+   *
+   * Runs only on players that carry SM5 counters — the Laserball path has no
+   * shot counter at all and is left completely untouched.
+   */
+  _syncAccuracy() {
+    try {
+      const players = this.gameState.players;
+      for (const id of Object.keys(players)) {
+        const p = players[id];
+        if (!p || typeof p.shotsFired !== 'number') continue;
+        const fired = p.shotsFired;
+        const hit = typeof p.shotsHit === 'number' ? p.shotsHit : 0;
+        p.accuracy = fired > 0 ? Math.round((hit / fired) * 10000) / 10000 : null;
+        const official = p.statsSource === 'tdf7';
+        p.accuracyIsEstimate = !official;
+        p.accuracySource = official ? 'tdf7' : 'live';
+      }
     } catch (_err) {
       /* derived fields are best effort */
     }
@@ -451,13 +747,16 @@ class Engine extends EventEmitter {
    * Store a mode descriptor and emit `mode_change` when it actually changed.
    * @param {{number:number|null,key:string,label:string,family:string,known:boolean,source:string}} next
    */
-  _applyMode(next) {
+  _applyMode(rawNext) {
     try {
-      if (!next || typeof next !== 'object') return;
+      if (!rawNext || typeof rawNext !== 'object') return;
+      // Single choke-point: every mode that reaches gameState carries `profile`.
+      const next = withProfile(rawNext);
       const prev = this.gameState.mode || null;
       const same = prev
         && prev.number === next.number && prev.key === next.key
         && prev.label === next.label && prev.family === next.family
+        && prev.profile === next.profile
         && prev.known === next.known && prev.source === next.source;
       this.gameState.mode = next;
       if (same) return;
@@ -489,7 +788,11 @@ class Engine extends EventEmitter {
       if (fam === 'all' || fam === cur.family) return;
       if (fam === FAMILIES.SM5 && cur.number === 28) return; // never demote a declared Laserball match
       this._familyInferred = true;
-      this._applyMode({ ...cur, family: fam, source: 'inferred' });
+      // The display profile follows the corrected family: a profile pinned in
+      // the registry belongs to the family that just turned out to be wrong.
+      this._applyMode({
+        ...cur, family: fam, profile: FAMILY_DEFAULT_PROFILE[fam], source: 'inferred',
+      });
     } catch (_err) {
       /* inference is best effort */
     }
@@ -513,7 +816,7 @@ class Engine extends EventEmitter {
       const desc = this._missionDesc(cols, aligned);
       gs.missionDesc = desc || null;
       this._familyInferred = false;
-      this._applyMode(resolveMode(rawType, desc));
+      this._applyMode(resolveModeWithProfile(rawType, desc));
 
       // duration: schema first, positional heuristic only as a fallback
       let ms = durationMs(this.tdfSchema.get('1', 'duration', cols, undefined, aligned));
@@ -645,6 +948,15 @@ class Engine extends EventEmitter {
         const v = official[from];
         if (typeof v === 'number') p[to] = v;
       }
+      // ADDITIVE. The official fields that have NO live counterpart — remaining
+      // lives, remaining ammo, the medic/boost/nuke-cancel block — are lifted
+      // out of `official` onto the player object so scoreboard and CSV can show
+      // them without digging into a raw sub-object. A field the arena did not
+      // send stays `null`, never 0: it is a missing measurement, not a zero.
+      for (const f of SM5_OFFICIAL_FIELDS) {
+        const v = official[f];
+        p[f] = typeof v === 'number' ? v : null;
+      }
       p.statsSource = 'tdf7';
 
       this._pushEvent({
@@ -740,6 +1052,10 @@ class Engine extends EventEmitter {
     const cleanId = Engine.cleanId;
 
     if (!line) return;
+    // ADDITIVE: the watchdog counts ANY line, parsable or not, and this is the
+    // first statement of the function so even a line that throws below has
+    // already proven that the arena is still talking to us.
+    this.noteActivity();
     // ADDITIVE: `;` lines are the schema comments naming the columns of the
     // following rows of their type. They were dropped before and still change
     // nothing when unusable — the parser keeps its hard-coded positions then.
@@ -787,6 +1103,8 @@ class Engine extends EventEmitter {
     //    `score` event below is unchanged, `_applyScoreLine()` additionally
     //    writes gameState.scores / players[id].score and flips `scoreSource`.
     if (type === '5') {
+      // A score line is live play, not an end summary (the end block is 6/7).
+      this._liveSignal();
       this._applyScoreLine(cols, tabCols);
       // 5  time  entity  old  delta  new
       const toN = (v) => { const n = parseInt(v, 10); return Number.isNaN(n) ? null : n; };
@@ -806,6 +1124,9 @@ class Engine extends EventEmitter {
       const entityId = cleanId(cols[2]) || cols[2] || null;
       const exitCode = cols[3] != null ? cols[3] : null;
       const score = cols[4] != null ? cols[4] : null;
+      // ADDITIVE: may arm the end-of-match deadline — never on its own, see
+      // _noteEntityEnd(). The event below is unchanged.
+      try { this._noteEntityEnd(entityId, exitCode); } catch (_err) { /* never disturb the parser */ }
       this._pushEvent({
         type: 'match_summary', code: '6', category: 'match',
         entityId, exitCode, score, cols: cols.slice(1),
@@ -816,11 +1137,18 @@ class Engine extends EventEmitter {
     // ── ADDITIVE. Type-7: the official SM5 end block (contract C4). It carries
     //    no `time` column, so elapsedTime is deliberately untouched.
     if (type === '7') {
+      // ADDITIVE: type-7 rows exist ONLY in the closing summary of an SM5
+      // mission (docs/LASERFORCE.md) — one of them is already enough to arm the
+      // deadline. Laserball has no type 7; there the type-6 rule above applies.
+      try { this._armEndBlock(); } catch (_err) { /* never disturb the parser */ }
       this._handleSm5StatsLine(cols, tabCols);
       return;
     }
 
     if (type === '4' && cols[2] === '0100') {
+      // ADDITIVE: a start while the previous match is still running IS the end
+      // of that previous one — finalize it before its state is cleared below.
+      if (gameState.missionActive) this._endMatch('next_match');
       this.log?.info('engine', `MISSION START (0100) | teams loaded: ${Object.keys(gameState.teams).length}`);
       gameState.missionActive = true;
       gameState.matchId = Date.now().toString(36);
@@ -840,6 +1168,11 @@ class Engine extends EventEmitter {
       // 0100 and must survive it (contract C1).
       gameState.scoreSource = 'internal';
       this._familyInferred = false;
+      // ADDITIVE: a running match has no end — and the end detection starts over.
+      gameState.endReason = null;
+      gameState.endedAt = null;
+      this._resetEndDetection();
+      this._startEndWatch();
 
       this._pushEvent({ type: 'match_start', text: 'Match started' });
       this.emit('match_start', {});
@@ -848,12 +1181,13 @@ class Engine extends EventEmitter {
     }
 
     if (type === '4' && cols[2] === '0101') {
-      gameState.missionActive = false;
-      gameState.ballHolderId = null;
-      this.livePassesStream = [];
-      this._pushEvent({ type: 'match_end', text: 'Match ended' });
-      this.emit('match_end', { scores: { ...gameState.scores } });
-      this._touch();
+      // The arena said so itself — this always wins over anything inferred.
+      // A `0101` for a match this engine has ALREADY ended (watchdog, stream
+      // loss) is swallowed: it would otherwise write the same match a second
+      // time. A `0101` on a stream we joined mid-match (no `0100`, no end yet)
+      // still reports, exactly as before.
+      if (gameState.missionActive || gameState.endReason == null) this._endMatch('mission_end');
+      else this.log?.info('engine', `0101 nach bereits erkanntem Ende (${gameState.endReason}) — ignoriert`);
       return;
     }
 
@@ -931,6 +1265,11 @@ class Engine extends EventEmitter {
             p.statsSource = 'live';
             if (gameState.mode && gameState.mode.family === FAMILIES.SM5) {
               Object.assign(p, newPlayerStats(FAMILIES.SM5));
+              // Official end-block values do not exist yet -> null, not 0.
+              Object.assign(p, newOfficialStats());
+              p.accuracy = null;
+              p.accuracyIsEstimate = true;
+              p.accuracySource = 'live';
             }
           } catch (_err) {
             // the player is already created above; extra metadata is optional
@@ -945,6 +1284,9 @@ class Engine extends EventEmitter {
     }
 
     if (type === '4') {
+      // ADDITIVE: a game event after the 6/7 block proves the match is still
+      // being played — whatever the summary looked like, disarm the deadline.
+      this._liveSignal();
       const code = cols[2];
       const actorId = cleanId(cols[3]);
       const eventTime = parseInt(cols[1]) || 0;
@@ -1065,4 +1407,4 @@ class Engine extends EventEmitter {
   }
 }
 
-module.exports = { Engine };
+module.exports = { Engine, matchEndMs, MATCH_END_DEFAULTS, END_REASONS };

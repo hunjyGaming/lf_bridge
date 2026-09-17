@@ -57,6 +57,14 @@ function defaults() {
 
     match: { defaultDurationMs: 720000 },
 
+    // Wann gilt ein Match als beendet, wenn die Anlage kein `0101` schickt?
+    // (docs/LASERFORCE.md). Jeder Wert in Sekunden, 0 = dieser Weg ist aus.
+    matchEnd: {
+      watchdogSeconds: 120,     // keine Zeile mehr von der Anlage -> beendet
+      streamLostSeconds: 30,    // TCP-Verbindung weg und kommt nicht zurück -> beendet
+      endBlockSeconds: 10,      // Endabrechnung (6/7) gesehen und kein `0101` danach -> beendet
+    },
+
     // Match engine
     engine: {
       emitUnknownEvents: true,     // emit a generic lf_event for every type-4 code the parser does not act on
@@ -78,6 +86,17 @@ function defaults() {
       bom: true,
       writeEvents: true,
       writeLive: false,
+    },
+
+    // Raw TDF capture — a diagnosis tool for a test phase (docs/CAPTURE.md).
+    // OFF by default: a recording contains player names and Laserforce member
+    // ids, and an unattended hall PC must never be filled up by it.
+    capture: {
+      enabled: false,
+      dir: 'data/capture',
+      maxFileMB: 20,              // per mission; then that recording stops
+      maxFiles: 50,               // oldest are deleted
+      maxTotalMB: 500,            // whole folder; oldest are deleted
     },
 
     // Optional self-maintained name list (CSV: id,name,team)
@@ -138,6 +157,10 @@ function applyEnv(cfg, pins) {
 
   if (Ei('LF_MATCH_DURATION_MS') !== undefined) { cfg.match.defaultDurationMs = Ei('LF_MATCH_DURATION_MS'); P('match.defaultDurationMs', 1); }
 
+  if (Ei('LF_MATCH_END_WATCHDOG_SECONDS') !== undefined) { cfg.matchEnd.watchdogSeconds = Ei('LF_MATCH_END_WATCHDOG_SECONDS'); P('matchEnd.watchdogSeconds', 1); }
+  if (Ei('LF_MATCH_END_STREAM_LOST_SECONDS') !== undefined) { cfg.matchEnd.streamLostSeconds = Ei('LF_MATCH_END_STREAM_LOST_SECONDS'); P('matchEnd.streamLostSeconds', 1); }
+  if (Ei('LF_MATCH_END_BLOCK_SECONDS') !== undefined) { cfg.matchEnd.endBlockSeconds = Ei('LF_MATCH_END_BLOCK_SECONDS'); P('matchEnd.endBlockSeconds', 1); }
+
   if (Eb('LF_EMIT_UNKNOWN_EVENTS') !== undefined) { cfg.engine.emitUnknownEvents = Eb('LF_EMIT_UNKNOWN_EVENTS'); P('engine.emitUnknownEvents', 1); }
 
   if (Eb('LF_EVENTLOG_ENABLED') !== undefined) { cfg.eventLog.enabled = Eb('LF_EVENTLOG_ENABLED'); P('eventLog.enabled', 1); }
@@ -150,6 +173,12 @@ function applyEnv(cfg, pins) {
   if (Eb('LF_CSV_BOM') !== undefined) { cfg.csv.bom = Eb('LF_CSV_BOM'); P('csv.bom', 1); }
   if (Eb('LF_CSV_EVENTS') !== undefined) { cfg.csv.writeEvents = Eb('LF_CSV_EVENTS'); P('csv.writeEvents', 1); }
   if (Eb('LF_CSV_LIVE') !== undefined) { cfg.csv.writeLive = Eb('LF_CSV_LIVE'); P('csv.writeLive', 1); }
+
+  if (Eb('LF_CAPTURE_ENABLED') !== undefined) { cfg.capture.enabled = Eb('LF_CAPTURE_ENABLED'); P('capture.enabled', 1); }
+  if (E('LF_CAPTURE_DIR')) { cfg.capture.dir = E('LF_CAPTURE_DIR'); P('capture.dir', 1); }
+  if (Ei('LF_CAPTURE_MAX_FILE_MB') !== undefined) { cfg.capture.maxFileMB = Ei('LF_CAPTURE_MAX_FILE_MB'); P('capture.maxFileMB', 1); }
+  if (Ei('LF_CAPTURE_MAX_FILES') !== undefined) { cfg.capture.maxFiles = Ei('LF_CAPTURE_MAX_FILES'); P('capture.maxFiles', 1); }
+  if (Ei('LF_CAPTURE_MAX_TOTAL_MB') !== undefined) { cfg.capture.maxTotalMB = Ei('LF_CAPTURE_MAX_TOTAL_MB'); P('capture.maxTotalMB', 1); }
 
   if (Eb('LF_LOCAL_ROSTER_ENABLED') !== undefined) { cfg.localRoster.enabled = Eb('LF_LOCAL_ROSTER_ENABLED'); P('localRoster.enabled', 1); }
   if (E('LF_LOCAL_ROSTER_FILE')) { cfg.localRoster.file = E('LF_LOCAL_ROSTER_FILE'); cfg.localRoster.enabled = true; P('localRoster.file', 1); P('localRoster.enabled', 1); }
@@ -270,6 +299,12 @@ function normalize(raw) {
 
   c.match.defaultDurationMs = clampInt(raw.match?.defaultDurationMs, d.match.defaultDurationMs, 1000, 86400000);
 
+  // 0 = abgeschaltet. Untergrenze sonst bewusst großzügig: ein fälschlich
+  // beendetes Match ist schlimmer als ein zu spät beendetes.
+  c.matchEnd.watchdogSeconds = clampInt(raw.matchEnd?.watchdogSeconds, d.matchEnd.watchdogSeconds, 0, 86400);
+  c.matchEnd.streamLostSeconds = clampInt(raw.matchEnd?.streamLostSeconds, d.matchEnd.streamLostSeconds, 0, 86400);
+  c.matchEnd.endBlockSeconds = clampInt(raw.matchEnd?.endBlockSeconds, d.matchEnd.endBlockSeconds, 0, 86400);
+
   c.engine.emitUnknownEvents = bool(raw.engine?.emitUnknownEvents, d.engine.emitUnknownEvents);
 
   c.eventLog.enabled = bool(raw.eventLog?.enabled, d.eventLog.enabled);
@@ -283,6 +318,12 @@ function normalize(raw) {
   c.csv.bom = bool(raw.csv?.bom, d.csv.bom);
   c.csv.writeEvents = bool(raw.csv?.writeEvents, d.csv.writeEvents);
   c.csv.writeLive = bool(raw.csv?.writeLive, d.csv.writeLive);
+
+  c.capture.enabled = bool(raw.capture?.enabled, d.capture.enabled);
+  c.capture.dir = str(raw.capture?.dir, d.capture.dir).trim() || d.capture.dir;
+  c.capture.maxFileMB = clampInt(raw.capture?.maxFileMB, d.capture.maxFileMB, 1, 2000);
+  c.capture.maxFiles = clampInt(raw.capture?.maxFiles, d.capture.maxFiles, 1, 1000);
+  c.capture.maxTotalMB = clampInt(raw.capture?.maxTotalMB, d.capture.maxTotalMB, 1, 100000);
 
   c.localRoster.enabled = bool(raw.localRoster?.enabled, d.localRoster.enabled);
   c.localRoster.file = str(raw.localRoster?.file, d.localRoster.file).trim() || d.localRoster.file;

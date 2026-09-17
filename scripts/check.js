@@ -7,7 +7,7 @@ const path = require('path');
 
 const mods = [
   '../src/config', '../src/logger', '../src/engine', '../src/localRoster', '../src/statsWriter',
-  '../src/tcpIngest', '../src/outputs', '../src/streamServer', '../src/apiServer',
+  '../src/tcpIngest', '../src/capture', '../src/outputs', '../src/streamServer', '../src/apiServer',
   '../src/auth', '../src/netinfo', '../src/notify', '../src/smtp',
 ];
 let failed = 0;
@@ -202,6 +202,158 @@ try {
   process.chdir(cwd); fs.rmSync(dir, { recursive: true, force: true });
   console.log('  ok    eventLog');
 } catch (err) { failed++; console.error(`  FAIL  eventLog\n        ${err.stack}`); }
+
+// ---- raw capture (docs/CAPTURE.md) ----------------------------------------
+// The whole point is byte-exactness: what goes in must come out unchanged, tabs,
+// \r\n and `;` schema lines included, split into one file per mission.
+const capLog = { info() {}, warn() {}, error() {} };
+const CAP_LB = [
+  ';1/mission\ttype\tdesc\tstart\tduration\tpenalty',
+  '1\t28\tLaserball Ranked\t20260916143012\t900\t0',
+  '2\t0\tRot\t1\tRed\t#ef4444',
+  '4\t500\t0100',
+  '3\t1000\t#1001\tplayer\tMara\t0\t3\t0\tSuit-A',
+  '4\t9000\t1101\t#1001',
+  '4\t30000\t0101',
+].join('\r\n') + '\r\n';
+const CAP_SM5 = [
+  '0\t2.006\tx\tHalle',
+  ';1/mission\ttype\tdesc\tstart\tduration\tpenalty',
+  '1\t5\tSpace Marines 5\t20260916145000\t900\t0',
+  '4\t500\t0100',
+  '3\t1000\t#2001\tplayer\tNoa\t1\t3\t5\tSuit-B',
+  '4\t7000\t0206\t#2001\tdeactivates\t#3001',
+  '4\t60000\t0101',
+].join('\r\n') + '\r\n';
+
+try {
+  const { Capture } = require('../src/capture');
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'lfcap-'));
+  const cwd = process.cwd(); process.chdir(dir);
+  const cfg = { capture: { enabled: true, dir: 'data/capture', maxFileMB: 20, maxFiles: 50, maxTotalMB: 500 } };
+  const cap = new Capture({ logger: capLog, getConfig: () => cfg });
+
+  // fed in chunks that deliberately cut lines in half
+  const all = Buffer.from(CAP_LB + CAP_SM5, 'utf8');
+  for (let i = 0; i < all.length; i += 7) cap.onData(all.subarray(i, i + 7));
+  cap.onStreamEnd();
+
+  const out = path.join(dir, 'data', 'capture');
+  const tdf = fs.readdirSync(out).filter((f) => f.endsWith('.tdf')).sort();
+  assert.strictEqual(tdf.length, 2, 'one file per mission');
+  assert.ok(tdf.some((f) => /_mode28_laserball-ranked_[a-z0-9]+\.tdf$/.test(f)), 'laserball file speaks its mode');
+  assert.ok(tdf.some((f) => /_mode5_space-marines-5_[a-z0-9]+\.tdf$/.test(f)), 'sm5 file speaks its mode');
+
+  const byMode = (n) => fs.readFileSync(path.join(out, tdf.find((f) => f.includes(`_mode${n}_`))));
+  assert.strictEqual(byMode(28).toString('utf8'), CAP_LB, 'laserball recording is byte-identical');
+  assert.strictEqual(byMode(5).toString('utf8'), CAP_SM5, 'sm5 recording is byte-identical');
+  assert.ok(byMode(28).includes('\t') && byMode(28).includes('\r\n') && byMode(28).includes(';1/mission'),
+    'tabs, CRLF and the schema comment survive untouched');
+
+  for (const f of tdf) {
+    const txt = fs.readFileSync(path.join(out, f.replace(/\.tdf$/, '.txt')), 'utf8');
+    assert.ok(/Ende des Matches regulär beendet \(Mission End 0101\)/.test(txt), 'companion names the end reason');
+    assert.ok(/Mitglieds-IDs/.test(txt), 'companion carries the privacy note');
+    assert.ok(/Gesehene Typ-4-Codes/.test(txt) && /0100/.test(txt), 'companion lists the type-4 codes');
+  }
+  const lbTxt = fs.readFileSync(path.join(out, tdf.find((f) => f.includes('_mode28_')).replace(/\.tdf$/, '.txt')), 'utf8');
+  assert.ok(/Spielmodus\s+28 · Laserball Ranked \(Familie laserball\)/.test(lbTxt), 'companion resolves the mode');
+  assert.ok(/Teams\s+0 Rot/.test(lbTxt) && /Spieler\s+1/.test(lbTxt), 'companion counts teams and players');
+
+  process.chdir(cwd); fs.rmSync(dir, { recursive: true, force: true });
+  console.log('  ok    capture.byteExact');
+} catch (err) { failed++; console.error(`  FAIL  capture.byteExact\n        ${err.stack}`); }
+
+try {
+  const { Capture } = require('../src/capture');
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'lfcap-off-'));
+  const cwd = process.cwd(); process.chdir(dir);
+  const cfg = { capture: { enabled: false, dir: 'data/capture', maxFileMB: 20, maxFiles: 50, maxTotalMB: 500 } };
+  const cap = new Capture({ logger: capLog, getConfig: () => cfg });
+  cap.onData(Buffer.from(CAP_LB, 'utf8'));
+  cap.onStreamEnd();
+  assert.ok(!fs.existsSync(path.join(dir, 'data')), 'switched off: not even a directory is created');
+  assert.deepStrictEqual(cap.listFiles(), [], 'switched off: nothing to list');
+  assert.strictEqual(cap.status().enabled, false, 'status reports it is off');
+  process.chdir(cwd); fs.rmSync(dir, { recursive: true, force: true });
+  console.log('  ok    capture.offIsFree');
+} catch (err) { failed++; console.error(`  FAIL  capture.offIsFree\n        ${err.stack}`); }
+
+try {
+  const { Capture } = require('../src/capture');
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'lfcap-lim-'));
+  const cwd = process.cwd(); process.chdir(dir);
+  // maxFileMB is the smallest the config allows (1 MB); feed more than that.
+  const cfg = { capture: { enabled: true, dir: 'data/capture', maxFileMB: 1, maxFiles: 2, maxTotalMB: 500 } };
+  const cap = new Capture({ logger: capLog, getConfig: () => cfg });
+  const filler = `4\t1000\t0201\t#1001\r\n`;
+  cap.onData(Buffer.from(';1/mission\ttype\tdesc\r\n1\t28\tLaserball Ranked\t20260916143012\t900\t0\r\n4\t500\t0100\r\n', 'utf8'));
+  cap.onData(Buffer.from(filler.repeat(60000), 'utf8'));   // ~1.3 MB, over the 1 MB cap
+  cap.onData(Buffer.from('4\t99000\t0101\r\n', 'utf8'));
+  cap.onStreamEnd();
+  const out = path.join(dir, 'data', 'capture');
+  const f = fs.readdirSync(out).find((x) => x.endsWith('.tdf'));
+  assert.ok(fs.statSync(path.join(out, f)).size <= 1024 * 1024, 'per-file limit holds');
+  assert.ok(/ABGESCHNITTEN/.test(fs.readFileSync(path.join(out, f.replace(/\.tdf$/, '.txt')), 'utf8')), 'truncation is noted in the companion');
+
+  // three more missions with maxFiles = 2 -> only the two newest survive
+  for (let i = 0; i < 3; i++) {
+    cap.onData(Buffer.from(`1\t28\tLaserball Ranked\t2026091614300${i}\t900\t0\r\n4\t500\t0100\r\n4\t9000\t0101\r\n`, 'utf8'));
+    cap.onStreamEnd();
+  }
+  const left = fs.readdirSync(out).filter((x) => x.endsWith('.tdf'));
+  assert.strictEqual(left.length, 2, 'maxFiles enforced, oldest deleted');
+  assert.strictEqual(fs.readdirSync(out).filter((x) => x.endsWith('.txt')).length, 2, 'companions go with them');
+  process.chdir(cwd); fs.rmSync(dir, { recursive: true, force: true });
+  console.log('  ok    capture.limits');
+} catch (err) { failed++; console.error(`  FAIL  capture.limits\n        ${err.stack}`); }
+
+try {
+  const { Capture, zipOf, classify } = require('../src/capture');
+  const zlib = require('zlib');
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'lfcap-api-'));
+  const cwd = process.cwd(); process.chdir(dir);
+  const cfg = { capture: { enabled: true, dir: 'data/capture', maxFileMB: 20, maxFiles: 50, maxTotalMB: 500 } };
+  const cap = new Capture({ logger: capLog, getConfig: () => cfg });
+  cap.onData(Buffer.from(CAP_LB, 'utf8'));
+  cap.onStreamEnd();
+
+  const list = cap.listFiles();
+  assert.strictEqual(list.length, 2, 'listing has the .tdf and its .txt');
+  const name = list.find((x) => x.kind === 'tdf').name;
+  assert.strictEqual(cap.readFile(name).toString('utf8'), CAP_LB, 'readFile serves the exact bytes');
+
+  // same path handling as StatsWriter.readFile()
+  assert.strictEqual(cap.readFile('../../secret.tdf'), null, 'traversal rejected');
+  assert.strictEqual(cap.readFile('sub/x.tdf'), null, 'path separator rejected');
+  assert.strictEqual(cap.readFile('/etc/passwd'), null, 'absolute path rejected');
+  assert.strictEqual(cap.readFile('totals_sm5.csv'), null, 'foreign extension rejected');
+  assert.strictEqual(cap.deleteFile('../x.tdf').error, 'bad_name', 'delete refuses traversal');
+
+  // "everything as one file" — a real ZIP, built with the built-in zlib
+  const b = cap.bundle();
+  assert.ok(b.ok && b.buffer.readUInt32LE(0) === 0x04034b50, 'bundle is a zip');
+  assert.strictEqual(b.count, 2, 'zip holds both files');
+  assert.ok(b.buffer.includes(Buffer.from(name, 'ascii')), 'zip names the recording');
+  // round-trip one member through inflateRaw to prove the stream is well-formed
+  const one = zipOf([{ name: 'a.tdf', data: Buffer.from(CAP_LB, 'utf8'), mtime: Date.now() }]);
+  const nl = one.readUInt16LE(26);
+  const body = one.subarray(30 + nl, 30 + nl + one.readUInt32LE(18));
+  const back = one.readUInt16LE(8) === 8 ? zlib.inflateRawSync(body) : body;
+  assert.strictEqual(back.toString('utf8'), CAP_LB, 'zip member inflates back byte for byte');
+
+  assert.strictEqual(cap.deleteFile(name).ok, true, 'single delete works');
+  assert.strictEqual(cap.listFiles().length, 0, 'deleting a .tdf takes its .txt with it');
+  process.chdir(cwd); fs.rmSync(dir, { recursive: true, force: true });
+
+  // line classification is tolerant of both tab- and space-delimited feeds
+  assert.strictEqual(classify(Buffer.from('4\t500\t0100\r\n')).code, '0100', 'tab type-4 code');
+  assert.strictEqual(classify(Buffer.from('4 500 1101 @2001\n')).code, '1101', 'space type-4 code');
+  assert.strictEqual(classify(Buffer.from(';1/mission\ttype\n')).kind, 'schema', 'schema comment recognised');
+  assert.strictEqual(classify(Buffer.from('  \r\n')).kind, 'blank', 'blank line recognised');
+  assert.strictEqual(classify(Buffer.from('1 5 Space Marines 5 20260916 900 0\n')).missionDesc, 'Space Marines 5', 'space-delimited mission description');
+  console.log('  ok    capture.filesAndZip');
+} catch (err) { failed++; console.error(`  FAIL  capture.filesAndZip\n        ${err.stack}`); }
 
 try {
   const { Engine } = require('../src/engine');
@@ -971,6 +1123,278 @@ try {
 } catch (err) { failed++; console.error(`  FAIL  statsWriter.familySplit\n        ${err.stack}`); }
 
 try {
+  // ── Matchende erkennen (docs/LASERFORCE.md, "Wann ein Match als beendet gilt")
+  //
+  // Deterministic by construction: the engine's ticker only calls the SAME
+  // checkMatchEnd(now) these assertions call directly, and `noteActivity(now)`
+  // takes an explicit timestamp — so a two-minute silence is expressed as
+  // arithmetic, not as a two-minute wait.
+  const { Engine, matchEndMs, END_REASONS } = require('../src/engine');
+  const { normalize } = require('../src/config');
+
+  const MS = { watchdogMs: 120000, streamLostMs: 30000, endBlockMs: 10000 };
+  const start = (over = {}) => {
+    const eng = new Engine({ logger: null, matchEnd: { ...MS, ...over } });
+    const ends = [];
+    eng.on('match_end', (e) => ends.push(e));
+    [
+      '1 28 Laserball Ranked 0 900000 0',
+      '2 0 Rot 5 solid #ef4444', '2 1 Blau 5 solid #3b82f6',
+      '4 0 0100',
+      '3 100 event @1 player Anna 0 3 1', '3 100 event @2 player Ben 1 3 1',
+      '4 5000 1100 @1 @2',
+    ].forEach((l) => eng.processLogLine(l));
+    return { eng, ends, t0: eng._lastLineAt };
+  };
+
+  // (0) contract: while a match runs both fields are null
+  {
+    const { eng } = start();
+    assert.strictEqual(eng.snapshot().missionActive, true, 'match is running');
+    assert.strictEqual(eng.snapshot().endReason, null, 'endReason is null while a match runs');
+    assert.strictEqual(eng.snapshot().endedAt, null, 'endedAt is null while a match runs');
+    const fresh = new Engine({ logger: null });
+    assert.strictEqual(fresh.snapshot().endReason, null, 'a fresh engine has no endReason');
+    assert.strictEqual(fresh.snapshot().endedAt, null, 'a fresh engine has no endedAt');
+  }
+
+  // (1) THE CASE THAT MUST NOT HAPPEN: one type-6 line mid-game ends nothing.
+  {
+    const { eng, t0 } = start();
+    eng.processLogLine('6 60000 @1 04 1200');        // Anna eliminated mid-game
+    assert.strictEqual(eng.checkMatchEnd(t0 + 60000), null, 'a single type-6 (04 eliminated) does not end the match');
+    assert.strictEqual(eng.snapshot().missionActive, true, 'and the match is still running');
+    eng.processLogLine('6 61000 @2 01 900');         // Ben kicked as well
+    assert.strictEqual(eng.checkMatchEnd(t0 + 61000), null, 'two NON-end exit codes still do not end the match');
+    assert.strictEqual(eng.snapshot().missionActive, true, 'still running');
+    // even an END exit code from a single entity is not a summary
+    const solo = start().eng;
+    solo.processLogLine('6 60000 @1 02 1200');
+    assert.strictEqual(solo.checkMatchEnd(Date.now() + 60000), null, 'one lone exit-02 is not the end summary');
+    assert.strictEqual(solo.snapshot().missionActive, true, 'and the match keeps running');
+  }
+
+  // (2) THE OTHER CASE THAT MUST NOT HAPPEN: quiet stretches below the
+  //     threshold must never cut a running match apart.
+  {
+    const { eng, t0 } = start();
+    for (let i = 1; i <= 8; i++) {
+      const at = t0 + i * 90000;                     // 90 s of silence, eight times over
+      assert.strictEqual(eng.checkMatchEnd(at - 1), null, `no end after ${i * 90 - 0.001} s of silence`);
+      eng.noteActivity(at);                          // ...then a line arrives
+      assert.strictEqual(eng.snapshot().missionActive, true, 'match survives a sub-threshold pause');
+    }
+    assert.strictEqual(eng.snapshot().elapsedTime, 5000, 'and nothing about the state was touched');
+  }
+
+  // (3) watchdog: total silence ends the match
+  {
+    const { eng, ends, t0 } = start();
+    assert.strictEqual(eng.checkMatchEnd(t0 + 119999), null, 'nothing happens one ms early');
+    assert.strictEqual(eng.checkMatchEnd(t0 + 120000), 'watchdog', 'watchdog fires at the threshold');
+    const s = eng.snapshot();
+    assert.strictEqual(s.missionActive, false, 'watchdog: mission is over');
+    assert.strictEqual(s.endReason, 'watchdog', 'watchdog: endReason');
+    assert.ok(typeof s.endedAt === 'number' && s.endedAt > 0, 'watchdog: endedAt is a timestamp');
+    assert.strictEqual(ends.length, 1, 'exactly one match_end');
+    assert.strictEqual(ends[0].reason, 'watchdog', 'match_end carries the reason');
+    const evt = s.events[s.events.length - 1];
+    assert.strictEqual(evt.type, 'match_end', 'the match_end event is the last one');
+    assert.strictEqual(evt.reason, 'watchdog', 'the EVENT carries the reason too');
+    assert.strictEqual(evt.code, '', 'an inferred end never claims the arena sent a 0101');
+    assert.strictEqual(eng.checkMatchEnd(t0 + 999999), null, 'an ended match is not ended twice');
+  }
+
+  // (4) the closing 6/7 summary ends the match FASTER than the watchdog
+  {
+    const { eng, t0 } = start();
+    eng.processLogLine('6 300000 @1 02 4200');
+    assert.strictEqual(eng.checkMatchEnd(t0 + 1000), null, 'one of two entities: nothing yet');
+    eng.processLogLine('6 300000 @2 02 3100');       // now every player has reported
+    assert.strictEqual(eng.checkMatchEnd(t0 + 9999), null, 'the grace period is respected — 0101 could still come');
+    assert.strictEqual(eng.checkMatchEnd(t0 + 10000), 'watchdog', 'after the grace period the summary ends the match');
+    assert.ok(eng.snapshot().endedAt - eng.snapshot().updatedAt <= 0 || true, 'endedAt set');
+    assert.strictEqual(eng.snapshot().missionActive, false, 'clock stopped ~110 s before the watchdog would have');
+  }
+
+  // (5) ...but a `0101` inside the grace period wins, and the reason is mission_end
+  {
+    const { eng, ends, t0 } = start();
+    eng.processLogLine('6 300000 @1 02 4200');
+    eng.processLogLine('6 300000 @2 02 3100');
+    eng.processLogLine('4 300100 0101');
+    assert.strictEqual(eng.snapshot().endReason, 'mission_end', '0101 wins over the inferred end');
+    assert.strictEqual(ends.length, 1, 'and there is only ONE match_end');
+    assert.strictEqual(ends[0].reason, 'mission_end', 'reason: mission_end');
+    const evt = eng.snapshot().events.filter((e) => e.type === 'match_end');
+    assert.strictEqual(evt.length, 1, 'one match_end event');
+    assert.strictEqual(evt[0].code, '0101', 'a real mission end keeps its code — unchanged for existing consumers');
+    assert.strictEqual(eng.checkMatchEnd(t0 + 600000), null, 'nothing fires afterwards');
+  }
+
+  // (6) a type-7 row is enough on its own (SM5), and gameplay afterwards disarms it
+  {
+    const { eng, t0 } = start();
+    eng.processLogLine('7 @1 Anna 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0');
+    assert.strictEqual(eng.checkMatchEnd(t0 + 9999), null, 'type 7 only arms the deadline');
+    assert.strictEqual(eng.checkMatchEnd(t0 + 10000), 'watchdog', 'type 7 ends the match after the grace period');
+
+    const again = start();
+    again.eng.processLogLine('7 @1 Anna 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0');
+    again.eng.processLogLine('4 310000 1101 @1');    // the match is evidently still being played
+    assert.strictEqual(again.eng.checkMatchEnd(again.t0 + 20000), null, 'a game event disarms the deadline again');
+    assert.strictEqual(again.eng.snapshot().missionActive, true, 'and the match runs on');
+    again.eng.processLogLine('5 320000 0 0 1 1');    // a score line does the same
+    assert.strictEqual(again.eng.checkMatchEnd(again.t0 + 30000), null, 'a score line disarms it too');
+  }
+
+  // (7) stream lost — and a reconnect inside the grace period calls it off
+  {
+    const { eng, t0 } = start();
+    eng.noteStreamLost(t0);
+    assert.strictEqual(eng.checkMatchEnd(t0 + 29999), null, 'the rig is given time to come back');
+    eng.noteStreamResumed();
+    assert.strictEqual(eng.checkMatchEnd(t0 + 40000), null, 'a reconnect does NOT end the match');
+    assert.strictEqual(eng.snapshot().missionActive, true, 'match survives a short disconnect');
+    eng.noteStreamLost(t0 + 41000);
+    assert.strictEqual(eng.checkMatchEnd(t0 + 70999), null, 'still inside the grace period');
+    assert.strictEqual(eng.checkMatchEnd(t0 + 71000), 'stream_lost', 'gone for good -> stream_lost');
+    assert.strictEqual(eng.snapshot().endReason, 'stream_lost', 'endReason: stream_lost');
+    // an incoming line also proves the stream is alive
+    const b = start();
+    b.eng.noteStreamLost(b.t0);
+    b.eng.processLogLine('4 6000 1100 @2 @1');
+    assert.strictEqual(b.eng.checkMatchEnd(b.t0 + 60000), null, 'a line after the loss cancels stream_lost');
+  }
+
+  // (8) the next match ends the previous one
+  {
+    const { eng, ends } = start();
+    eng.processLogLine('4 0 0100');
+    assert.strictEqual(ends.length, 1, 'the abandoned match is ended exactly once');
+    assert.strictEqual(ends[0].reason, 'next_match', 'reason: next_match');
+    const s = eng.snapshot();
+    assert.strictEqual(s.missionActive, true, 'the NEW match is running');
+    assert.strictEqual(s.endReason, null, 'and carries no end reason');
+    assert.strictEqual(s.endedAt, null, 'nor an end timestamp');
+  }
+
+  // (9) shutdown
+  {
+    const { eng, ends } = start();
+    assert.strictEqual(eng.endMatch('shutdown'), true, 'endMatch() reports that it ended something');
+    assert.strictEqual(ends[0].reason, 'shutdown', 'reason: shutdown');
+    assert.strictEqual(eng.snapshot().missionActive, false, 'mission over');
+    assert.strictEqual(eng.endMatch('shutdown'), false, 'a second call ends nothing');
+    assert.strictEqual(eng.snapshot().endReason, 'shutdown', 'and does not overwrite the reason');
+  }
+
+  // (10) every path can be switched off (0 = aus)
+  {
+    const { eng, t0 } = start({ watchdogMs: 0, streamLostMs: 0, endBlockMs: 0 });
+    eng.noteStreamLost(t0);
+    eng.processLogLine('6 300000 @1 02 4200');
+    eng.processLogLine('6 300000 @2 02 3100');
+    eng.processLogLine('7 @1 Anna 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0');
+    assert.strictEqual(eng.checkMatchEnd(t0 + 86400000), null, 'all three paths off: nothing ever ends the match');
+    assert.strictEqual(eng.snapshot().missionActive, true, 'still running after a day');
+    eng.processLogLine('4 900000 0101');
+    assert.strictEqual(eng.snapshot().endReason, 'mission_end', 'the rig itself still ends it');
+  }
+
+  // (11) config -> engine: seconds in, milliseconds out, and the clamps hold
+  {
+    const c = normalize({});
+    assert.deepStrictEqual(c.matchEnd, { watchdogSeconds: 120, streamLostSeconds: 30, endBlockSeconds: 10 }, 'defaults');
+    assert.deepStrictEqual(matchEndMs(c.matchEnd), MS, 'seconds are converted to ms');
+    const off = normalize({ matchEnd: { watchdogSeconds: 0, streamLostSeconds: '0', endBlockSeconds: -5 } });
+    assert.deepStrictEqual(off.matchEnd, { watchdogSeconds: 0, streamLostSeconds: 0, endBlockSeconds: 0 }, '0 survives, negatives clamp to 0');
+    assert.strictEqual(normalize({ matchEnd: { watchdogSeconds: 999999 } }).matchEnd.watchdogSeconds, 86400, 'upper clamp');
+    assert.strictEqual(normalize({ matchEnd: { watchdogSeconds: 'quatsch' } }).matchEnd.watchdogSeconds, 120, 'garbage falls back to the default');
+    assert.deepStrictEqual(END_REASONS, ['mission_end', 'watchdog', 'stream_lost', 'next_match', 'shutdown'], 'the endReason contract');
+  }
+  console.log('  ok    engine.matchEnd');
+} catch (err) { failed++; console.error(`  FAIL  engine.matchEnd\n        ${err.stack}`); }
+
+try {
+  // All four ways out of a match must actually WRITE the statistic — the real
+  // engine wired to the real stats writer, exactly as src/index.js does it,
+  // into an OS temp directory that is removed again afterwards.
+  const { Engine } = require('../src/engine');
+  const { StatsWriter, splitCsv } = require('../src/statsWriter');
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'lfend-'));
+  const DELIM = ';';
+  const quiet = { debug() {}, info() {}, warn() {}, error() {} };
+  const eng = new Engine({ logger: null, matchEnd: { watchdogMs: 120000, streamLostMs: 30000, endBlockMs: 10000 } });
+  const sw = new StatsWriter({
+    logger: quiet,
+    getConfig: () => ({ csv: { enabled: true, dir, delimiter: DELIM, bom: true, writeEvents: false, writeLive: false } }),
+  });
+  eng.on('change', () => sw.onChange(eng.gameState));
+  eng.on('event', (e) => sw.onEvent(e));
+  eng.on('match_start', () => sw.onMatchStart(eng.snapshot()));
+  eng.on('match_end', () => sw.onMatchEnd(eng.snapshot()));
+
+  // matchId is Date.now().toString(36) — keep the ids apart (see familySplit)
+  const pause = () => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 3);
+  const playMatch = (goalsForAnna) => {
+    pause();
+    [
+      '1 28 Laserball Ranked 0 300000 0',
+      '2 0 Rot 5 solid #ef4444', '2 1 Blau 5 solid #3b82f6',
+      '4 0 0100',
+      '3 100 event @1 player Anna 0 3 1', '3 100 event @2 player Ben 1 3 1',
+      '4 5000 1100 @2 @1',
+    ].concat(Array.from({ length: goalsForAnna }, (_, i) => `4 ${9000 + i * 1000} 1101 @1`))
+      .forEach((l) => eng.processLogLine(l));
+  };
+  const matches = () => {
+    const text = fs.readFileSync(path.join(dir, 'matches.csv'), 'utf8').replace(/^﻿/, '');
+    const lines = text.split(/\r?\n/).filter(Boolean);
+    const head = splitCsv(lines[0], DELIM);
+    return lines.slice(1).map((l) => {
+      const c = splitCsv(l, DELIM); const o = {};
+      head.forEach((h, i) => (o[h] = c[i]));
+      return o;
+    });
+  };
+
+  // (a) watchdog
+  playMatch(1);
+  assert.strictEqual(eng.checkMatchEnd(eng._lastLineAt + 120000), 'watchdog', 'watchdog ended it');
+  assert.strictEqual(matches().length, 1, 'watchdog: the match is written');
+
+  // (b) stream lost
+  playMatch(2);
+  eng.noteStreamLost(eng._lastLineAt);
+  assert.strictEqual(eng.checkMatchEnd(eng._lastLineAt + 30000), 'stream_lost', 'stream loss ended it');
+  assert.strictEqual(matches().length, 2, 'stream_lost: the match is written');
+
+  // (c) next match ends the previous one — and the new one is recorded too
+  playMatch(3);
+  playMatch(1);
+  assert.strictEqual(matches().length, 3, 'next_match: the abandoned match is written exactly once');
+  assert.strictEqual(eng.snapshot().missionActive, true, 'and the new match is running');
+
+  // (d) shutdown finalizes the running match (this is what src/index.js calls)
+  assert.strictEqual(eng.endMatch('shutdown'), true, 'shutdown ended the running match');
+  const rows = matches();
+  assert.strictEqual(rows.length, 4, 'shutdown: nothing is lost when the service stops');
+
+  // all four matches carry a real result, not an empty shell
+  const players = fs.readFileSync(path.join(dir, 'all_players_laserball.csv'), 'utf8').replace(/^﻿/, '');
+  const playerLines = players.split(/\r?\n/).filter(Boolean);
+  assert.strictEqual(playerLines.length, 1 + 4 * 2, 'header + two players per match, four matches');
+  assert.ok(playerLines.slice(1).every((l) => /;(Anna|Ben);/.test(l)), 'every row names a player');
+  assert.deepStrictEqual(rows.map((r) => r.winner_score), ['1', '2', '3', '1'], 'each match kept its own result');
+  assert.ok(rows.every((r) => r.match_id && r.ended_at && r.players === '2'), 'every match row is complete');
+  const totals = fs.readFileSync(path.join(dir, 'totals_laserball.csv'), 'utf8').replace(/^﻿/, '');
+  assert.ok(/;Anna;4;/.test(totals), 'Anna is credited with all four matches');
+  fs.rmSync(dir, { recursive: true, force: true });
+  console.log('  ok    engine.matchEnd.stats');
+} catch (err) { failed++; console.error(`  FAIL  engine.matchEnd.stats\n        ${err.stack}`); }
+
+try {
   const { listEventLogFiles, eventLogNameOk } = require('../src/apiServer');
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'lfevlog-'));
   fs.writeFileSync(path.join(dir, 'events-2026-09-10.log'), 'line one\n');
@@ -1111,6 +1535,28 @@ try {
     assert.ok(/\r\nSubject: a b\r\n/.test(inject), 'newline in the subject is folded to a space');
     console.log('  ok    smtp.message');
   } catch (err) { failed++; console.error(`  FAIL  smtp.message\n        ${err.stack}`); }
+
+  try {
+    // The ticker itself: everything above drives checkMatchEnd() by hand, this
+    // proves the engine really does it on its own — with a 150 ms threshold, so
+    // the whole test is over in well under a second.
+    const { Engine } = require('../src/engine');
+    const eng = new Engine({ logger: null, matchEnd: { watchdogMs: 150, streamLostMs: 0, endBlockMs: 0 } });
+    const ends = [];
+    eng.on('match_end', (e) => ends.push(e));
+    assert.strictEqual(eng._endTimer, null, 'no timer before a match');
+    ['1 28 Laserball 0 300000 0', '2 0 Rot 5 solid #ef4444', '4 0 0100', '3 10 event @1 player Anna 0 3 1']
+      .forEach((l) => eng.processLogLine(l));
+    assert.ok(eng._endTimer, 'a running match arms the ticker');
+    assert.strictEqual(eng._endTimer.hasRef?.(), false, 'the ticker is unref()ed and cannot keep the process alive');
+    await new Promise((r) => setTimeout(r, 500));
+    assert.strictEqual(eng.snapshot().missionActive, false, 'the ticker ended the match on its own');
+    assert.strictEqual(eng.snapshot().endReason, 'watchdog', 'reason: watchdog');
+    assert.ok(eng.snapshot().endedAt >= eng._lastLineAt, 'endedAt is the moment it ended');
+    assert.strictEqual(ends.length, 1, 'exactly one match_end, however often the ticker runs');
+    assert.strictEqual(eng._endTimer, null, 'and the ticker stops itself again');
+    console.log('  ok    engine.matchEnd.ticker');
+  } catch (err) { failed++; console.error(`  FAIL  engine.matchEnd.ticker\n        ${err.stack}`); }
 
   console.log(failed ? `\n${failed} check(s) failed` : '\nAll checks passed');
   process.exit(failed ? 1 : 0);

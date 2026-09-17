@@ -3,8 +3,11 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <meta name="color-scheme" content="dark" />
+  <meta name="color-scheme" content="dark light" />
   <title>LF Live — Konsole</title>
+  <!-- Das gewaehlte Theme setzt app.js ganz oben auf <html>; ein eigenes
+       Inline-Skript ginge hier nicht, die Konsole laeuft unter einer strengen
+       Content-Security-Policy (script-src 'self'). -->
   <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%230a0a0e'/%3E%3Crect x='9' y='9' width='14' height='14' rx='3' fill='%23ffb020'/%3E%3C/svg%3E" />
   <link rel="stylesheet" href="styles.css" />
 </head>
@@ -13,14 +16,17 @@
 <header class="app">
   <div class="brand-row">
     <div class="wordmark">LF&nbsp;<b>LIVE</b></div>
-    <div class="chips">
-      <!-- Spielmodus: Name kommt aus dem Stream und wird ausschliesslich per
-           textContent gesetzt (src/web/app.js). Das Kennzeichen daneben zeigt,
-           ob die Erkennung sicher war. -->
-      <span class="chip mode" id="chip-mode"><span class="mode-name" id="mode-name">—</span><span class="mode-flag" id="mode-flag" hidden></span></span>
-      <span class="chip" id="chip-lf"><i class="led"></i>Laserforce</span>
-      <span class="chip" id="chip-clients"><i class="led"></i>0&nbsp;Clients</span>
-      <span class="chip" id="chip-outputs"><i class="led"></i>0/0&nbsp;Ziele</span>
+    <div class="brand-tools">
+      <div class="chips">
+        <!-- Spielmodus: Name kommt aus dem Stream und wird ausschliesslich per
+             textContent gesetzt (src/web/app.js). Das Kennzeichen daneben zeigt,
+             ob die Erkennung sicher war. -->
+        <span class="chip mode" id="chip-mode"><span class="mode-name" id="mode-name">—</span><span class="mode-flag" id="mode-flag" hidden></span></span>
+        <span class="chip" id="chip-lf"><i class="led"></i>Laserforce</span>
+        <span class="chip" id="chip-clients"><i class="led"></i>0&nbsp;Clients</span>
+        <span class="chip" id="chip-outputs"><i class="led"></i>0/0&nbsp;Ziele</span>
+      </div>
+      <button class="ghost mini" id="theme-btn" type="button" title="Zwischen hell und dunkel umschalten">Hell</button>
     </div>
   </div>
 
@@ -60,18 +66,41 @@
 <main>
   <!-- LIVE -->
   <section id="tab-live" class="tab active">
-    <div class="scorebar">
-      <div class="side" id="side-a"><span class="sname">—</span><span class="sscore">0</span></div>
+    <!-- Adaptive Anzeige: die Aufteilung (duel | multi | ffa) setzt app.js
+         anhand der Teamzahl bzw. der Erkennung „Jeder gegen jeden". Die Uhr
+         (.mid) steht in jeder Aufteilung prominent. Team- und Spielernamen
+         kommen aus dem TCP-Feed und werden ausschliesslich per textContent
+         gesetzt; Teamfarben werden vorher auf #rgb/#rrggbb geprüft. -->
+    <div class="scorebar multi" id="scorebar">
+      <div class="score-teams" id="score-teams"></div>
       <div class="mid">
         <span class="clock-cap" id="clock-cap">Laufzeit</span>
         <span class="clock" id="clock">0:00</span>
         <span class="mid-label" id="mid-label">kein Match</span>
         <span class="mid-prog" aria-hidden="true"><span id="mid-prog-fill"></span></span>
         <span class="src-tag" id="score-src"></span>
+        <!-- Wie das letzte Match geendet hat (gameState.endReason / endedAt).
+             Bleibt leer, solange ein Match läuft oder der Dienst keinen Grund
+             nennt; Text ausschliesslich per textContent (src/web/app.js). -->
+        <span class="src-tag end" id="match-end" hidden></span>
       </div>
-      <div class="side rev" id="side-b"><span class="sscore">0</span><span class="sname">—</span></div>
+    </div>
+
+    <div class="live-tools">
+      <span class="eyebrow">Spielerwerte</span>
+      <span class="muted" id="cols-note"></span>
+      <button class="ghost mini ml-auto" id="cols-toggle" type="button" aria-pressed="false" hidden>Alle Werte</button>
     </div>
     <div class="stat-cols" id="stat-cols"></div>
+
+    <!-- Legende: erklaert jede Kennzahl, die im aktuellen Spielmodus zu sehen
+         ist. Inhalt kommt aus /api/modes (label + help) und wird neu gebaut,
+         sobald sich der Spaltensatz aendert. -->
+    <details class="legend" id="legend">
+      <summary>Legende — was bedeuten die Spalten?<span class="legend-mode" id="legend-mode"></span></summary>
+      <div class="legend-body" id="legend-body"></div>
+    </details>
+
     <div class="feed-wrap">
       <span class="eyebrow">Verlauf · letzte Ereignisse</span>
       <div class="feed" id="feed"></div>
@@ -126,16 +155,16 @@
   <section id="tab-stats" class="tab">
     <div class="panel">
       <span class="eyebrow">Aufzeichnung</span>
-      <label class="row-chk" style="margin-top:12px"><input id="s-csv-enabled" type="checkbox" /> Statistiken als CSV speichern</label>
+      <label class="row-chk mt-sm"><input id="s-csv-enabled" type="checkbox" /> Statistiken als CSV speichern</label>
       <p class="channel-note">Ordner auf diesem PC: <code id="csv-dir">…</code></p>
-      <label style="max-width:300px">Trennzeichen
+      <label class="w-sm">Trennzeichen
         <select id="s-csv-delim">
           <option value=";">Semikolon ;&nbsp;&nbsp;(Excel DE)</option>
           <option value=",">Komma ,</option>
           <option value="	">Tab</option>
         </select>
       </label>
-      <div class="row" style="margin-top:16px">
+      <div class="row mt-md">
         <label class="row-chk inline"><input id="s-csv-events" type="checkbox" /> Event-Log mitschreiben</label>
         <label class="row-chk inline"><input id="s-csv-live" type="checkbox" /> Match-CSV live aktualisieren</label>
       </div>
@@ -144,13 +173,14 @@
     <div class="sec-head">
       <h2>Gesamtwertung</h2>
       <div class="sec-tools">
-        <!-- Familien-Umschalter; wird nur eingeblendet, wenn es zu mehr als
-             einer Familie überhaupt Daten gibt (src/web/app.js). -->
-        <div class="seg fam" id="totals-fam" hidden></div>
+        <!-- Profil-Umschalter; wird nur eingeblendet, wenn es zu mehr als einem
+             Anzeigeprofil überhaupt Daten gibt (src/web/app.js). Beschriftungen
+             kommen vom Dienst, nicht aus dieser Seite. -->
+        <div class="seg prof" id="totals-profile" hidden></div>
         <button class="ghost" id="totals-refresh">Aktualisieren</button>
       </div>
     </div>
-    <p class="lead">Summe über alle aufgezeichneten Matches — getrennt je Spielfamilie, aus <code>totals_laserball.csv</code> bzw. <code>totals_sm5.csv</code>. Die Spalten richten sich nach der Familie.</p>
+    <p class="lead">Summe über alle aufgezeichneten Matches — je Anzeigeprofil, aus <code>totals_laserball.csv</code> bzw. <code>totals_sm5.csv</code>. Die Spalten und ihre Beschriftungen kommen aus <code>/api/modes</code>.</p>
     <div class="tablewrap"><table class="stat big" id="totals-table"></table></div>
 
     <div class="sec-head mt"><h2>Dateien</h2></div>
@@ -169,7 +199,7 @@
         <label>Web/API-Port (Konsole + API)<input id="s-http-port" type="number" min="1" max="65535" /><small>Änderung wirkt erst nach Neustart.</small></label>
         <label>Web/API-Bind<input id="s-http-host" /><small>0.0.0.0 = im ganzen LAN erreichbar.</small></label>
       </div>
-      <label class="row-chk inline" style="margin-top:16px"><input id="s-trust-proxy" type="checkbox" /> Hinter eigenem Reverse-Proxy — Client-IP aus <code>X-Forwarded-For</code></label>
+      <label class="row-chk inline mt-md"><input id="s-trust-proxy" type="checkbox" /> Hinter eigenem Reverse-Proxy — Client-IP aus <code>X-Forwarded-For</code></label>
       <label>Erlaubte Ausgangs-Ziele (Kommaliste, leer = alle)<input id="s-output-allow" placeholder="192.168.10.50:7000, *.regie.lan" /><small><code>host</code> oder <code>host:port</code>, <code>*.suffix</code> möglich. Begrenzt, wohin Webhook-/TCP-/UDP-Ausgänge senden dürfen — auch beim „Test"-Knopf.</small></label>
     </div>
 
@@ -177,7 +207,7 @@
       <span class="eyebrow">Start-Benachrichtigung</span>
       <p class="lead">Beim Start meldet der Dienst IP-Adresse und Port an die eingerichteten Kanäle — damit weißt du auch ohne Monitor am Hallen-PC, wie du drankommst. Eingerichtet wird ein Kanal mit <b>einer Zeile</b> in der <code>.env</code> (Discord, ntfy, Telegram, Slack, Webhook oder E-Mail) — siehe <code>docs/NOTIFY.md</code>.</p>
       <p class="channel-note" id="notify-state">…</p>
-      <div class="row" style="margin-top:4px">
+      <div class="row mt-xs">
         <label class="row-chk inline"><input id="s-notify-enabled" type="checkbox" /> Benachrichtigungen senden</label>
         <label class="row-chk inline"><input id="s-notify-start" type="checkbox" /> beim Start</label>
         <label class="row-chk inline"><input id="s-notify-ip" type="checkbox" /> bei IP-Wechsel</label>
@@ -219,7 +249,7 @@
         <label class="row-chk inline"><input id="s-nt-smtp-secure" type="checkbox" /> Sofortiges TLS (Port 465)</label>
       </details>
 
-      <div class="row" style="margin-top:12px"><button class="ghost" id="notify-test">Testnachricht senden</button><span class="muted" id="notify-status"></span></div>
+      <div class="row mt-sm"><button class="ghost" id="notify-test">Testnachricht senden</button><span class="muted" id="notify-status"></span></div>
       <p class="channel-note">Der Test nutzt die <b>gespeicherte</b> Einstellung — nach Änderungen erst unten „Änderungen speichern".</p>
     </div>
 
@@ -230,15 +260,15 @@
         <label>Aktuelles Passwort<input id="s-pw-current" type="password" autocomplete="current-password" /></label>
         <label>Neues Passwort<input id="s-pw-new" type="password" autocomplete="new-password" /><small>Mindestens 8 Zeichen. Danach werden alle anderen angemeldeten Browser abgemeldet.</small></label>
       </div>
-      <div class="row" style="margin-top:12px">
+      <div class="row mt-sm">
         <button class="ghost" id="pw-save">Passwort ändern</button>
         <button class="ghost" id="logout">Abmelden</button>
         <span class="muted" id="pw-status"></span>
       </div>
-      <div class="row" style="margin-top:16px">
+      <div class="row mt-md">
         <label class="row-chk inline"><input id="s-admin-enabled" type="checkbox" /> Anmeldung verlangen</label>
       </div>
-      <label style="max-width:320px">Sitzungsdauer (Stunden)<input id="s-session-hours" type="number" min="1" max="720" /><small>Danach ist eine erneute Anmeldung nötig. 1–720.</small></label>
+      <label class="w-md">Sitzungsdauer (Stunden)<input id="s-session-hours" type="number" min="1" max="720" /><small>Danach ist eine erneute Anmeldung nötig. 1–720.</small></label>
       <p class="channel-note">Passwort vergessen? Am Hallen-PC den Dienst stoppen, <code>npm run setpw</code> ausführen und wieder starten.</p>
     </div>
 
@@ -247,7 +277,7 @@
       <label>Zugriffs-Token<input id="s-token" type="password" placeholder="leer = offen im LAN" /><small>Für <b>Programme</b> statt Menschen (Overlays, Regie-Tools, curl): wenn gesetzt, kommt man mit <code>Authorization: Bearer &lt;token&gt;</code> bzw. <code>?token=</code> auch ohne Anmeldung an die API. Menschen melden sich stattdessen oben mit dem Admin-Passwort an. Ein gesetzter Token wird nie zurück angezeigt — leer lassen behält ihn.</small></label>
       <label class="row-chk inline"><input id="s-token-clear" type="checkbox" /> Token entfernen (offen im LAN)</label>
       <label>Erlaubte Browser-Origins (CORS, eine pro Zeile)<textarea id="s-cors" rows="2" placeholder="leer = keine"></textarea><small>Leer = keine (Standard) — die Konsole selbst ist same-origin und braucht keinen Eintrag. Eine Zeile je Origin, z. B. <code>https://regie.hallen.lan</code>. <code>*</code> = beliebige Website darf die API im Browser abfragen (nur GET). Für nicht-Browser-Clients (curl, Server) irrelevant.</small></label>
-      <label style="max-width:320px">Rate-Limit (Anfragen/Minute je IP)<input id="s-rate" type="number" min="0" /><small>0 = aus.</small></label>
+      <label class="w-md">Rate-Limit (Anfragen/Minute je IP)<input id="s-rate" type="number" min="0" /><small>0 = aus.</small></label>
     </div>
 
     <div class="panel">
@@ -259,19 +289,41 @@
       <span class="eyebrow">Namensliste (optional)</span>
       <p class="channel-note">Eine CSV, die du selbst pflegst — <code>id,name,team</code> pro Zeile. Ersetzt die
       Namen aus dem Laserforce-Stream. Ohne Liste werden die Namen genutzt, die Laserforce meldet.</p>
-      <label class="row-chk" style="margin-top:12px"><input id="s-roster-enabled" type="checkbox" /> Namensliste verwenden</label>
+      <label class="row-chk mt-sm"><input id="s-roster-enabled" type="checkbox" /> Namensliste verwenden</label>
       <label>Datei (relativ zum Programmordner)<input id="s-roster-file" placeholder="data/roster.csv" /></label>
-      <div class="row" style="margin-top:12px"><button class="ghost" id="roster-reload">Liste neu laden</button><span class="muted" id="roster-status"></span></div>
+      <div class="row mt-sm"><button class="ghost" id="roster-reload">Liste neu laden</button><span class="muted" id="roster-status"></span></div>
+    </div>
+
+    <div class="panel">
+      <span class="eyebrow">Roh-Mitschnitt (Diagnose)</span>
+      <p class="lead">Schneidet den Laserforce-Datenstrom <b>byteweise unverändert</b> mit — eine Datei je Spiel, dazu ein Begleitzettel als <code>.txt</code>. Nur für eine Testphase gedacht: damit lässt sich ein Spiel andernorts exakt nachstellen. Im Dauerbetrieb bitte wieder ausschalten.</p>
+      <label class="row-chk mt-sm"><input id="s-cap-enabled" type="checkbox" /> Rohen Stream mitschneiden</label>
+      <p class="channel-note alert" id="cap-privacy" hidden>⚠ <b>Datenschutz:</b> Ein Mitschnitt enthält <b>Spielernamen</b> und die <b>weltweit eindeutigen Laserforce-Mitglieds-IDs</b> der Spieler. Die Dateien nur an Personen weitergeben, denen diese Daten anvertraut werden dürfen — und danach wieder löschen.</p>
+      <p class="channel-note">Ordner auf diesem PC: <code id="cap-dir">…</code> · <span id="cap-state">—</span></p>
+      <div class="grid2">
+        <label>Grenze je Datei (MB)<input id="s-cap-maxfile" type="number" min="1" max="2000" /><small>Danach endet der Mitschnitt dieses Spiels; im Log und im Begleitzettel steht es. 1–2000.</small></label>
+        <label>Höchstzahl Dateien<input id="s-cap-maxfiles" type="number" min="1" max="1000" /><small>Älteste werden automatisch gelöscht. 1–1000.</small></label>
+        <label>Grenze für den Ordner (MB)<input id="s-cap-maxtotal" type="number" min="1" max="100000" /><small>Älteste werden automatisch gelöscht. Schützt die Platte des Hallen-PCs.</small></label>
+      </div>
+
+      <div class="sec-head mt"><h2>Mitschnitte</h2>
+        <div class="sec-tools">
+          <button class="ghost" id="cap-refresh">Aktualisieren</button>
+          <a class="ghost mini" id="cap-bundle">Alle als ZIP</a>
+          <button class="ghost mini" id="cap-delall">Alle löschen</button>
+        </div>
+      </div>
+      <div id="cap-files" class="cards"></div>
     </div>
 
     <div class="panel">
       <span class="eyebrow">Leistung</span>
-      <label style="max-width:320px">State-Push-Takt (ms)<input id="s-state-tick" type="number" min="50" max="5000" /><small>Wie oft der gemeinsame State-Snapshot an WebSocket, Raw-Stream und Ausgänge geht. Kleiner = flüssiger, mehr Last. Ereignisse gehen immer sofort raus. Wirkt erst nach Neustart. 50–5000.</small></label>
+      <label class="w-md">State-Push-Takt (ms)<input id="s-state-tick" type="number" min="50" max="5000" /><small>Wie oft der gemeinsame State-Snapshot an WebSocket, Raw-Stream und Ausgänge geht. Kleiner = flüssiger, mehr Last. Ereignisse gehen immer sofort raus. Wirkt erst nach Neustart. 50–5000.</small></label>
     </div>
 
     <div class="panel">
       <span class="eyebrow">Sonstiges</span>
-      <label style="max-width:300px">Log-Level<select id="s-loglevel"><option>debug</option><option>info</option><option>warn</option><option>error</option></select></label>
+      <label class="w-sm">Log-Level<select id="s-loglevel"><option>debug</option><option>info</option><option>warn</option><option>error</option></select></label>
     </div>
   </section>
 

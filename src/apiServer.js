@@ -10,10 +10,28 @@ const {
   SessionStore, LoginGuard, RecoveryCode, parseCookies,
 } = require('./auth');
 const { reachability } = require('./netinfo');
-const { FAMILIES, DEFAULT_FAMILY, listModes, scoreboardColumns } = require('./gameModes');
+const {
+  FAMILIES, DEFAULT_FAMILY, DEFAULT_PROFILE, PROFILE_LIST, FAMILY_DEFAULT_PROFILE,
+  listModes, listProfiles, scoreboardColumns, metricLabels, metricGroups, profileLabel,
+} = require('./gameModes');
 
 /** The only family names a request may name. Everything else falls back. */
 const FAMILY_KEYS = [FAMILIES.LASERBALL, FAMILIES.SM5];
+
+/**
+ * The display profiles, resolved once — the registry is static.
+ * `listProfiles()` gives { profile, family, scoreboard, csv, sort } per profile.
+ */
+const PROFILE_INFO = listProfiles();
+
+// The German display name of a profile comes from gameModes.profileLabel() —
+// it lives next to the profile definitions, so console, API and legend all read
+// the same string. This file no longer keeps a table of its own.
+
+/** The family a profile belongs to; null for anything that is not a profile. */
+const profileFamily = (p) => (PROFILE_INFO.find((x) => x.profile === p) || {}).family || null;
+/** The profile a family's files are shown under (its default profile). */
+const familyProfile = (f) => FAMILY_DEFAULT_PROFILE[f] || DEFAULT_PROFILE;
 
 const WEB_DIR = path.join(__dirname, 'web');
 const MIME = { '.html': 'text/html; charset=utf-8', '.js': 'text/javascript; charset=utf-8', '.css': 'text/css; charset=utf-8', '.json': 'application/json; charset=utf-8', '.svg': 'image/svg+xml', '.ico': 'image/x-icon' };
@@ -90,7 +108,7 @@ function listEventLogFiles(dir) {
  *   - request body capped at 512 KiB; header/request/keep-alive timeouts set
  */
 class ApiServer {
-  constructor({ logger, config, engine, getStatus, roster, stats, outputs, eventLog, notifier, onConfigChange }) {
+  constructor({ logger, config, engine, getStatus, roster, stats, outputs, eventLog, notifier, capture, onConfigChange }) {
     this.log = logger;
     this.config = config;
     this.engine = engine;
@@ -100,6 +118,7 @@ class ApiServer {
     this.outputs = outputs;
     this.eventLog = eventLog || null;
     this.notifier = notifier || null;
+    this.capture = capture || null;
     this.onConfigChange = onConfigChange;
     this.server = null;
     this.wss = null;
@@ -614,17 +633,37 @@ class ApiServer {
     // carries nothing but the registry — no paths, no files, no config.
     if (p === '/api/modes') {
       const s = this.engine.snapshot();
+      // `scoreboard` is keyed by BOTH axes: the two FAMILY keys it always had
+      // (nothing is removed — consumers may hang off them) and one key per
+      // display PROFILE. `sm5`/`laserball` exist in both name spaces and mean
+      // the same column set there; only `standard` is new.
+      const scoreboard = {
+        [FAMILIES.LASERBALL]: scoreboardColumns(FAMILIES.LASERBALL),
+        [FAMILIES.SM5]: scoreboardColumns(FAMILIES.SM5),
+      };
+      for (const pr of PROFILE_LIST) scoreboard[pr] = scoreboardColumns(pr);
       return this._json(res, 200, {
         data: {
           families: [FAMILIES.LASERBALL, FAMILIES.SM5],
           defaultFamily: DEFAULT_FAMILY,
+          // display profiles — which columns are SHOWN, independent of the
+          // family, which only decides what can be counted at all
+          profiles: PROFILE_INFO.map((x) => ({
+            profile: x.profile, label: profileLabel(x.profile), family: x.family, sort: x.sort,
+          })),
+          defaultProfile: DEFAULT_PROFILE,
           modes: listModes(),
           current: s.mode ? { ...s.mode } : null,
           // the console builds its player table from these — one source of truth
-          scoreboard: {
-            [FAMILIES.LASERBALL]: scoreboardColumns(FAMILIES.LASERBALL),
-            [FAMILIES.SM5]: scoreboardColumns(FAMILIES.SM5),
-          },
+          scoreboard,
+          // the whole label table (gameModes.metricLabels()), keyed by camelCase
+          // AND snake_case, so no consumer keeps a column-label map of its own.
+          // Every entry carries label / short / help / group / groupLabel /
+          // format — everything the console legend needs.
+          metrics: metricLabels(),
+          // Section order for that legend: the metric groups in display order.
+          // Additive; nothing above changed shape.
+          metricGroups: metricGroups(),
         },
       });
     }
@@ -669,17 +708,64 @@ class ApiServer {
     }
     if (p === '/api/config') return this._json(res, 200, { data: this._redactedConfig(), envPins: this.config.envPins });
     if (p === '/api/stats/totals') {
-      // Totals are kept per family (totals_<family>.csv) because the column sets
-      // are incompatible. `?family=` is validated against the known families and
-      // never passed through raw; anything else -> the writer's own default (the
-      // family played last), so existing integrations keep working unchanged.
-      const asked = url.searchParams.get('family');
-      const family = FAMILY_KEYS.includes(String(asked)) ? String(asked) : null;
+      // Totals are kept per FAMILY on disk (totals_<family>.csv, statsWriter.js)
+      // because a sum over another family's counters is meaningless. A display
+      // PROFILE may therefore be named too — it is resolved to its family here.
+      // Both parameters are validated against the registry and never passed
+      // through raw; without either, the writer's own default applies (the
+      // family played last), so existing calls keep working unchanged.
+      const askedFamily = url.searchParams.get('family');
+      const askedProfile = url.searchParams.get('profile');
+      const profile = PROFILE_LIST.includes(String(askedProfile)) ? String(askedProfile) : null;
+      const family = FAMILY_KEYS.includes(String(askedFamily))
+        ? String(askedFamily)
+        : (profile ? profileFamily(profile) : null);
+      const families = this.stats.totalsFamilies();
       return this._json(res, 200, {
         data: this.stats.totalsJson(family || undefined),
         family,
-        families: this.stats.totalsFamilies(),
+        families,
+        // Which profile the rows on screen belong to, and which profiles have
+        // any recorded data at all — one entry per family with a totals file,
+        // under that family's own profile (profiles sharing a family share the
+        // file, so offering them twice would show the same table twice).
+        profile: profile || (family ? familyProfile(family) : null),
+        profiles: families.map((f) => ({ profile: familyProfile(f), label: profileLabel(familyProfile(f)), family: f })),
       });
+    }
+    // Raw TDF recordings (docs/CAPTURE.md). Same auth / CORS / rate-limit chain
+    // and the same path handling as the CSV endpoints above.
+    if (p === '/api/capture/files') {
+      if (!this.capture) return this._json(res, 200, { data: [], status: null });
+      return this._json(res, 200, { data: this.capture.listFiles(), status: this.capture.status() });
+    }
+    if (p === '/api/capture/file') {
+      if (!this.capture) return this._json(res, 404, { error: 'not_found' });
+      const name = url.searchParams.get('name') || '';
+      const buf = this.capture.readFile(name);
+      if (!buf) return this._json(res, 404, { error: 'not_found' });
+      res.writeHead(200, {
+        'Content-Type': 'text/plain; charset=utf-8',
+        'Content-Disposition': `attachment; filename="${path.basename(name).replace(/[^a-zA-Z0-9._-]/g, '_')}"`,
+        'Content-Length': buf.length,
+        'Cache-Control': 'no-store',
+        'X-Content-Type-Options': 'nosniff',
+      });
+      return res.end(buf);
+    }
+    if (p === '/api/capture/bundle') {
+      if (!this.capture) return this._json(res, 404, { error: 'not_found' });
+      const b = this.capture.bundle();
+      if (!b.ok) return this._json(res, b.error === 'too_large' ? 413 : 404, b);
+      const name = `lf-mitschnitte-${new Date().toISOString().slice(0, 10)}.zip`;
+      res.writeHead(200, {
+        'Content-Type': 'application/zip',
+        'Content-Disposition': `attachment; filename="${name}"`,
+        'Content-Length': b.buffer.length,
+        'Cache-Control': 'no-store',
+        'X-Content-Type-Options': 'nosniff',
+      });
+      return res.end(b.buffer);
     }
     if (p === '/api/stats/files') return this._json(res, 200, { data: this.stats.listFiles() });
     if (p === '/api/stats/file') {
@@ -813,6 +899,21 @@ class ApiServer {
       this.log.warn('audit', `output test by ${ip}: ${o.kind || '?'} "${o.name || o.id || '?'}"`);
       try { return this._json(res, 200, { data: await this.outputs.test(o) }); }
       catch (err) { return this._json(res, 200, { data: { ok: false, error: err.message } }); }
+    }
+    // Deleting a recording is a mutating request and goes through exactly the
+    // same gate as every other one (session or bearer token, plus the CSRF check
+    // in _route). Audited like a config change.
+    if (p === '/api/capture/delete') {
+      if (!this.capture) return this._json(res, 404, { error: 'not_found' });
+      if (body && body.all === true) {
+        const r = this.capture.deleteAll();
+        this.log.warn('audit', `capture: alle Mitschnitte gelöscht von ${ip} (${r.deleted} Dateien)`);
+        return this._json(res, 200, { data: { ...r, files: this.capture.listFiles() } });
+      }
+      const r = this.capture.deleteFile(String(body?.name ?? ''));
+      if (!r.ok) return this._json(res, r.error === 'not_found' ? 404 : 400, { error: r.error });
+      this.log.warn('audit', `capture: Mitschnitt gelöscht von ${ip}: ${String(body?.name ?? '').slice(0, 120)}`);
+      return this._json(res, 200, { data: { ...r, files: this.capture.listFiles() } });
     }
     if (p === '/api/notify/test') {
       if (!this.notifier) return this._json(res, 200, { data: { sent: [], configured: [] } });

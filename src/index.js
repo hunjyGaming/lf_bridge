@@ -5,11 +5,12 @@ const path = require('path');
 
 const { Config } = require('./config');
 const { Logger } = require('./logger');
-const { Engine } = require('./engine');
+const { Engine, matchEndMs } = require('./engine');
 const { LocalRoster } = require('./localRoster');
 const { StatsWriter } = require('./statsWriter');
 const { EventLog } = require('./eventLog');
 const { TcpIngest } = require('./tcpIngest');
+const { Capture } = require('./capture');
 const { Outputs } = require('./outputs');
 const { StreamServer } = require('./streamServer');
 const { ApiServer } = require('./apiServer');
@@ -24,22 +25,40 @@ const logger = new Logger({ level: config.data.logLevel });
 const getConfig = () => config.data;
 const getState = () => engine.snapshot();
 
-const engine = new Engine({ logger, defaultDurationMs: config.data.match.defaultDurationMs, emitUnknownEvents: config.data.engine.emitUnknownEvents });
+const engine = new Engine({
+  logger,
+  defaultDurationMs: config.data.match.defaultDurationMs,
+  emitUnknownEvents: config.data.engine.emitUnknownEvents,
+  matchEnd: matchEndMs(config.data.matchEnd),
+});
 const roster = new LocalRoster({ logger, getConfig });
 const stats = new StatsWriter({ logger, getConfig });
 const eventLog = new EventLog(config.data, logger);
 const tcp = new TcpIngest({ logger, getConfig });
+const capture = new Capture({ logger, getConfig });
 const outputs = new Outputs({ logger, getConfig, getState });
 const streamServer = new StreamServer({ logger, getConfig, getState });
 const notifier = new Notifier({ logger, getConfig });
 
 const api = new ApiServer({
-  logger, config, engine, roster, stats, outputs, eventLog, notifier,
+  logger, config, engine, roster, stats, outputs, eventLog, notifier, capture,
   getStatus,
   onConfigChange: reconcile,
 });
 
 // ---- wiring ----
+// Raw recording (docs/CAPTURE.md) sits in the TCP path, never in the engine.
+// Switched off it costs one config read per chunk and nothing else.
+tcp.on('data', (buf) => capture.onData(buf));
+// Verbindungsabbruch mitten im Match: NICHT sofort beenden — die Anlage
+// verbindet sich womöglich gleich wieder und spielt weiter. Erst wenn sie nach
+// `matchEnd.streamLostSeconds` nicht zurück ist, gilt das Match als beendet.
+// Solange noch eine andere Verbindung steht, ist gar nichts verloren.
+tcp.on('stream-start', () => engine.noteStreamResumed());
+tcp.on('stream-end', () => {
+  capture.onStreamEnd();
+  if (tcp.stats.connected <= 0) engine.noteStreamLost();
+});
 tcp.on('line', (line) => {
   try { engine.processLogLine(line); }
   catch (err) { logger.error('engine', `parse error: ${err.message} :: ${line.slice(0, 160)}`); }
@@ -84,15 +103,24 @@ function getStatus() {
     stateTickMs: config.data.stateTickMs,
     tcp: { ...tcp.stats },
     csv: stats.status(),
+    capture: capture.status(),
     eventLog: eventLog.status(),
     localRoster: roster.status(),
     outputs: outputs.statusList(),
     outputAllow: config.data.outputAllow,
     streamServer: { enabled: config.data.streamServer.enabled, host: streamServer.host, port: streamServer.port, clients: streamServer.clientCount },
     envPins: config.envPins,
+    matchEnd: { ...config.data.matchEnd },
     match: {
       active: s.missionActive,
       matchId: s.matchId,
+      // ADDITIVE. Warum und wann das Match beendet wurde:
+      // 'mission_end' (0101 der Anlage) | 'watchdog' (Stille bzw. erkannte
+      // Endabrechnung) | 'stream_lost' | 'next_match' | 'shutdown'.
+      // `null` solange eines läuft oder noch keines lief — dann, und nur dann,
+      // darf eine Anzeige die Uhr weiterzählen lassen.
+      endReason: s.endReason || null,
+      endedAt: s.endedAt == null ? null : s.endedAt,
       elapsedMs: s.elapsedTime,
       durationMs: s.duration,
       // ADDITIVE (contract E). `durationKnown === false` means the rig never told
@@ -115,6 +143,7 @@ let lastTcp = JSON.stringify(config.data.tcp);
 async function reconcile() {
   engine.defaultDurationMs = config.data.match.defaultDurationMs;
   engine.emitUnknownEvents = config.data.engine.emitUnknownEvents !== false;
+  engine.setMatchEndConfig(matchEndMs(config.data.matchEnd));
 
   if (JSON.stringify(config.data.tcp) !== lastTcp) {
     lastTcp = JSON.stringify(config.data.tcp);
@@ -125,6 +154,7 @@ async function reconcile() {
   engine.setRoster(roster.getMap());
   outputs.reconcile();
   streamServer.reconcile();
+  capture.reconcile();
 
   if (JSON.stringify(config.data.http) !== lastHttp) {
     lastHttp = JSON.stringify(config.data.http);
@@ -258,6 +288,7 @@ ipWatch.unref?.();
   logger.info('lf-live', `this PC: ${net.hostname} — ${addressSummary(net.addresses)}`);
   logger.info('lf-live', `Laserforce log export -> ${config.data.tcp.host}:${config.data.tcp.port}`);
   if (config.data.csv.enabled) logger.info('stats', `CSV stats -> ${stats.dir()}`);
+  if (config.data.capture.enabled) logger.warn('capture', `Roh-Mitschnitt AKTIV -> ${capture.dir()} — enthält Spielernamen und Mitglieds-IDs (docs/CAPTURE.md)`);
 
   if (!config.data.admin.passwordHash && config.data.admin.enabled !== false) {
     logger.warn('auth', `console is waiting to be set up — open ${net.urls.find((u) => !u.includes('localhost')) || net.urls[0]}setup`);
@@ -270,7 +301,16 @@ function shutdown() {
   logger.info('lf-live', 'shutting down');
   clearInterval(stateTick);
   clearInterval(ipWatch);
+  // FIRST, while every listener is still attached: a match that is still
+  // running gets finalized here, otherwise its whole statistic would be lost.
+  // The chain engine.match_end -> stats.onMatchEnd -> _finalize writes its CSVs
+  // with fs.writeFileSync/appendFileSync, i.e. synchronously — it is on disk
+  // before this function returns, long before the process.exit() below.
+  try {
+    if (engine.endMatch('shutdown')) logger.warn('lf-live', 'ein laufendes Match wurde beim Beenden abgerechnet (endReason: shutdown)');
+  } catch (err) { logger.error('lf-live', `could not finalize the running match: ${err.message}`); }
   tcp.stop(); outputs.stop(); streamServer.stop(); api.stop();
+  capture.shutdown();
   eventLog.flush();
   setTimeout(() => process.exit(0), 200);
 }
