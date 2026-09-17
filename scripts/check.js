@@ -1129,11 +1129,13 @@ try {
   // checkMatchEnd(now) these assertions call directly, and `noteActivity(now)`
   // takes an explicit timestamp — so a two-minute silence is expressed as
   // arithmetic, not as a two-minute wait.
-  const { Engine, matchEndMs, END_REASONS } = require('../src/engine');
+  const { Engine, matchEndMs, END_REASONS, END_SOURCES } = require('../src/engine');
   const { normalize } = require('../src/config');
 
   const MS = { watchdogMs: 120000, streamLostMs: 30000, endBlockMs: 10000 };
-  const start = (over = {}) => {
+  const NAMES = ['Anna', 'Ben', 'Cara', 'Dora', 'Emil'];
+  /** A running match with `n` logged-in players (teams alternate 0/1). */
+  const startN = (n, over = {}) => {
     const eng = new Engine({ logger: null, matchEnd: { ...MS, ...over } });
     const ends = [];
     eng.on('match_end', (e) => ends.push(e));
@@ -1141,11 +1143,12 @@ try {
       '1 28 Laserball Ranked 0 900000 0',
       '2 0 Rot 5 solid #ef4444', '2 1 Blau 5 solid #3b82f6',
       '4 0 0100',
-      '3 100 event @1 player Anna 0 3 1', '3 100 event @2 player Ben 1 3 1',
-      '4 5000 1100 @1 @2',
-    ].forEach((l) => eng.processLogLine(l));
+    ].concat(Array.from({ length: n }, (_, i) => `3 100 event @${i + 1} player ${NAMES[i]} ${i % 2} 3 1`))
+      .concat(n > 1 ? ['4 5000 1100 @1 @2'] : [])
+      .forEach((l) => eng.processLogLine(l));
     return { eng, ends, t0: eng._lastLineAt };
   };
+  const start = (over = {}) => startN(2, over);
 
   // (0) contract: while a match runs both fields are null
   {
@@ -1153,25 +1156,138 @@ try {
     assert.strictEqual(eng.snapshot().missionActive, true, 'match is running');
     assert.strictEqual(eng.snapshot().endReason, null, 'endReason is null while a match runs');
     assert.strictEqual(eng.snapshot().endedAt, null, 'endedAt is null while a match runs');
+    assert.strictEqual(eng.snapshot().endSource, null, 'endSource is null while a match runs');
+    assert.deepStrictEqual(eng.snapshot().exitCodes, {}, 'no exit code has been observed yet');
+    assert.deepStrictEqual(eng.snapshot().exitCodesSeen, [], 'nor a distinct one');
     const fresh = new Engine({ logger: null });
     assert.strictEqual(fresh.snapshot().endReason, null, 'a fresh engine has no endReason');
     assert.strictEqual(fresh.snapshot().endedAt, null, 'a fresh engine has no endedAt');
+    assert.strictEqual(fresh.snapshot().endSource, null, 'a fresh engine has no endSource');
+    // a second match must not inherit the exit codes of the first
+    const { eng: e2 } = startN(2);
+    e2.processLogLine('6 300000 @1 01 10');
+    assert.deepStrictEqual(e2.snapshot().exitCodesSeen, ['01'], 'recorded');
+    e2.processLogLine('4 0 0100');
+    assert.deepStrictEqual(e2.snapshot().exitCodes, {}, 'a new match starts with a clean sheet');
+    assert.deepStrictEqual(e2.snapshot().exitCodesSeen, [], 'distinct list cleared too');
+    assert.strictEqual(e2.snapshot().endSource, null, 'and no end source');
   }
 
-  // (1) THE CASE THAT MUST NOT HAPPEN: one type-6 line mid-game ends nothing.
+  // (1) THE CASE THAT MUST NOT HAPPEN: a type-6 line mid-game ends nothing.
+  //     The exit code is NOT what tells a drop-out from the closing summary
+  //     (a real arena closes standard missions with `01`, see LASERFORCE.md) —
+  //     COMPLETENESS is. So each of these is tested with a player left over.
   {
-    const { eng, t0 } = start();
-    eng.processLogLine('6 60000 @1 04 1200');        // Anna eliminated mid-game
-    assert.strictEqual(eng.checkMatchEnd(t0 + 60000), null, 'a single type-6 (04 eliminated) does not end the match');
+    // (1a) a single player kicked mid-game with exit `01`
+    const { eng, t0 } = startN(3);
+    eng.processLogLine('6 60000 @1 01 1200');
+    assert.strictEqual(eng.checkMatchEnd(t0 + 60000), null, 'a single kick (exit 01) does not end the match');
     assert.strictEqual(eng.snapshot().missionActive, true, 'and the match is still running');
-    eng.processLogLine('6 61000 @2 01 900');         // Ben kicked as well
-    assert.strictEqual(eng.checkMatchEnd(t0 + 61000), null, 'two NON-end exit codes still do not end the match');
-    assert.strictEqual(eng.snapshot().missionActive, true, 'still running');
-    // even an END exit code from a single entity is not a summary
-    const solo = start().eng;
+    assert.strictEqual(eng._endBlockAt, null, 'no deadline was armed at all');
+
+    // (1b) further players drop out one after another — still someone active
+    eng.processLogLine('6 61000 @2 04 900');
+    assert.strictEqual(eng.checkMatchEnd(t0 + 61000), null, 'two drop-outs of three do not end the match either');
+    assert.strictEqual(eng.snapshot().missionActive, true, 'still running while Cara plays on');
+    assert.strictEqual(eng._endBlockAt, null, 'still no deadline');
+
+    // (1c) the last one reports -> NOW the summary is complete
+    eng.processLogLine('6 300000 @3 01 4200');
+    assert.ok(eng._endBlockAt != null, 'the completed summary arms the deadline');
+    assert.strictEqual(eng.snapshot().missionActive, true, 'recognising still ends NOTHING by itself');
+    assert.strictEqual(eng.checkMatchEnd(eng._endBlockAt + 10000), 'watchdog', 'only the elapsed grace period ends it');
+
+    // (1d) a lone exit-02 is no summary either, for exactly the same reason
+    const solo = startN(3).eng;
     solo.processLogLine('6 60000 @1 02 1200');
     assert.strictEqual(solo.checkMatchEnd(Date.now() + 60000), null, 'one lone exit-02 is not the end summary');
     assert.strictEqual(solo.snapshot().missionActive, true, 'and the match keeps running');
+    assert.strictEqual(solo._endBlockAt, null, 'nothing armed');
+  }
+
+  // (1e) THE OPERATOR'S OBSERVATION (17.09.2026): a regular standard mission in
+  //      which EVERY entity reports exit `01`. Under the old exit-02 rule this
+  //      was never recognised and every match fell through to the 120 s
+  //      watchdog. It must be recognised now.
+  {
+    const { eng } = startN(4);
+    ['6 300000 @1 01 4200', '6 300000 @2 01 3100', '6 300000 @3 01 2900'].forEach((l) => eng.processLogLine(l));
+    assert.strictEqual(eng._endBlockAt, null, 'three of four entities: not yet a summary');
+    assert.strictEqual(eng.snapshot().missionActive, true, 'and nothing ended');
+    eng.processLogLine('6 300000 @4 01 2500');
+    assert.ok(eng._endBlockAt != null, 'all four reported exit 01 -> summary recognised');
+    assert.strictEqual(eng.checkMatchEnd(eng._endBlockAt + 9999), null, 'the grace period is respected');
+    assert.strictEqual(eng.checkMatchEnd(eng._endBlockAt + 10000), 'watchdog', 'and then it ends ~110 s early');
+    const s = eng.snapshot();
+    assert.strictEqual(s.endReason, 'watchdog', 'reason: watchdog (no 0101 came)');
+    assert.strictEqual(s.endSource, 'summary_type6', 'endSource names WHAT was recognised');
+    assert.deepStrictEqual(s.exitCodesSeen, ['01'], 'the observed exit codes are kept');
+    assert.deepStrictEqual(s.exitCodes, { 1: '01', 2: '01', 3: '01', 4: '01' }, 'per entity as well');
+    const evt = s.events.filter((e) => e.type === 'match_end');
+    assert.strictEqual(evt[0].endSource, 'summary_type6', 'the match_end EVENT says how the end was inferred');
+    assert.deepStrictEqual(evt[0].exitCodesSeen, ['01'], 'and carries the exit codes for the recordings');
+  }
+
+  // (1f) MIXED exit codes inside one and the same closing summary. Nothing in
+  //      the rule may depend on them agreeing.
+  {
+    const { eng } = startN(3);
+    eng.processLogLine('6 300000 @1 01 4200');
+    eng.processLogLine('6 300000 @2 02 3100');
+    assert.strictEqual(eng._endBlockAt, null, 'two of three: still incomplete');
+    eng.processLogLine('6 300000 @3 17 2900');       // ref-kick in the same block
+    assert.ok(eng._endBlockAt != null, 'mixed 01/02/17 are recognised as one summary');
+    assert.strictEqual(eng.checkMatchEnd(eng._endBlockAt + 10000), 'watchdog', 'and it ends after the grace period');
+    assert.deepStrictEqual(eng.snapshot().exitCodesSeen, ['01', '02', '17'], 'every distinct code is recorded');
+    assert.strictEqual(eng.snapshot().exitCodes[3], '17', 'raw token, leading zero and all');
+  }
+
+  // (1g) a `0101` after a completed exit-01 summary still wins
+  {
+    const { eng, ends } = startN(3);
+    ['6 300000 @1 01 4200', '6 300000 @2 01 3100', '6 300000 @3 01 2900'].forEach((l) => eng.processLogLine(l));
+    eng.processLogLine('4 300100 0101');
+    const s = eng.snapshot();
+    assert.strictEqual(s.endReason, 'mission_end', '0101 wins over the recognised summary');
+    assert.strictEqual(s.endSource, '0101', 'and says so');
+    assert.strictEqual(ends.length, 1, 'exactly one match_end');
+    assert.deepStrictEqual(s.exitCodesSeen, ['01'], 'the exit codes survive into the ended state');
+  }
+
+  // (1h) ...and a game event after a completed exit-01 summary discards it
+  {
+    const { eng, t0 } = startN(3);
+    ['6 300000 @1 01 4200', '6 300000 @2 01 3100', '6 300000 @3 01 2900'].forEach((l) => eng.processLogLine(l));
+    assert.ok(eng._endBlockAt != null, 'armed');
+    eng.processLogLine('4 310000 1101 @3');          // evidently still being played
+    assert.strictEqual(eng._endBlockAt, null, 'the deadline is discarded');
+    assert.strictEqual(eng.checkMatchEnd(t0 + 60000), null, 'and nothing ends');
+    assert.strictEqual(eng.snapshot().missionActive, true, 'the match runs on');
+    eng.processLogLine('5 320000 0 0 1 1');          // a score line does it too
+    assert.strictEqual(eng._endBlockAt, null, 'a score line keeps it discarded');
+  }
+
+  // (1i) the minimum of two entities is GONE — a one-player match is rare but
+  //      possible, and there the old rule could never fire at all. With a
+  //      single entity both readings of its type-6 agree: nobody is left.
+  {
+    const { eng } = startN(1);
+    assert.strictEqual(Object.keys(eng.snapshot().players).length, 1, 'a single-player match');
+    eng.processLogLine('6 300000 @1 01 4200');
+    assert.ok(eng._endBlockAt != null, 'the only entity reporting IS the complete summary');
+    assert.strictEqual(eng.snapshot().missionActive, true, 'still only a deadline, not an end');
+    assert.strictEqual(eng.checkMatchEnd(eng._endBlockAt + 10000), 'watchdog', 'which then runs out');
+  }
+
+  // (1j) a type-6 from an entity that is not a player of this match is ignored
+  {
+    const { eng } = startN(2);
+    eng.processLogLine('6 300000 @1 01 4200');
+    eng.processLogLine('6 300000 @99 01 0');         // a target / neutral entity
+    assert.strictEqual(eng._endBlockAt, null, 'a stranger does not complete the summary');
+    assert.strictEqual(eng.snapshot().exitCodes['99'], undefined, 'and is not recorded either');
+    eng.processLogLine('6 300000 @2 01 3100');
+    assert.ok(eng._endBlockAt != null, 'the real second player does');
   }
 
   // (2) THE OTHER CASE THAT MUST NOT HAPPEN: quiet stretches below the
@@ -1195,6 +1311,7 @@ try {
     const s = eng.snapshot();
     assert.strictEqual(s.missionActive, false, 'watchdog: mission is over');
     assert.strictEqual(s.endReason, 'watchdog', 'watchdog: endReason');
+    assert.strictEqual(s.endSource, 'silence', 'watchdog: endSource tells it apart from a recognised summary');
     assert.ok(typeof s.endedAt === 'number' && s.endedAt > 0, 'watchdog: endedAt is a timestamp');
     assert.strictEqual(ends.length, 1, 'exactly one match_end');
     assert.strictEqual(ends[0].reason, 'watchdog', 'match_end carries the reason');
@@ -1243,6 +1360,7 @@ try {
     eng.processLogLine('7 @1 Anna 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0');
     assert.strictEqual(eng.checkMatchEnd(t0 + 9999), null, 'type 7 only arms the deadline');
     assert.strictEqual(eng.checkMatchEnd(t0 + 10000), 'watchdog', 'type 7 ends the match after the grace period');
+    assert.strictEqual(eng.snapshot().endSource, 'summary_type7', 'and the source names the type-7 block');
 
     const again = start();
     again.eng.processLogLine('7 @1 Anna 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0');
@@ -1265,6 +1383,7 @@ try {
     assert.strictEqual(eng.checkMatchEnd(t0 + 70999), null, 'still inside the grace period');
     assert.strictEqual(eng.checkMatchEnd(t0 + 71000), 'stream_lost', 'gone for good -> stream_lost');
     assert.strictEqual(eng.snapshot().endReason, 'stream_lost', 'endReason: stream_lost');
+    assert.strictEqual(eng.snapshot().endSource, 'stream_lost', 'endSource: stream_lost');
     // an incoming line also proves the stream is alive
     const b = start();
     b.eng.noteStreamLost(b.t0);
@@ -1278,10 +1397,12 @@ try {
     eng.processLogLine('4 0 0100');
     assert.strictEqual(ends.length, 1, 'the abandoned match is ended exactly once');
     assert.strictEqual(ends[0].reason, 'next_match', 'reason: next_match');
+    assert.strictEqual(ends[0].endSource, 'next_match', 'the match_end payload carries the source too');
     const s = eng.snapshot();
     assert.strictEqual(s.missionActive, true, 'the NEW match is running');
     assert.strictEqual(s.endReason, null, 'and carries no end reason');
     assert.strictEqual(s.endedAt, null, 'nor an end timestamp');
+    assert.strictEqual(s.endSource, null, 'nor an end source');
   }
 
   // (9) shutdown
@@ -1292,6 +1413,7 @@ try {
     assert.strictEqual(eng.snapshot().missionActive, false, 'mission over');
     assert.strictEqual(eng.endMatch('shutdown'), false, 'a second call ends nothing');
     assert.strictEqual(eng.snapshot().endReason, 'shutdown', 'and does not overwrite the reason');
+    assert.strictEqual(eng.snapshot().endSource, 'shutdown', 'endSource: shutdown');
   }
 
   // (10) every path can be switched off (0 = aus)
@@ -1303,8 +1425,12 @@ try {
     eng.processLogLine('7 @1 Anna 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0');
     assert.strictEqual(eng.checkMatchEnd(t0 + 86400000), null, 'all three paths off: nothing ever ends the match');
     assert.strictEqual(eng.snapshot().missionActive, true, 'still running after a day');
+    // the exit codes are a DIAGNOSTIC — they are recorded even when the path
+    // that would act on them is switched off
+    assert.deepStrictEqual(eng.snapshot().exitCodesSeen, ['02'], 'exit codes are recorded regardless');
     eng.processLogLine('4 900000 0101');
     assert.strictEqual(eng.snapshot().endReason, 'mission_end', 'the rig itself still ends it');
+    assert.strictEqual(eng.snapshot().endSource, '0101', 'and names itself as the source');
   }
 
   // (11) config -> engine: seconds in, milliseconds out, and the clamps hold
@@ -1317,6 +1443,11 @@ try {
     assert.strictEqual(normalize({ matchEnd: { watchdogSeconds: 999999 } }).matchEnd.watchdogSeconds, 86400, 'upper clamp');
     assert.strictEqual(normalize({ matchEnd: { watchdogSeconds: 'quatsch' } }).matchEnd.watchdogSeconds, 120, 'garbage falls back to the default');
     assert.deepStrictEqual(END_REASONS, ['mission_end', 'watchdog', 'stream_lost', 'next_match', 'shutdown'], 'the endReason contract');
+    assert.deepStrictEqual(
+      END_SOURCES,
+      ['0101', 'summary_type6', 'summary_type7', 'silence', 'stream_lost', 'next_match', 'shutdown'],
+      'the endSource contract',
+    );
   }
   console.log('  ok    engine.matchEnd');
 } catch (err) { failed++; console.error(`  FAIL  engine.matchEnd\n        ${err.stack}`); }

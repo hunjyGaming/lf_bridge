@@ -55,6 +55,16 @@ const { describe } = require('./eventCatalog');
  *   append per second is nothing next to the per-line work the engine does
  *   anyway.
  *
+ * THE LIVE TAP (console section "Rohdaten")
+ *   Besides recording, the console can WATCH the incoming lines as they arrive.
+ *   That view must work whether or not a recording is running, so the tap sits
+ *   in front of the `enabled` check and keeps a line buffer of its own — the
+ *   recorder's framing must stay byte-exact and is never shared with it.
+ *   With nobody watching, `setTap(null)` is in force and the whole path is one
+ *   null check per chunk. The tap hands out WHOLE LINES in batches, never one
+ *   message per line: at fifty-plus players the line rate is high enough that
+ *   per-line delivery measurably costs more than the work itself.
+ *
  * PRIVACY: a recording contains player names and the globally unique Laserforce
  * member ids (`#…`). Operators send these files elsewhere — the console says so
  * at the switch, and so does docs/CAPTURE.md.
@@ -75,6 +85,10 @@ const LINGER_MS = 5000;
 const MAX_PARTIAL = 1 << 20;
 /** Consecutive write failures after which the recorder gives up for good. */
 const MAX_ERRORS = 5;
+/** Never hand the live tap more than this many lines out of a single chunk. */
+const TAP_MAX_LINES = 2000;
+/** Longest single line the live tap forwards; the rest is marked and dropped. */
+const TAP_MAX_LINE = 4096;
 /** Upper bound for "everything as one file" — beyond it, download singly. */
 const BUNDLE_MAX_BYTES = 64 * 1024 * 1024;
 
@@ -96,6 +110,8 @@ class Capture {
     this._held = [];           // `;`/blank lines waiting for the next mission
     this._heldBytes = 0;
     this._lastName = null;
+    this._tap = null;          // live viewer callback, or null while nobody looks
+    this._tapRest = null;      // the tap's own trailing partial line
     this._onExit = () => { try { this.shutdown(); } catch { /* last resort */ } };
     process.on('exit', this._onExit);
   }
@@ -118,6 +134,12 @@ class Capture {
    * off: one config read and a boolean.
    */
   onData(chunk) {
+    // Live view first, and independent of the recording: the operator watches
+    // what the arena sends whether or not anything is being written to disk.
+    if (this._tap && chunk && chunk.length) {
+      try { this._tapFrame(chunk); }
+      catch { this._tapRest = null; }   // a broken tap never touches the stream
+    }
     if (!this.enabled) {
       if (this._m) this._close('umschalter');
       this._rest = null;
@@ -132,8 +154,49 @@ class Capture {
     catch (err) { this._fail(err); }
   }
 
+  // ---- live tap (console "Rohdaten" section) --------------------------------
+
+  /**
+   * Register (or clear with `null`) the live viewer. `fn` is handed an ARRAY of
+   * whole lines per incoming chunk — never one call per line. Only one watcher
+   * exists (the API server fans out to its WebSocket clients), so this is a
+   * single slot rather than a listener list.
+   */
+  setTap(fn) {
+    this._tap = typeof fn === 'function' ? fn : null;
+    this._tapRest = null;
+    return this;
+  }
+  /** Is anybody watching? The API server asks before it queues anything. */
+  get tapped() { return !!this._tap; }
+
+  /**
+   * Line framing for the tap. Deliberately separate from _frame(): the recorder
+   * keeps terminators to stay byte-exact, the viewer wants readable lines. A
+   * peer that never sends a newline cannot grow this buffer without end either.
+   */
+  _tapFrame(chunk) {
+    let buf = this._tapRest ? Buffer.concat([this._tapRest, chunk]) : chunk;
+    this._tapRest = null;
+    const out = [];
+    let start = 0;
+    for (;;) {
+      const i = buf.indexOf(LF, start);
+      if (i < 0) break;
+      if (out.length < TAP_MAX_LINES) out.push(tapLine(buf.subarray(start, i)));
+      start = i + 1;
+    }
+    if (start < buf.length) {
+      const rest = buf.subarray(start);
+      if (rest.length >= MAX_PARTIAL) { if (out.length < TAP_MAX_LINES) out.push(tapLine(rest)); }
+      else this._tapRest = Buffer.from(rest);
+    }
+    if (out.length) this._tap(out);
+  }
+
   /** The Laserforce socket went away — whatever was open ends here. */
   onStreamEnd() {
+    this._tapRest = null;
     if (this._rest && this._m) { try { this._append(this._rest); } catch { /* best effort */ } }
     this._rest = null;
     this._held = []; this._heldBytes = 0;   // a reconnect resends its own header
@@ -755,6 +818,17 @@ function zipOf(files) {
 // ---------------------------------------------------------------------------
 // small helpers
 // ---------------------------------------------------------------------------
+
+/**
+ * One line for the live view: `\r` off the end, over-long lines cut with a
+ * visible marker. The bytes are otherwise untouched — the console prints them
+ * through textContent only, so whatever the feed sends stays inert there.
+ */
+function tapLine(raw) {
+  const cut = raw.length > TAP_MAX_LINE;
+  const s = (cut ? raw.subarray(0, TAP_MAX_LINE) : raw).toString('utf8').replace(/\r$/, '');
+  return cut ? `${s} …[abgeschnitten, ${raw.length} Bytes]` : s;
+}
 
 function num(v, d) { const n = parseInt(v, 10); return Number.isFinite(n) ? n : d; }
 function shortId() { return (Date.now().toString(36).slice(-3) + Math.random().toString(36).slice(2, 5)).toLowerCase(); }

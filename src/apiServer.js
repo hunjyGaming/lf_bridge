@@ -58,6 +58,22 @@ const SECRET_MASK = '••••••';
 const WS_PING_MS = 30000;
 const SESSION_COOKIE = 'lf_sess';
 
+// Live raw-line view (console section "Rohdaten", docs/CAPTURE.md).
+//
+// The lines are BUNDLED, never one WebSocket frame per line: at fifty-plus
+// players the line rate runs into the hundreds per second, and a measurement
+// showed that the per-message cost then dominates everything else the console
+// does. One frame every RAW_BATCH_MS carries whatever arrived in between; a
+// burst that reaches RAW_BATCH_LINES is sent straight away so the view stays
+// live. Beyond RAW_QUEUE_MAX lines the queue drops — the console is told how
+// many, rather than the service growing a buffer for a viewer that cannot keep
+// up. Nothing is queued at all while no console has the section open.
+const RAW_BATCH_MS = 250;
+const RAW_BATCH_LINES = 400;
+const RAW_QUEUE_MAX = 4000;
+/** Longest control frame a console may send us; anything larger is dropped unparsed. */
+const WS_MSG_MAX = 256;
+
 // File-backed event-log endpoints (docs/LOGGING.md). Only files whose name looks
 // like an event-log file are ever listed or streamed.
 const EVENTLOG_RE = /^events[A-Za-z0-9._-]*\.log$/;
@@ -126,6 +142,9 @@ class ApiServer {
     this.stateDirty = false;
     this._reaper = null;
     this._rate = new Map();
+    this._rawQueue = [];       // live raw lines waiting for the next bundle
+    this._rawDropped = 0;      // lines thrown away because the queue was full
+    this._rawTimer = null;     // runs only while somebody watches
     this.sessions = new SessionStore({ ttlMs: (config.data.admin?.sessionHours || 12) * 3600000 });
     this.guard = new LoginGuard({
       maxFails: config.data.admin?.maxFailedLogins || 8,
@@ -187,6 +206,7 @@ class ApiServer {
 
   stop() {
     this._stopReaper();
+    this._stopRawTap();
     for (const ws of this.clients) { try { ws.close(1001); } catch {} }
     this.clients.clear();
     if (this.wss) { try { this.wss.close(); } catch {} this.wss = null; }
@@ -460,6 +480,48 @@ class ApiServer {
     this.log.warn('audit', `admin password changed by ${ip} — all other sessions invalidated`);
     return this._json(res, 200, { data: { ok: true } });
   }
+  /**
+   * Second factor for a destructive action (deleting statistics, resetting them,
+   * wiping all recordings): the admin password, TYPED AGAIN, even inside a valid
+   * session. A confirmation box in the browser proves nothing — whoever walks up
+   * to an unlocked console has one.
+   *
+   * Checked here, server-side, against the same scrypt hash the login uses
+   * (src/auth.js verifyPassword) and behind the same per-IP LoginGuard, so this
+   * route cannot be used to guess the password any faster than /api/auth/login.
+   * A wrong attempt costs the same deliberate 400 ms.
+   *
+   * Returns true when the caller may proceed. On false the response is already
+   * written and the caller must return at once.
+   */
+  async _passwordOk(res, body, ip, what) {
+    const hash = this.cfg.admin?.passwordHash || '';
+    if (!hash) {
+      // No admin password on this installation (token-only, or a closed network
+      // with the admin area switched off). There is nothing to verify against,
+      // so the action stays behind the normal gate — and is said out loud.
+      this.log.warn('audit', `${what} von ${ip} ohne Passwortbestätigung — für diese Installation ist kein Admin-Passwort gesetzt`);
+      return true;
+    }
+    const locked = this.guard.lockedFor(ip);
+    if (locked > 0) {
+      res.setHeader('Retry-After', String(Math.ceil(locked / 1000)));
+      this._json(res, 429, { error: 'locked_out', retryAfterMs: locked });
+      return false;
+    }
+    const ok = await verifyPassword(String(body?.password ?? ''), hash);
+    if (!ok) {
+      const e = this.guard.fail(ip);
+      this.log.warn('audit', `${what} von ${ip} ABGELEHNT — falsches Passwort (Versuch ${e.fails})`);
+      await new Promise((r) => setTimeout(r, 400));
+      const left = this.guard.lockedFor(ip);
+      this._json(res, 401, { error: 'bad_password', retryAfterMs: left || undefined });
+      return false;
+    }
+    this.guard.succeed(ip);
+    return true;
+  }
+
   /**
    * CSRF gate for mutating requests that bring no token. A browser either marks
    * the request same-origin itself, or it is our console (which sets X-LF-Console).
@@ -744,13 +806,19 @@ class ApiServer {
       const name = url.searchParams.get('name') || '';
       const buf = this.capture.readFile(name);
       if (!buf) return this._json(res, 404, { error: 'not_found' });
-      res.writeHead(200, {
+      // `inline=1` is what the console's reader view asks for: same bytes, same
+      // path handling, only without the attachment disposition — so the file can
+      // be READ instead of landing in the download folder. It stays text/plain
+      // with nosniff, so a browser never renders it as anything but text.
+      const inline = url.searchParams.get('inline') === '1';
+      const head = {
         'Content-Type': 'text/plain; charset=utf-8',
-        'Content-Disposition': `attachment; filename="${path.basename(name).replace(/[^a-zA-Z0-9._-]/g, '_')}"`,
         'Content-Length': buf.length,
         'Cache-Control': 'no-store',
         'X-Content-Type-Options': 'nosniff',
-      });
+      };
+      if (!inline) head['Content-Disposition'] = `attachment; filename="${path.basename(name).replace(/[^a-zA-Z0-9._-]/g, '_')}"`;
+      res.writeHead(200, head);
       return res.end(buf);
     }
     if (p === '/api/capture/bundle') {
@@ -768,6 +836,9 @@ class ApiServer {
       return res.end(b.buffer);
     }
     if (p === '/api/stats/files') return this._json(res, 200, { data: this.stats.listFiles() });
+    // What a reset would delete, in the operator's words. Read-only on purpose:
+    // the console shows this sentence BEFORE it asks for the password.
+    if (p === '/api/stats/reset/plan') return this._json(res, 200, { data: this.stats.resetPlan() });
     if (p === '/api/stats/file') {
       const name = url.searchParams.get('name') || '';
       const buf = this.stats.readFile(name);
@@ -906,6 +977,9 @@ class ApiServer {
     if (p === '/api/capture/delete') {
       if (!this.capture) return this._json(res, 404, { error: 'not_found' });
       if (body && body.all === true) {
+        // Wiping the whole folder is the one capture action that cannot be
+        // undone and cannot be repeated — it needs the password again.
+        if (!await this._passwordOk(res, body, ip, 'alle Mitschnitte löschen')) return;
         const r = this.capture.deleteAll();
         this.log.warn('audit', `capture: alle Mitschnitte gelöscht von ${ip} (${r.deleted} Dateien)`);
         return this._json(res, 200, { data: { ...r, files: this.capture.listFiles() } });
@@ -914,6 +988,23 @@ class ApiServer {
       if (!r.ok) return this._json(res, r.error === 'not_found' ? 404 : 400, { error: r.error });
       this.log.warn('audit', `capture: Mitschnitt gelöscht von ${ip}: ${String(body?.name ?? '').slice(0, 120)}`);
       return this._json(res, 200, { data: { ...r, files: this.capture.listFiles() } });
+    }
+    // Deleting or resetting the CSV statistics. Both need the admin password
+    // typed again (_passwordOk), both are audited, and the reset clears the
+    // writer's in-memory aggregates as well — see StatsWriter.forgetAll().
+    if (p === '/api/stats/delete') {
+      const name = String(body?.name ?? '');
+      if (!await this._passwordOk(res, body, ip, `Statistik-Datei löschen (${name.slice(0, 120)})`)) return;
+      const r = this.stats.deleteFile(name);
+      if (!r.ok) return this._json(res, r.error === 'not_found' ? 404 : 400, { error: r.error, hint: r.hint });
+      this.log.warn('audit', `stats: Datei gelöscht von ${ip}: ${name.slice(0, 120)}`);
+      return this._json(res, 200, { data: { ...r, files: this.stats.listFiles(), plan: this.stats.resetPlan() } });
+    }
+    if (p === '/api/stats/reset') {
+      if (!await this._passwordOk(res, body, ip, 'Statistik zurücksetzen')) return;
+      const r = this.stats.resetAll();
+      this.log.warn('audit', `stats: zurückgesetzt von ${ip} — ${r.deleted} Dateien gelöscht, Gesamtwertungen und Modus-Historie im Speicher geleert${r.failed.length ? `, ${r.failed.length} nicht löschbar` : ''}`);
+      return this._json(res, 200, { data: { ...r, files: this.stats.listFiles(), plan: this.stats.resetPlan() } });
     }
     if (p === '/api/notify/test') {
       if (!this.notifier) return this._json(res, 200, { data: { sent: [], configured: [] } });
@@ -949,15 +1040,88 @@ class ApiServer {
     this.log.info('ws', `client connected (${this.clientCount})`);
     ws.isAlive = true;
     ws.on('pong', () => { ws.isAlive = true; });
-    ws.on('message', () => {});
+    ws.rawTap = false;
+    ws.on('message', (data, isBinary) => this._onWsMessage(ws, data, isBinary));
     ws.on('error', () => {});
-    ws.on('close', () => { this.clients.delete(ws); this.log.info('ws', `client disconnected (${this.clientCount})`); });
+    ws.on('close', () => {
+      this.clients.delete(ws);
+      if (ws.rawTap) { ws.rawTap = false; this._syncRawTap(); }
+      this.log.info('ws', `client disconnected (${this.clientCount})`);
+    });
 
     // Immediate opener so a fresh client has state before the next shared tick.
     this._safe(ws, { type: 'hello', service: 'lf-live', ts: Date.now() });
     this._safe(ws, { type: 'state', data: this.engine.snapshot() });
   }
   _safe(ws, obj) { if (ws.readyState === ws.OPEN) { try { ws.send(JSON.stringify(obj)); } catch {} } }
+
+  // ---- live raw lines (console section "Rohdaten") ----
+  /**
+   * The only thing a console ever sends us: `{"type":"rawtap","on":true|false}`
+   * — "I have the raw section open" / "I closed it". Everything else is ignored,
+   * and a frame over WS_MSG_MAX bytes is dropped without even being parsed.
+   */
+  _onWsMessage(ws, data, isBinary) {
+    if (isBinary) return;
+    let s;
+    try { s = String(data); } catch { return; }
+    if (!s || s.length > WS_MSG_MAX) return;
+    let m;
+    try { m = JSON.parse(s); } catch { return; }
+    if (!m || m.type !== 'rawtap') return;
+    const on = m.on === true;
+    if (!!ws.rawTap === on) return;
+    ws.rawTap = on;
+    this._syncRawTap();
+  }
+
+  /**
+   * Hang the capture tap in exactly while at least one console is looking, and
+   * take it out again the moment the last one closes the section. With nobody
+   * watching, the TCP path does not frame a single line for us and no timer
+   * runs — the live view costs nothing when it is not on screen.
+   */
+  _syncRawTap() {
+    let want = 0;
+    for (const ws of this.clients) if (ws.rawTap && ws.readyState === ws.OPEN) want++;
+    if (!this.capture) return;
+    if (want > 0 && !this.capture.tapped) {
+      this.capture.setTap((lines) => this._queueRaw(lines));
+      this._rawTimer = setInterval(() => this._flushRaw(), RAW_BATCH_MS);
+      this._rawTimer.unref?.();
+      this.log.info('ws', 'Rohdaten-Ansicht: ein Betrachter — Live-Zeilen werden gebündelt gesendet');
+    } else if (want === 0 && this.capture.tapped) {
+      this._stopRawTap();
+      this.log.info('ws', 'Rohdaten-Ansicht: niemand schaut mehr hin — Live-Zeilen aus');
+    }
+  }
+
+  _stopRawTap() {
+    if (this.capture && this.capture.tapped) { try { this.capture.setTap(null); } catch {} }
+    if (this._rawTimer) { clearInterval(this._rawTimer); this._rawTimer = null; }
+    this._rawQueue.length = 0;
+    this._rawDropped = 0;
+  }
+
+  /** Collect what the tap handed us; a long burst goes out without waiting. */
+  _queueRaw(lines) {
+    for (const l of lines) {
+      if (this._rawQueue.length >= RAW_QUEUE_MAX) { this._rawDropped++; continue; }
+      this._rawQueue.push(l);
+    }
+    if (this._rawQueue.length >= RAW_BATCH_LINES) this._flushRaw();
+  }
+
+  /** One frame with everything that arrived since the last one. */
+  _flushRaw() {
+    if (!this._rawQueue.length && !this._rawDropped) return;
+    const payload = JSON.stringify({ type: 'raw', lines: this._rawQueue, dropped: this._rawDropped, ts: Date.now() });
+    this._rawQueue = [];
+    this._rawDropped = 0;
+    for (const ws of this.clients) {
+      if (ws.rawTap && ws.readyState === ws.OPEN) { try { ws.send(payload); } catch {} }
+    }
+  }
 
   markDirty() { this.stateDirty = true; }
   /**

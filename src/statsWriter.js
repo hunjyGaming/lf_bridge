@@ -48,6 +48,20 @@ const FAMILY_LIST = [FAMILIES.LASERBALL, FAMILIES.SM5];
 
 /** Legacy file written before mode awareness — read-only, for migration. */
 const LEGACY_ALL_PLAYERS = 'all_players.csv';
+/**
+ * How a reset names what it is about to delete. The operator confirms with his
+ * password, so he must be able to read beforehand what goes — in his words, not
+ * in file names. Order matters: the first matching entry wins, and the last one
+ * is the catch-all for anything else that ended up in the folder.
+ */
+const RESET_GROUPS = [
+  { key: 'matches', label: 'Einzelmatches (Ordner matches/)', match: (n) => n.startsWith('matches/') },
+  { key: 'overview', label: 'Missionsübersicht (matches.csv)', match: (n) => n === 'matches.csv' },
+  { key: 'modes', label: 'Modus-Historie (player_modes.csv)', match: (n) => n === 'player_modes.csv' },
+  { key: 'totals', label: 'Gesamtwertungen (totals_*, all_players_*)', match: (n) => /^(totals|all_players)(_[A-Za-z0-9]+)?\.csv$/.test(n) },
+  { key: 'other', label: 'Sonstige CSV-Dateien im Ordner', match: () => true },
+];
+
 /** Mode bucket the pre-mode Laserball history is filed under in player_modes.csv. */
 const LEGACY_MODE = { key: 'laserball_legacy', label: 'Laserball (Altbestand)', number: null, family: FAMILIES.LASERBALL };
 
@@ -98,6 +112,8 @@ const MATCH_COLS = [
   'match_id', 'date', 'started_at', 'ended_at', 'duration_s',
   'mode_key', 'mode_label', 'mode_number', 'family', 'profile',
   'players', 'teams', 'scores', 'winner_team', 'winner_score', 'score_source', 'events',
+  // Appended, never inserted: existing consumers read these files by position.
+  'exit_codes', 'end_source',
 ];
 
 /** "Which player played which mode, and when" — the mode history per player. */
@@ -443,6 +459,10 @@ class StatsWriter {
       winner_score: entries.length ? Math.max(...entries.map((e) => e.score)) : '',
       score_source: state.scoreSource === 'tdf' ? 'tdf' : 'internal',
       events: m.events.length,
+      // Diagnostics for the match-end path (see docs/LASERFORCE.md): which type-6
+      // exit codes the arena actually sent, and what ended the match.
+      exit_codes: Array.isArray(state.exitCodesSeen) ? state.exitCodesSeen.join('|') : '',
+      end_source: state.endSource || '',
     };
     this._writeCsv(this.file('matches.csv'), MATCH_COLS, [row], true);
   }
@@ -710,6 +730,114 @@ class StatsWriter {
     const full = path.join(this.dir(), safeName);
     if (!full.startsWith(this.dir() + path.sep)) return null;
     try { return fs.readFileSync(full); } catch { return null; }
+  }
+
+  // ---- deleting and resetting (console -> Statistik, password confirmed) ----
+
+  /**
+   * Resolve a name to a path inside the stats folder, or null. Exactly the
+   * handling readFile() uses — backslashes normalised, `..` and absolute paths
+   * refused, resolved path must stay inside the folder — plus the rule that a
+   * deletable file is a `.csv` and nothing else.
+   */
+  _resolveCsv(name) {
+    const safeName = String(name == null ? '' : name).replace(/\\/g, '/');
+    if (!safeName || safeName.includes('..') || safeName.startsWith('/')) return null;
+    if (!/^[A-Za-z0-9._-]+(\/[A-Za-z0-9._-]+)*\.csv$/.test(safeName)) return null;
+    const full = path.join(this.dir(), safeName);
+    if (!full.startsWith(this.dir() + path.sep)) return null;
+    return full;
+  }
+
+  /**
+   * Files inside the stats folder that a delete must never touch. Normally
+   * empty: the name list an operator maintains lives in data/roster.csv. But
+   * nothing stops him from pointing localRoster.file into the stats folder, and
+   * a "reset the statistics" must not eat his player names.
+   */
+  _protected() {
+    const out = new Set();
+    try {
+      const r = this.getConfig().localRoster;
+      if (r && r.file) out.add(path.resolve(process.cwd(), String(r.file)));
+    } catch { /* no roster configured */ }
+    return out;
+  }
+
+  /**
+   * What a reset would delete, grouped the way the console names it to the
+   * operator. Nothing is deleted here — this is the sentence he reads BEFORE
+   * he confirms with his password.
+   */
+  resetPlan() {
+    const skip = this._protected();
+    const groups = RESET_GROUPS.map((g) => ({ key: g.key, label: g.label, files: 0, bytes: 0 }));
+    let files = 0, bytes = 0;
+    for (const f of this.listFiles()) {
+      if (skip.has(path.resolve(this.dir(), f.name))) continue;
+      const i = RESET_GROUPS.findIndex((g) => g.match(f.name));
+      groups[i < 0 ? groups.length - 1 : i].files++;
+      groups[i < 0 ? groups.length - 1 : i].bytes += f.size;
+      files++; bytes += f.size;
+    }
+    return { dir: this.dir(), files, bytes, groups };
+  }
+
+  /** Delete ONE stats file. The in-memory aggregates follow along. */
+  deleteFile(name) {
+    const full = this._resolveCsv(name);
+    if (!full) return { ok: false, error: 'bad_name' };
+    if (this._protected().has(path.resolve(full))) return { ok: false, error: 'protected' };
+    if (!fs.existsSync(full)) return { ok: false, error: 'not_found' };
+    try { fs.unlinkSync(full); } catch (err) { return { ok: false, error: 'io', hint: err.message }; }
+    this._forget(path.basename(full));
+    return { ok: true, deleted: 1 };
+  }
+
+  /** Delete every stats file and clear the aggregates that feed them. */
+  resetAll() {
+    const plan = this.resetPlan();
+    const skip = this._protected();
+    let deleted = 0;
+    const failed = [];
+    for (const f of this.listFiles()) {
+      const full = path.join(this.dir(), f.name);
+      if (skip.has(path.resolve(full))) continue;
+      try { fs.unlinkSync(full); deleted++; } catch { failed.push(f.name); }
+    }
+    // the per-match folder is only interesting with files in it
+    try { fs.rmdirSync(path.join(this.dir(), 'matches')); } catch { /* not empty or not there */ }
+    this.forgetAll();
+    return { ok: true, deleted, failed, plan };
+  }
+
+  /**
+   * Drop every aggregate held in memory.
+   *
+   * WITHOUT THIS A RESET DOES NOTHING. The grand totals and the mode history do
+   * not live in the files — they live in `_totals` and `_playerModes` and are
+   * rewritten from memory at the end of every match (_writeTotals /
+   * _writePlayerModes). Delete the files alone and the very next mission end
+   * writes the old sums straight back.
+   */
+  forgetAll() {
+    this._totals.clear();
+    this._playerModes.clear();
+    this._lastFamily = null;
+    this._legacyPending = false;
+  }
+
+  /** Same reconciliation for a single deleted file. */
+  _forget(base) {
+    const fam = /^totals_([A-Za-z0-9]+)\.csv$/.exec(base);
+    if (fam) {
+      const f = normFamily(fam[1]);
+      this._totals.delete(f);
+      if (this._lastFamily === f) this._lastFamily = null;
+      if (f === FAMILIES.LASERBALL) this._legacyPending = false;
+    }
+    if (base === 'player_modes.csv') this._playerModes.clear();
+    if (base === 'totals.csv' || base === LEGACY_ALL_PLAYERS) this._legacyPending = false;
   }
 
   /** Families that actually have a totals file, newest first. */

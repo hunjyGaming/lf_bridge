@@ -408,6 +408,66 @@ sich deshalb eine Datei, und `profiles` nennt je Familie genau ein Profil. Die
 Spaltenbeschriftungen der Gesamtwertung stehen in `metrics` aus `/api/modes`.
 `/api/stats/files` listet alle neuen Dateien automatisch mit.
 
+### `GET /api/stats/reset/plan`
+
+Was ein Zurücksetzen löschen **würde** — ohne etwas zu löschen. Die Konsole
+zeigt das, bevor sie nach dem Passwort fragt.
+
+```jsonc
+{
+  "data": {
+    "dir": "C:\\lf-live\\data\\stats",
+    "files": 13, "bytes": 7082496,
+    "groups": [
+      { "key": "matches",  "label": "Einzelmatches (Ordner matches/)",        "files": 8, "bytes": 7077888 },
+      { "key": "overview", "label": "Missionsübersicht (matches.csv)",        "files": 1, "bytes": 843 },
+      { "key": "modes",    "label": "Modus-Historie (player_modes.csv)",      "files": 1, "bytes": 1113 },
+      { "key": "totals",   "label": "Gesamtwertungen (totals_*, all_players_*)", "files": 3, "bytes": 2652 },
+      { "key": "other",    "label": "Sonstige CSV-Dateien im Ordner",         "files": 0, "bytes": 0 }
+    ]
+  }
+}
+```
+
+### `POST /api/stats/delete` · `POST /api/stats/reset`
+
+Eine CSV-Datei löschen bzw. die ganze Statistik zurücksetzen.
+
+```jsonc
+POST /api/stats/delete   { "name": "totals_sm5.csv", "password": "…" }
+POST /api/stats/reset    { "password": "…" }
+```
+
+**Beide verlangen das Admin-Passwort, erneut getippt** — eine angemeldete
+Sitzung allein genügt nicht. Geprüft wird serverseitig gegen denselben
+scrypt-Hash wie `/api/auth/login`, hinter derselben Fehlversuchs-Bremse je IP
+(`401 bad_password`, bei zu vielen Versuchen `429 locked_out` mit
+`retryAfterMs`). Ein Fehlversuch führt **keine** Datei-Operation aus. Ist auf
+der Installation gar kein Passwort gesetzt (nur Token, oder Admin-Bereich aus),
+gibt es nichts zu prüfen; der Vorgang läuft hinter dem normalen Zugangsschutz
+und wird im Audit-Log ausdrücklich als „ohne Passwortbestätigung" vermerkt.
+
+`name` wird wie bei `/api/stats/file` behandelt (Backslashes normalisiert, `..`
+und absolute Pfade abgewiesen, der aufgelöste Pfad muss im Statistik-Ordner
+bleiben) und muss zusätzlich auf `.csv` enden — sonst `400 bad_name`. Eine als
+Namensliste konfigurierte `localRoster.file` im selben Ordner wird nie gelöscht
+(`400 protected`).
+
+> **`reset` leert auch den Arbeitsspeicher.** Gesamtwertungen und Modus-Historie
+> stehen nicht nur in den Dateien, sondern im Statistik-Schreiber
+> (`_totals` / `_playerModes`), und werden am Ende jedes Matches von dort neu
+> geschrieben. Ohne das Leeren schriebe das nächste Matchende die alten Summen
+> wieder hin. Beim Löschen **einer** Datei passiert dasselbe gezielt: eine
+> gelöschte `totals_<familie>.csv` nimmt die Summen dieser Familie mit, eine
+> gelöschte `player_modes.csv` die Modus-Historie. Siehe [STATS.md](STATS.md).
+
+Antwort in beiden Fällen mit der frischen Dateiliste und dem neuen Plan:
+
+```jsonc
+{ "data": { "ok": true, "deleted": 13, "failed": [],
+            "files": [ … ], "plan": { … } } }
+```
+
 ### `GET /api/capture/files` · `GET /api/capture/file?name=` · `GET /api/capture/bundle` · `POST /api/capture/delete`
 
 Die [Roh-Mitschnitte](CAPTURE.md) des TCP-Streams — Liste, einzelne Datei,
@@ -427,10 +487,17 @@ sein — `..`, Pfadtrenner oder absolute Pfade → `400`/`404`, genau wie bei
 `/api/stats/file`. `bundle` liefert `413`, wenn der Ordner die 64-MB-Grenze des
 im Speicher gebauten ZIPs überschreitet.
 
-`POST /api/capture/delete` nimmt `{"name":"…"}` oder `{"all":true}`; es ist ein
-schreibender Vorgang und braucht dieselbe Absicherung wie `/api/config`
-(Session/Token **und** `Sec-Fetch-Site: same-origin` bzw. `X-LF-Console: 1`).
-Eine gerade laufende Aufzeichnung wird nicht gelöscht (`400 recording`).
+`?inline=1` liefert dieselben Bytes **ohne** `Content-Disposition`, damit die
+Leseansicht der Konsole die Datei lesen kann, statt sie herunterzuladen. Typ und
+Pfadprüfung sind identisch (`text/plain` mit `X-Content-Type-Options: nosniff`).
+
+`POST /api/capture/delete` nimmt `{"name":"…"}` oder
+`{"all":true,"password":"…"}`; es ist ein schreibender Vorgang und braucht
+dieselbe Absicherung wie `/api/config` (Session/Token **und**
+`Sec-Fetch-Site: same-origin` bzw. `X-LF-Console: 1`). **`all` verlangt
+zusätzlich das Admin-Passwort**, genau wie `/api/stats/reset` — derselbe Hash,
+dieselbe Fehlversuchs-Bremse. Eine gerade laufende Aufzeichnung wird nicht
+gelöscht (`400 recording`).
 
 ### `GET /api/logs?limit=<n>`
 
@@ -466,16 +533,40 @@ ws://<hallen-pc>:8080/ws
 ws://<hallen-pc>:8080/ws?token=<token>      (falls Token gesetzt)
 ```
 
-Einweg-Stream (eingehende Nachrichten werden ignoriert):
+Was der Dienst schickt:
 
 ```jsonc
 { "type": "hello", "service": "lf-live", "ts": 1699999999999 }
 { "type": "state", "data": { …kompletter Snapshot… } }   // bei Verbindung + danach im Takt LF_STATE_TICK_MS (Default 200 ms ≈ 5/s), nur wenn sich etwas geändert hat
 { "type": "event", "data": { …ein Event… } }             // sofort pro Ereignis
+{ "type": "raw",   "lines": ["4\t1000\t1107\t#1001", …], "dropped": 0, "ts": … }
 ```
 
 Bei Verbindungsabbruch mit kurzem Backoff neu verbinden; nach dem Reconnect kommt
 zuerst wieder ein `state`.
+
+### Die eine Nachricht, die ein Client senden darf
+
+Bis auf **eine** werden eingehende Nachrichten ignoriert — alles über 256 Bytes
+wird verworfen, ohne überhaupt geparst zu werden.
+
+```jsonc
+{ "type": "rawtap", "on": true }    // "ich schaue auf die Rohzeilen"
+{ "type": "rawtap", "on": false }   // "ich schaue nicht mehr hin"
+```
+
+Erst danach kommen `raw`-Rahmen, und nur an die Clients, die sich gemeldet
+haben. **Ohne Anmeldung erzeugt der Dienst überhaupt keine Rohzeilen** — er
+zerlegt den TCP-Strom dafür nicht einmal in Zeilen. Beim Schließen der
+Verbindung meldet der Client sich automatisch ab; nach einem Reconnect muss er
+sich neu melden.
+
+Ein `raw`-Rahmen trägt **mehrere** Zeilen: einen je 250 ms, oder sofort ab 400
+angesammelten Zeilen. Ein Rahmen je Zeile wäre bei über fünfzig Spielern
+messbar teurer als die eigentliche Arbeit. `dropped` zählt die Zeilen, die der
+Dienst seit dem letzten Rahmen verworfen hat, weil mehr ankam als abfließen
+konnte (Grenze: 4000 wartende Zeilen). Einzelheiten in
+[CAPTURE.md](CAPTURE.md#live-rohdaten).
 
 ---
 
@@ -602,9 +693,9 @@ gilt als Vorlage (genau wie im Originalsystem).
 
 | Status | Bedeutung |
 |---|---|
-| `401` | Token fehlt oder falsch |
+| `401` | Token fehlt oder falsch; bei den passwortbestätigten Routen `{"error":"bad_password"}` |
 | `403` | mutierende Anfrage ohne Token und ohne `Sec-Fetch-Site: same-origin` / `X-LF-Console: 1` |
-| `429` | Rate-Limit erreicht (mit `Retry-After`) |
+| `429` | Rate-Limit erreicht, oder zu viele falsche Passwörter (`locked_out`, mit `Retry-After`) |
 | `404` | unbekannte Route oder Datei |
-| `400` | ungültiges JSON im POST-Body |
+| `400` | ungültiges JSON im POST-Body, oder ein abgewiesener Dateiname (`bad_name`, `protected`) |
 | `500` | interner Fehler (wird geloggt) |

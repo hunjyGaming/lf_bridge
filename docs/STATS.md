@@ -25,6 +25,7 @@ Ordner (Standard): `data/stats/` neben dem Programm. Änderbar per `.env`
 - [In Excel öffnen](#in-excel-öffnen)
 - [Auswertung mit pandas (Beispiel)](#auswertung-mit-pandas-beispiel)
 - [Einstellungen (Konsole → Statistik)](#einstellungen-konsole--statistik)
+- [Löschen und Zurücksetzen](#löschen-und-zurücksetzen)
 - [API](#api)
 
 ---
@@ -552,6 +553,58 @@ m.groupby(["mode_key", "mode_label"]).size().sort_values(ascending=False)
 **Durch die Modus-Erkennung sind keine neuen Einstellungen dazugekommen.** Die
 Familien-Trennung passiert automatisch.
 
+---
+
+## Löschen und Zurücksetzen
+
+*Konsole → Statistik → Dateien*. Zwei Wege, beide mit **Passwortbestätigung**:
+
+| | |
+|---|---|
+| **Löschen** an einer Datei | nimmt genau diese Datei weg |
+| **Alles zurücksetzen…** | leert den ganzen Statistik-Ordner |
+
+**Jede dieser Aktionen verlangt das Admin-Passwort, erneut getippt** — eine
+angemeldete Sitzung genügt nicht. Wer vor einer offenen Konsole steht, klickt
+eine bloße Ja/Nein-Rückfrage weg; ein Passwort nicht. Geprüft wird
+**serverseitig** gegen denselben scrypt-Hash wie die Anmeldung, hinter derselben
+Fehlversuchs-Bremse je IP ([SECURITY.md](SECURITY.md)). Ein falsches Passwort
+lässt den Dialog offen stehen und rührt **keine** Datei an; jeder Versuch steht
+im Audit-Log.
+
+Vor dem Zurücksetzen sagt die Konsole, **was genau** weggeht — mit Zahl und
+Umfang je Gruppe:
+
+```
+13 Dateien werden gelöscht (6916.5 kB in C:\lf-live\data\stats):
+  • Einzelmatches (Ordner matches/):            8 Dateien · 6911.2 kB
+  • Missionsübersicht (matches.csv):            1 Datei   ·    0.8 kB
+  • Modus-Historie (player_modes.csv):          1 Datei   ·    1.1 kB
+  • Gesamtwertungen (totals_*, all_players_*):  3 Dateien ·    2.7 kB
+```
+
+> **Warum das auch den Arbeitsspeicher leert — und leeren muss.**
+> Die Gesamtwertungen und die Modus-Historie stehen nicht nur in den Dateien.
+> Sie leben im Statistik-Schreiber (`_totals` und `_playerModes`, siehe
+> `src/statsWriter.js`) und werden am Ende **jedes** Matches von dort neu
+> geschrieben. Würden nur die Dateien gelöscht, schriebe das nächste Matchende
+> die alten Summen wortgleich wieder hin — das Zurücksetzen wäre wirkungslos.
+> Deshalb leert es beides zusammen.
+>
+> Beim Löschen einer **einzelnen** Datei passiert dasselbe gezielt: eine
+> gelöschte `totals_<familie>.csv` nimmt die Summen dieser Familie im Speicher
+> mit, eine gelöschte `player_modes.csv` die Modus-Historie. Die Konsole sagt
+> das im Bestätigungsdialog dazu.
+>
+> **Ein Sonderfall:** Bleibt `all_players_<familie>.csv` stehen, baut der Dienst
+> die Gesamtwertung beim **nächsten Neustart** daraus wieder auf — genau dafür
+> ist diese Datei da. Wer wirklich alles los sein will, nimmt „Alles
+> zurücksetzen".
+
+Eine als Namensliste eingerichtete `localRoster.file` wird nie gelöscht, auch
+wenn sie im Statistik-Ordner liegt. Läuft gerade ein Match, wird es davon nicht
+gestört — es endet normal und schreibt seine eigenen, neuen Zeilen.
+
 ## API
 
 - `GET /api/stats/totals` — Gesamtwertung als JSON. Liefert **eine** Familie:
@@ -561,6 +614,10 @@ Familien-Trennung passiert automatisch.
   `/api/stats/file?name=totals_sm5.csv`.
 - `GET /api/stats/files` — Liste aller CSV-Dateien, auch der neuen
 - `GET /api/stats/file?name=<pfad>` — eine Datei herunterladen
+- `GET /api/stats/reset/plan` — was ein Zurücksetzen löschen würde, nach Gruppen
+- `POST /api/stats/delete` — `{"name":"…","password":"…"}`
+- `POST /api/stats/reset` — `{"password":"…"}`, löscht die Dateien **und** leert
+  die Summen im Arbeitsspeicher
 
 Details und Auth: [API.md](API.md).
 

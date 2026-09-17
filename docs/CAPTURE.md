@@ -5,11 +5,14 @@ TCP-Datenstrom der Anlage **byteweise unverändert** mit, eine Datei je Spiel.
 Damit lässt sich ein Spiel andernorts exakt nachstellen — genau dafür ist es da.
 
 - [Datenschutz zuerst](#datenschutz-zuerst)
+- [Wo das in der Konsole steht](#wo-das-in-der-konsole-steht)
 - [Einschalten](#einschalten)
 - [Was entsteht](#was-entsteht)
 - [Der Begleitzettel](#der-begleitzettel)
 - [Grenzen — damit die Platte nicht vollläuft](#grenzen--damit-die-platte-nicht-vollläuft)
 - [Dateien aus der Konsole holen](#dateien-aus-der-konsole-holen)
+- [Im Browser ansehen](#im-browser-ansehen)
+- [Live-Rohdaten](#live-rohdaten)
 - [Zurückspielen](#zurückspielen)
 - [Wie eine Mission erkannt wird](#wie-eine-mission-erkannt-wird)
 - [API](#api)
@@ -29,6 +32,25 @@ Damit lässt sich ein Spiel andernorts exakt nachstellen — genau dafür ist es
 
 ---
 
+## Wo das in der Konsole steht
+
+Der Mitschnitt hat einen **eigenen Bereich** in der Konsole: oben in der
+Reiterleiste, zwischen *Statistik* und *Einstellungen*, der Reiter **Rohdaten**.
+Alles, was mit den Rohdaten zu tun hat, steht dort beieinander:
+
+| | |
+|---|---|
+| **Schalter** | ein/aus, mit Rückmeldung an Ort und Stelle — er wirkt **sofort**, ohne „Änderungen speichern" |
+| **Grenzen** | die drei Größenwerte, zusammengeklappt (sie gelten erst nach dem Speichern) |
+| **Leseansicht** | eine aufgezeichnete Datei im Browser lesen, mit Suche und Zeilentyp-Filter |
+| **Live-Rohdaten** | die eingehenden Zeilen, während sie ankommen |
+| **Mitschnitte** | die Dateiliste: ansehen, herunterladen, löschen, alles als ZIP |
+
+> Früher steckte das am Ende der Einstellungen. Es war da, nur nicht zu finden —
+> deshalb der eigene Reiter.
+
+---
+
 ## Einschalten
 
 **Standardmäßig aus.** Zwei Wege, beide ohne Neustart wirksam (der `.env`-Weg
@@ -36,7 +58,7 @@ erst beim nächsten Start, dafür in der Konsole schreibgeschützt):
 
 | Weg | wo |
 |---|---|
-| Web-Konsole | *Einstellungen → Roh-Mitschnitt (Diagnose)* — Haken setzen, unten „Änderungen speichern" |
+| Web-Konsole | *Rohdaten* — den Schalter oben umlegen; er greift sofort |
 | `.env` | `LF_CAPTURE_ENABLED=true` (siehe `.env.example`) |
 
 ```
@@ -146,19 +168,81 @@ nur einen Puffer in ein Array.
 
 ## Dateien aus der Konsole holen
 
-*Einstellungen → Roh-Mitschnitt (Diagnose) → Mitschnitte*: Liste mit Name,
-Größe, Zeitpunkt und Modus.
+*Rohdaten → Mitschnitte*: Liste mit Name, Größe, Zeitpunkt und Modus, neueste
+zuerst.
 
+- **Ansehen** öffnet die Rohzeilen im Browser — siehe unten.
 - **Herunterladen** je Datei.
 - **Alle als ZIP** — in Node eingebaut (`zlib`), keine zusätzliche Abhängigkeit.
   Ab 64 MB Gesamtumfang wird das Paket abgelehnt (es entsteht im Speicher);
   dann einzeln herunterladen.
-- **Löschen** einzeln oder alles, jeweils mit Rückfrage. Beim Löschen einer
-  `.tdf` geht der zugehörige Begleitzettel mit.
+- **Löschen** einzeln mit Rückfrage. Beim Löschen einer `.tdf` geht der
+  zugehörige Begleitzettel mit.
+- **Alle löschen** verlangt zusätzlich das **Admin-Passwort**, erneut getippt —
+  das ist der eine Knopf, der alles auf einmal wegnimmt. Geprüft wird
+  serverseitig gegen denselben Hash wie die Anmeldung, hinter derselben
+  Fehlversuchs-Bremse ([SECURITY.md](SECURITY.md)). Eine gerade laufende
+  Aufzeichnung bleibt stehen.
 
 Anmeldung, Token, CORS und Rate-Limit gelten unverändert wie für die
 CSV-Endpunkte; das Löschen ist ein schreibender Vorgang mit derselben
 CSRF-Absicherung wie jede andere Änderung und wird im Audit-Log vermerkt.
+
+---
+
+## Im Browser ansehen
+
+*Rohdaten → Mitschnitte → **Ansehen***. Die Datei wird geholt und gelesen — sie
+landet **nicht** im Download-Ordner.
+
+- **Zeilennummern** links, fest stehend beim seitlichen Rollen.
+- **Tabulatoren sichtbar** als `→`. An ihnen hängt die ganze Spaltenlogik des
+  TDF-Formats ([LASERFORCE.md](LASERFORCE.md)); wer sie nicht sieht, kann eine
+  Zeile nicht lesen. Abschaltbar über *Tabulatoren zeigen*.
+- **Suche** über den ganzen Dateiinhalt — Text, ein Ereigniscode wie `0100`, ein
+  Spielername. Klein-/Großschreibung egal.
+- **Zeilentyp-Filter**: die Typen, die in *dieser* Datei wirklich vorkommen, je
+  mit Anzahl (`Typ 4 · 8.601`), plus `;` für die Schema-Kommentare.
+- **Herunterladen** und **Schließen** oben rechts.
+
+> **Warum das auch bei 60 000 Zeilen flüssig bleibt.** Im DOM hängt immer nur
+> der sichtbare Ausschnitt — rund sechzig Zeilen. Ein Abstandhalter gibt dem
+> Bildlauf die volle Höhe (Zeilen × 18 px), der gezeichnete Block wird darin
+> verschoben, und beim Rollen wird höchstens einmal je Bild neu gezeichnet.
+> Gemessen an einer 60 012-Zeilen-Datei (1.8 MB): Neuzeichnen 21 ms, eine Suche
+> über die ganze Datei 67 ms — und die Suche ist zusätzlich um 150 ms verzögert,
+> damit Tippen nie ins Stocken gerät.
+
+Ab 24 MB fragt die Konsole vorher nach, denn zum Lesen wird die Datei ganz in
+den Browser geladen.
+
+---
+
+## Live-Rohdaten
+
+*Rohdaten → Live-Rohdaten*: was die Anlage **gerade** schickt, wie ein
+mitlaufendes Terminal — unabhängig davon, ob mitgeschnitten wird. Damit sieht
+man beim Testen sofort, was ankommt, statt auf das Missionsende zu warten.
+
+- **Anhalten / Fortsetzen.** Angehalten wird auch nichts mehr empfangen.
+- **Leeren** setzt Ansicht und Zähler zurück.
+- Im Speicher bleiben die **letzten 2000 Zeilen**; ältere fallen unten heraus.
+- Gezeigt werden Zeilennummer, Tabulatoren als `→`, Schema-Kommentare kursiv.
+
+**Was das den Dienst kostet — und wann gar nichts.** Die Zeilen gehen
+**gebündelt** über den vorhandenen WebSocket: eine Nachricht je 250 ms, oder
+sofort, sobald 400 Zeilen zusammengekommen sind. Einzelne Nachrichten je Zeile
+wären bei über fünfzig Spielern messbar teurer als die Arbeit selbst. Die
+Konsole sagt dem Dienst ausdrücklich Bescheid, ob sie hinschaut
+(`{"type":"rawtap","on":…}`); ist der Bereich **zu**, die Ansicht angehalten
+oder das Fenster im Hintergrund, wird **überhaupt nichts** erzeugt, gepuffert
+oder gesendet — der Mitschnitt zerlegt dann nicht einmal Zeilen dafür.
+
+Kommt mehr an, als abfließen kann, wirft der Dienst ab 4000 wartenden Zeilen
+weg und sagt der Konsole wie viele; sie schreibt es neben den Zähler
+(`… · 1.204 übersprungen`). Gezeichnet wird höchstens einmal je Bild und nie,
+solange das Fenster im Hintergrund ist — dieselbe Regel wie für den Live-Bereich
+([PERFORMANCE.md](PERFORMANCE.md)).
 
 ---
 
@@ -210,8 +294,14 @@ Begleitzettel geschrieben.
 |---|---|---|
 | `GET` | `/api/capture/files` | Liste (`name`, `size`, `mtime`, `kind`, `mode`) + `status` |
 | `GET` | `/api/capture/file?name=…` | eine Datei herunterladen |
+| `GET` | `/api/capture/file?name=…&inline=1` | dieselben Bytes **ohne** `Content-Disposition` — das holt die Leseansicht |
 | `GET` | `/api/capture/bundle` | alles als ZIP |
-| `POST` | `/api/capture/delete` | `{"name":"…"}` oder `{"all":true}` |
+| `POST` | `/api/capture/delete` | `{"name":"…"}`, oder `{"all":true,"password":"…"}` |
 
 `GET /api/status` führt den Mitschnitt zusätzlich unter `capture` mit
 (`enabled`, `recording`, `file`, `bytes`, `lines`, `disabledByError`).
+
+Über den WebSocket `/ws` (docs/API.md): die Konsole meldet mit
+`{"type":"rawtap","on":true}` an bzw. mit `false` ab, und bekommt daraufhin
+`{"type":"raw","lines":[…],"dropped":n,"ts":…}` — ein Rahmen je Bündel, nicht je
+Zeile. Ohne Anmeldung sendet der Dienst nichts.

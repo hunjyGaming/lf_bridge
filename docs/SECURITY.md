@@ -80,6 +80,41 @@ Login: Passwort ändern und die Datei löschen.
   Dann ist die Konsole für jeden im LAN offen — nur auf einem geschlossenen
   Testnetz sinnvoll. Der Dienst warnt beim Start darüber.
 
+## Passwort noch einmal — für löschende Eingriffe
+
+Drei Vorgänge nehmen Daten **unwiederbringlich** weg, und für die genügt eine
+angemeldete Sitzung ausdrücklich **nicht**:
+
+| Vorgang | wo |
+|---|---|
+| eine Statistik-Datei löschen | Konsole → Statistik → Dateien |
+| die Statistik zurücksetzen | Konsole → Statistik → *Alles zurücksetzen…* |
+| alle Roh-Mitschnitte löschen | Konsole → Rohdaten → *Alle löschen…* |
+
+Der Grund ist unspektakulär: eine Konsole in der Halle steht offen, während der
+Betrieb läuft. Wer davorsteht, hat die Sitzung — eine Ja/Nein-Rückfrage im
+Browser hält niemanden auf, und sie liegt ohnehin auf der Seite des Clients.
+
+Deshalb wird das Admin-Passwort **erneut getippt** und **serverseitig** geprüft
+(`_passwordOk` in `src/apiServer.js`):
+
+- gegen denselben scrypt-Hash wie `/api/auth/login` (`verifyPassword`,
+  zeitkonstant),
+- hinter **derselben** Fehlversuchs-Bremse je IP (`LoginGuard`) — ein
+  Fehlversuch zählt genauso wie am Login, und die Sperre gilt für beides. Diese
+  Routen sind also kein schnellerer Weg zum Durchprobieren,
+- mit derselben absichtlichen Verzögerung von 400 ms je Fehlversuch,
+- jeder Versuch, erfolgreich oder nicht, steht im Audit-Log mit IP und Vorgang.
+
+Ein falsches Passwort führt **keinen Teil** der Aktion aus: erst wird geprüft,
+dann gelöscht. Ist auf der Installation gar kein Passwort gesetzt (nur Token,
+oder Admin-Bereich abgeschaltet), gibt es nichts zu prüfen — der Vorgang läuft
+hinter dem normalen Zugangsschutz und das Audit-Log vermerkt ausdrücklich „ohne
+Passwortbestätigung".
+
+Das Zurücksetzen der Statistik leert außerdem die Summen im Arbeitsspeicher des
+Statistik-Schreibers, nicht nur die Dateien — siehe [STATS.md](STATS.md).
+
 ## Was sonst geschützt ist
 
 - **Zugriffs-Token** (`LF_API_TOKEN` / Konsole): wenn gesetzt, kommt man damit an
@@ -101,8 +136,9 @@ Login: Passwort ändern und die Datei löschen.
 - **Audit-Log**: jede angenommene Änderung an `/api/config`, jeder
   `/api/outputs/test`, jeder `/api/notify/test`, jeder **erfolgreiche und
   fehlgeschlagene Login**, die Ersteinrichtung, jede angeforderte
-  Wiederherstellung und jede Passwortänderung erzeugen eine `warn`-Zeile
-  (Scope `audit`) mit Client-IP — **nie** mit Werten von Secrets.
+  Wiederherstellung, jede Passwortänderung und jeder löschende Eingriff in
+  Statistik oder Mitschnitte (auch der **abgelehnte**) erzeugen eine
+  `warn`-Zeile (Scope `audit`) mit Client-IP — **nie** mit Werten von Secrets.
 - **CORS**: nur Origins aus `cors` bekommen `Access-Control-Allow-Origin`
   (Standard: **leer** = keine). Cross-Origin-Anfragen können **nur GET** sein
   (`Allow-Methods: GET, OPTIONS`). Die Konsole selbst ist same-origin und braucht
@@ -135,8 +171,21 @@ Login: Passwort ändern und die Datei löschen.
 - **Timeouts**: `requestTimeout` 15 s, `headersTimeout` 10 s, `keepAliveTimeout`
   5 s — hängende Verbindungen binden keine Ressourcen. Tote WebSocket-Clients
   werden per Ping/Pong alle 30 s erkannt und getrennt.
-- **Dateien**: Request-Body auf 512 KiB begrenzt; der CSV-Download-Pfad ist gegen
-  Directory-Traversal abgesichert.
+- **Dateien**: Request-Body auf 512 KiB begrenzt; die CSV- und
+  Mitschnitt-Pfade sind gegen Directory-Traversal abgesichert — Backslashes
+  normalisiert, `..` und absolute Pfade abgewiesen, der aufgelöste Pfad muss im
+  jeweiligen Ordner bleiben, und der Name muss zum erlaubten Muster passen
+  (`.csv` bzw. `[A-Za-z0-9._-]+.(tdf|txt)`). **Löschen benutzt dieselbe Prüfung
+  wie Lesen**, nicht eine zweite eigene.
+- **Rohdaten auf dem Bildschirm**: die Zeilen aus dem TCP-Feed sind beliebige
+  Bytes und werden in der Konsole **ausschließlich** über Textknoten ausgegeben
+  (`rawRow()` in `src/web/app.js`) — nirgends `innerHTML`. Der Tabulator-Pfeil
+  ist ein leerer Knoten, dessen Zeichen aus dem Stylesheet kommt. Zeilen über
+  4096 Bytes werden für die Live-Ansicht mit einem sichtbaren Vermerk gekürzt;
+  die aufgezeichnete Datei bleibt davon unberührt byteweise vollständig.
+- **WebSocket**: Clients dürfen genau **eine** Nachricht senden
+  (`{"type":"rawtap","on":…}`); alles über 256 Bytes wird verworfen, ohne
+  geparst zu werden, und alles andere ignoriert.
 - **config.json** wird mit Dateirechten `0600` geschrieben. Secrets stehen dort
   im Klartext (lokaler Einzel-PC) — für Ports/Token besser `.env` nutzen.
 

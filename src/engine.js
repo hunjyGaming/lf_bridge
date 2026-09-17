@@ -157,6 +157,26 @@ function durationMs(raw) {
 /** Object keys that must never be written from stream data. */
 const UNSAFE_KEYS = new Set(['__proto__', 'prototype', 'constructor']);
 
+/**
+ * Exit code of a type-6 line, kept as the RAW token the arena sent (`01`, `02`,
+ * `17`, …) — the leading zero is part of the observation and must not be lost
+ * to a parseInt(). Foreign data: reduced to a short alphanumeric token so it can
+ * never carry markup, a delimiter or unbounded length into a UI or a CSV cell.
+ * @returns {string|null} null when the token is unusable
+ */
+function exitCodeToken(raw) {
+  const s = String(raw == null ? '' : raw).trim();
+  if (!s || s.length > 8 || !/^[A-Za-z0-9]+$/.test(s)) return null;
+  return s;
+}
+
+/** Ids from the stream are object keys — never let one shadow a prototype slot. */
+function safeKey(id) {
+  const s = String(id == null ? '' : id).trim();
+  if (!s || UNSAFE_KEYS.has(s)) return null;
+  return s;
+}
+
 /** camelCase key from a schema column name (`shots-hit` -> `shotsHit`). null when unusable. */
 function camelKey(name) {
   const parts = String(name == null ? '' : name).trim().split(/[^A-Za-z0-9]+/).filter(Boolean);
@@ -243,17 +263,52 @@ const MATCH_END_DEFAULTS = { watchdogMs: 120000, streamLostMs: 30000, endBlockMs
 const END_TICK_MS = 1000;
 
 /**
- * At least this many entities must report a type-6 END exit before the block
- * counts as an end-of-match summary. A single type-6 is one entity leaving
- * (eliminated / kicked) and must NEVER end a match — see `_noteEntityEnd()`.
+ * Fewest type-6 reports that may ever count as a closing summary.
+ *
+ * The real test is COMPLETENESS (`_noteEntityEnd()`): every entity of the match
+ * has reported. This is only the floor below which even completeness means
+ * nothing — and it is `1`, not `2`, on purpose:
+ *
+ *   - For every match with two or more entities the completeness rule is
+ *     already the STRICTER of the two, so a separate "at least two" adds
+ *     nothing: one report out of two entities is not complete either way.
+ *   - For a match with exactly ONE entity — rare, but possible (a solo run, a
+ *     practice mission, a match everyone but one player dropped out of) the old
+ *     minimum of two made the whole rule dead: the summary could never be
+ *     recognised and the match always fell back to the 120 s watchdog.
+ *   - And with one entity the two readings of a lone type-6 collapse: whether
+ *     that entity was kicked or reported the mission end, nobody is left to
+ *     play. Recognising it costs nothing and is not a false positive.
+ *
+ * The protection that actually carries the rule is not this number, it is
+ * (a) completeness and (b) that recognising ARMS a deadline instead of ending
+ * anything — any further type-4 or type-5 line disarms it again.
  */
-const END_BLOCK_MIN_ENTITIES = 2;
-
-/** Exit code of a type-6 line that means "the mission is over for this entity". */
-const EXIT_CODE_END = 2;
+const END_BLOCK_MIN_REPORTS = 1;
 
 /** `endReason` values — the contract other consumers build on. */
 const END_REASONS = ['mission_end', 'watchdog', 'stream_lost', 'next_match', 'shutdown'];
+
+/**
+ * `endSource` values — ADDITIVE diagnostic beside `endReason`: not *why* the
+ * match counts as over but *through what* the end was recognised. The two
+ * `watchdog` reasons are the reason this exists at all — a match that ran into
+ * the recognised 6/7 summary and one that simply went silent are the same
+ * `endReason` and two completely different observations.
+ */
+const END_SOURCES = [
+  '0101',            // the arena sent the mission-end code itself
+  'summary_type6',   // every entity of the match reported a type-6 line
+  'summary_type7',   // an SM5 type-7 end block arrived
+  'silence',         // no line at all any more — the plain watchdog
+  'stream_lost', 'next_match', 'shutdown',
+];
+
+/** Fallback `endSource` per reason, used when a call site names none. */
+const REASON_SOURCE = {
+  mission_end: '0101', watchdog: 'silence', stream_lost: 'stream_lost',
+  next_match: 'next_match', shutdown: 'shutdown',
+};
 
 const END_TEXT = {
   mission_end: 'Match ended',                                   // unchanged wording for `0101`
@@ -340,6 +395,12 @@ class Engine extends EventEmitter {
       // null while a match is running and before the first match ever ran.
       endReason: null,        // 'mission_end'|'watchdog'|'stream_lost'|'next_match'|'shutdown'
       endedAt: null,          // ms timestamp of the moment the match was ended
+      endSource: null,        // one of END_SOURCES — through WHAT the end was recognised
+      // ---- additive: the type-6 exit codes this match actually produced ----
+      // Pure diagnostics. They no longer decide anything (see `_noteEntityEnd`),
+      // but they are the value the recordings will have to be evaluated against.
+      exitCodes: {},          // entityId -> raw exit token ('01', '02', '17', …)
+      exitCodesSeen: [],      // the distinct codes of this match, sorted
     };
     this._resetEndDetection();
     this.livePassesStream = [];
@@ -381,8 +442,11 @@ class Engine extends EventEmitter {
     this._lastLineAt = Date.now();
     this._streamLostAt = null;   // socket gone since this moment (match still running)
     this._endBlockAt = null;     // end summary seen at this moment, waiting for `0101`
-    this._endExits = new Set();  // player ids that reported a type-6 END exit
-    this._earlyExits = new Set();// player ids that left mid-game (eliminated/kicked)
+    this._endBlockSource = null; // WHAT armed it: 'summary_type6' | 'summary_type7'
+    // Every entity that has reported a type-6 line in this match — whatever its
+    // exit code was. Mid-game drop-outs and the closing batch land in the SAME
+    // set on purpose; see `_noteEntityEnd()`.
+    this._entityEnds = new Set();
   }
 
   /** Start the ticker that turns the thresholds into real endings. */
@@ -429,42 +493,80 @@ class Engine extends EventEmitter {
    * The 6/7 end summary looks like it has been sent. Only ARMS a deadline:
    * if `0101` still follows, it wins and the reason stays `mission_end`.
    */
-  _armEndBlock(now = Date.now()) {
+  _armEndBlock(source = 'summary_type6', now = Date.now()) {
     if (!this.gameState.missionActive) return;
     if (!(this.matchEnd.endBlockMs > 0)) return;
     this._endBlockAt = now;      // refreshed by every further end-block line
+    this._endBlockSource = END_SOURCES.includes(source) ? source : 'summary_type6';
     this._startEndWatch();
   }
 
   /** Proof that the match is still being played — disarm the end block again. */
   _liveSignal() {
     if (this._endBlockAt != null) this._endBlockAt = null;
+    this._endBlockSource = null;
+  }
+
+  /**
+   * Remember the exit code of a type-6 line. Diagnostics only — nothing in the
+   * end detection reads it back. Bounded by the player count, so a hostile feed
+   * cannot grow the map: an unknown entity never gets this far.
+   */
+  _noteExitCode(entityId, exitCode) {
+    try {
+      const gs = this.gameState;
+      const key = safeKey(entityId);
+      const code = exitCodeToken(exitCode);
+      if (!key || !code) return;
+      if (gs.exitCodes[key] === code) return;
+      gs.exitCodes[key] = code;
+      if (!gs.exitCodesSeen.includes(code)) {
+        gs.exitCodesSeen.push(code);
+        gs.exitCodesSeen.sort();
+      }
+    } catch (_err) {
+      /* a diagnostic value must never disturb the parser */
+    }
   }
 
   /**
    * One type-6 line. **A single one must never end the match**: mid-game it
-   * means exactly one entity is out (docs/LASERFORCE.md: exit `04` eliminated,
-   * `01` Kick, `17` Ref-Kick). Only the closing summary is accepted, and only
-   * when all three hold:
-   *   - the exit code is `02` ("Ende"), the code the arena uses when the
-   *     MISSION ends, not when an entity dies,
-   *   - at least two entities have reported it,
-   *   - and every player still in the match has reported it — players that
-   *     already left mid-game with another exit code are discounted, they
-   *     will not report a second time.
+   * means exactly one entity is out. The closing summary is told apart from a
+   * mid-game drop-out by COMPLETENESS, and by nothing else:
+   *
+   *   a type-6 block counts as the end-of-match summary exactly when EVERY
+   *   entity of this match has reported a type-6 line — whatever exit code
+   *   it carried.
+   *
+   * Why not the exit code any more. The rule used to demand exit `02` ("Ende"
+   * per the community spec). Observed at a real arena on 17.09.2026: a regular
+   * standard mission closes with exit **`01`** there. With `02` hard-wired the
+   * summary was never recognised on that arena and every match fell through to
+   * the 120 s watchdog. The exit code is a value we RECORD (`_noteExitCode`),
+   * not one we may gate on, until the recordings say what it means.
+   *
+   * Why completeness is the load-bearing test — and is no weaker than before.
+   * An entity reports exactly once. One that drops out mid-game reports THEN;
+   * the rest report at the end. So counting every reporter in one set and
+   * asking for `reports >= entities` is arithmetically the very same rule the
+   * old code expressed as `endExits >= entities - earlyExits` (the two sets
+   * were disjoint) — only without the exit-code filter in front of it. A lone
+   * mid-game kick is still one report out of N and still ends nothing.
+   *
+   * And recognising ENDS NOTHING: it arms `matchEnd.endBlockSeconds`. A `0101`
+   * inside that window wins (reason stays `mission_end`), and any type-4 or
+   * type-5 line disarms it again — the match was evidently still being played.
    */
   _noteEntityEnd(entityId, exitCode) {
     const gs = this.gameState;
     if (!gs.missionActive || !entityId || !gs.players[entityId]) return;
-    const code = parseInt(exitCode, 10);
-    if (code === EXIT_CODE_END) this._endExits.add(entityId);
-    else { this._earlyExits.add(entityId); return; }
+    this._noteExitCode(entityId, exitCode);
+    this._entityEnds.add(entityId);
 
     const known = Object.keys(gs.players).length;
-    const stillIn = known - this._earlyExits.size;
-    if (this._endExits.size < END_BLOCK_MIN_ENTITIES) return;
-    if (this._endExits.size < stillIn) return;
-    this._armEndBlock();
+    if (this._entityEnds.size < END_BLOCK_MIN_REPORTS) return;
+    if (this._entityEnds.size < known) return;
+    this._armEndBlock('summary_type6');
   }
 
   /**
@@ -478,33 +580,52 @@ class Engine extends EventEmitter {
   }
 
   /**
+   * How a match that is ending right now was recognised as over. Explicit
+   * `source` wins; for `watchdog` an armed end block is the honest answer
+   * ("the 6/7 summary ran out"), otherwise the reason's own default.
+   */
+  _endSourceFor(reason, source) {
+    if (END_SOURCES.includes(source)) return source;
+    return REASON_SOURCE[reason] || null;
+  }
+
+  /**
    * The single place a match stops. `0101` and all three inferred endings pass
    * through here, so the state, the event and the `match_end` emit can never
    * disagree.
    */
-  _endMatch(reason) {
+  _endMatch(reason, source) {
     const gs = this.gameState;
+    const endSource = this._endSourceFor(reason, source);
     gs.missionActive = false;
     gs.ballHolderId = null;
     gs.endReason = reason;
+    gs.endSource = endSource;
     gs.endedAt = Date.now();
     this.livePassesStream = [];
     this._stopEndWatch();
     this._streamLostAt = null;
     this._endBlockAt = null;
+    this._endBlockSource = null;
     if (reason !== 'mission_end') {
-      this.log?.warn('engine', `MISSION ENDE erkannt (${reason}) — kein 0101 von der Anlage`);
+      this.log?.warn('engine', `MISSION ENDE erkannt (${reason}/${endSource}) — kein 0101 von der Anlage`);
     }
     // `code` is the code the ARENA sent. Only a real `0101` may carry it — an
     // inferred end must never leave a `0101` in the event log that never came
     // over the wire, so it goes out with an empty code instead.
+    // ADDITIVE: `endSource` and `exitCodes` say through WHAT the end was
+    // recognised and which type-6 exit codes this match actually produced —
+    // the two things a recording will have to be checked against.
     this._pushEvent({
       type: 'match_end',
       code: reason === 'mission_end' ? '0101' : '',
       reason,
+      endSource,
+      exitCodes: { ...gs.exitCodes },
+      exitCodesSeen: gs.exitCodesSeen.slice(),
       text: END_TEXT[reason] || END_TEXT.mission_end,
     });
-    this.emit('match_end', { reason, scores: { ...gs.scores } });
+    this.emit('match_end', { reason, endSource, scores: { ...gs.scores } });
     this._touch();
   }
 
@@ -522,15 +643,15 @@ class Engine extends EventEmitter {
     // long before the watchdog would — but only after the grace period in which
     // a `0101` would still have won.
     if (this._endBlockAt != null && m.endBlockMs > 0 && now - this._endBlockAt >= m.endBlockMs) {
-      this._endMatch('watchdog');
+      this._endMatch('watchdog', this._endBlockSource || 'summary_type6');
       return 'watchdog';
     }
     if (this._streamLostAt != null && m.streamLostMs > 0 && now - this._streamLostAt >= m.streamLostMs) {
-      this._endMatch('stream_lost');
+      this._endMatch('stream_lost', 'stream_lost');
       return 'stream_lost';
     }
     if (m.watchdogMs > 0 && now - this._lastLineAt >= m.watchdogMs) {
-      this._endMatch('watchdog');
+      this._endMatch('watchdog', 'silence');
       return 'watchdog';
     }
     return null;
@@ -1140,7 +1261,7 @@ class Engine extends EventEmitter {
       // ADDITIVE: type-7 rows exist ONLY in the closing summary of an SM5
       // mission (docs/LASERFORCE.md) — one of them is already enough to arm the
       // deadline. Laserball has no type 7; there the type-6 rule above applies.
-      try { this._armEndBlock(); } catch (_err) { /* never disturb the parser */ }
+      try { this._armEndBlock('summary_type7'); } catch (_err) { /* never disturb the parser */ }
       this._handleSm5StatsLine(cols, tabCols);
       return;
     }
@@ -1148,7 +1269,7 @@ class Engine extends EventEmitter {
     if (type === '4' && cols[2] === '0100') {
       // ADDITIVE: a start while the previous match is still running IS the end
       // of that previous one — finalize it before its state is cleared below.
-      if (gameState.missionActive) this._endMatch('next_match');
+      if (gameState.missionActive) this._endMatch('next_match', 'next_match');
       this.log?.info('engine', `MISSION START (0100) | teams loaded: ${Object.keys(gameState.teams).length}`);
       gameState.missionActive = true;
       gameState.matchId = Date.now().toString(36);
@@ -1171,6 +1292,9 @@ class Engine extends EventEmitter {
       // ADDITIVE: a running match has no end — and the end detection starts over.
       gameState.endReason = null;
       gameState.endedAt = null;
+      gameState.endSource = null;
+      gameState.exitCodes = {};
+      gameState.exitCodesSeen = [];
       this._resetEndDetection();
       this._startEndWatch();
 
@@ -1186,7 +1310,7 @@ class Engine extends EventEmitter {
       // loss) is swallowed: it would otherwise write the same match a second
       // time. A `0101` on a stream we joined mid-match (no `0100`, no end yet)
       // still reports, exactly as before.
-      if (gameState.missionActive || gameState.endReason == null) this._endMatch('mission_end');
+      if (gameState.missionActive || gameState.endReason == null) this._endMatch('mission_end', '0101');
       else this.log?.info('engine', `0101 nach bereits erkanntem Ende (${gameState.endReason}) — ignoriert`);
       return;
     }
@@ -1407,4 +1531,4 @@ class Engine extends EventEmitter {
   }
 }
 
-module.exports = { Engine, matchEndMs, MATCH_END_DEFAULTS, END_REASONS };
+module.exports = { Engine, matchEndMs, MATCH_END_DEFAULTS, END_REASONS, END_SOURCES };

@@ -57,6 +57,7 @@
   <button data-tab="events">Ereignisse</button>
   <button data-tab="outputs">Ausgänge</button>
   <button data-tab="stats">Statistik</button>
+  <button data-tab="raw">Rohdaten</button>
   <button data-tab="settings">Einstellungen</button>
   <button data-tab="log">Log</button>
 </nav>
@@ -183,9 +184,85 @@
     <p class="lead">Summe über alle aufgezeichneten Matches — je Anzeigeprofil, aus <code>totals_laserball.csv</code> bzw. <code>totals_sm5.csv</code>. Die Spalten und ihre Beschriftungen kommen aus <code>/api/modes</code>.</p>
     <div class="tablewrap"><table class="stat big" id="totals-table"></table></div>
 
-    <div class="sec-head mt"><h2>Dateien</h2></div>
-    <p class="lead">Alle CSV-Dateien im Statistik-Ordner. Klicken zum Herunterladen.</p>
+    <div class="sec-head mt"><h2>Dateien</h2>
+      <div class="sec-tools">
+        <button class="ghost mini" id="stats-refresh-files">Aktualisieren</button>
+        <button class="ghost mini danger" id="stats-reset">Alles zurücksetzen…</button>
+      </div>
+    </div>
+    <p class="lead">Alle CSV-Dateien im Statistik-Ordner. Auf den Namen klicken lädt herunter. Löschen und Zurücksetzen verlangen das Admin-Passwort — eine angemeldete Sitzung allein genügt dafür nicht.</p>
     <div id="stats-files" class="cards"></div>
+  </section>
+
+  <!-- ROHDATEN — Laserforce-Log: Mitschnitt, Leseansicht, Live-Zeilen -->
+  <section id="tab-raw" class="tab">
+    <div class="panel">
+      <span class="eyebrow">Laserforce-Log · Roh-Mitschnitt</span>
+      <p class="lead">Schneidet den Laserforce-Datenstrom <b>byteweise unverändert</b> mit — eine Datei je Mission, dazu ein Begleitzettel als <code>.txt</code>. Damit lässt sich ein Spiel andernorts exakt nachstellen. Im Dauerbetrieb bitte wieder ausschalten.</p>
+
+      <div class="raw-switch">
+        <label class="switch"><input id="s-cap-enabled" type="checkbox" /><span></span></label>
+        <div class="raw-switch-txt">
+          <b id="cap-switch-label">Mitschnitt ist aus</b>
+          <span class="muted" id="cap-state">—</span>
+        </div>
+        <button class="ghost mini" id="cap-refresh" type="button">Aktualisieren</button>
+      </div>
+
+      <p class="channel-note alert" id="cap-privacy" hidden>⚠ <b>Datenschutz:</b> Ein Mitschnitt enthält <b>Spielernamen</b> und die <b>weltweit eindeutigen Laserforce-Mitglieds-IDs</b> der Spieler. Die Dateien nur an Personen weitergeben, denen diese Daten anvertraut werden dürfen — und danach wieder löschen.</p>
+      <p class="channel-note">Ordner auf diesem PC: <code id="cap-dir">…</code></p>
+
+      <details class="raw-limits">
+        <summary>Grenzen — damit die Platte nicht vollläuft</summary>
+        <div class="grid2">
+          <label>Grenze je Datei (MB)<input id="s-cap-maxfile" type="number" min="1" max="2000" /><small>Danach endet der Mitschnitt dieses Spiels; im Log und im Begleitzettel steht es. 1–2000.</small></label>
+          <label>Höchstzahl Dateien<input id="s-cap-maxfiles" type="number" min="1" max="1000" /><small>Älteste werden automatisch gelöscht. 1–1000.</small></label>
+          <label>Grenze für den Ordner (MB)<input id="s-cap-maxtotal" type="number" min="1" max="100000" /><small>Älteste werden automatisch gelöscht. Schützt die Platte des Hallen-PCs.</small></label>
+        </div>
+        <p class="channel-note">Diese drei Werte gelten erst nach „Änderungen speichern“ unten. Der Schalter oben wirkt sofort.</p>
+      </details>
+    </div>
+
+    <!-- Leseansicht: wird beim Öffnen einer Datei eingeblendet -->
+    <section id="rawview" class="rawview-wrap" hidden>
+      <div class="sec-head">
+        <h2 id="rawview-name">Datei</h2>
+        <div class="sec-tools">
+          <a class="ghost mini" id="rawview-dl">Herunterladen</a>
+          <button class="ghost mini" id="rawview-close" type="button">Schließen</button>
+        </div>
+      </div>
+      <div class="rawview-tools">
+        <input id="rawview-find" type="search" class="rawview-find" placeholder="Suchen — Text, Ereigniscode (z. B. 0100), Spielername" />
+        <select id="rawview-type" class="rawview-type"><option value="">Alle Zeilentypen</option></select>
+        <label class="row-chk inline"><input id="rawview-tabs" type="checkbox" checked /> Tabulatoren zeigen</label>
+        <span class="muted ml-auto" id="rawview-info">—</span>
+      </div>
+      <div id="rawview-scroll" class="rawview-scroll">
+        <div id="rawview-spacer" class="rawview-spacer"><div id="rawview-lines" class="rawview-lines"></div></div>
+      </div>
+    </section>
+
+    <!-- Live: die eingehenden Zeilen, während sie ankommen -->
+    <div class="sec-head mt"><h2>Live-Rohdaten</h2>
+      <div class="sec-tools">
+        <span class="muted" id="rawlive-stat">—</span>
+        <button class="ghost mini" id="rawlive-toggle" type="button">Anhalten</button>
+        <button class="ghost mini" id="rawlive-clear" type="button">Leeren</button>
+      </div>
+    </div>
+    <p class="lead">Was die Anlage gerade schickt — unabhängig davon, ob mitgeschnitten wird. Die Zeilen kommen gebündelt und nur, solange dieser Bereich offen und die Ansicht nicht angehalten ist. Im Speicher bleiben die letzten <span id="rawlive-max">2000</span> Zeilen.</p>
+    <div id="rawlive" class="rawview live"></div>
+
+    <!-- Dateien -->
+    <div class="sec-head mt"><h2>Mitschnitte</h2>
+      <div class="sec-tools">
+        <a class="ghost mini" id="cap-bundle">Alle als ZIP</a>
+        <button class="ghost mini danger" id="cap-delall" type="button">Alle löschen…</button>
+      </div>
+    </div>
+    <p class="lead">Neueste zuerst. „Ansehen“ öffnet die Rohzeilen hier im Browser, ohne sie herunterzuladen.</p>
+    <div id="cap-files" class="cards"></div>
   </section>
 
   <!-- SETTINGS -->
@@ -296,24 +373,8 @@
 
     <div class="panel">
       <span class="eyebrow">Roh-Mitschnitt (Diagnose)</span>
-      <p class="lead">Schneidet den Laserforce-Datenstrom <b>byteweise unverändert</b> mit — eine Datei je Spiel, dazu ein Begleitzettel als <code>.txt</code>. Nur für eine Testphase gedacht: damit lässt sich ein Spiel andernorts exakt nachstellen. Im Dauerbetrieb bitte wieder ausschalten.</p>
-      <label class="row-chk mt-sm"><input id="s-cap-enabled" type="checkbox" /> Rohen Stream mitschneiden</label>
-      <p class="channel-note alert" id="cap-privacy" hidden>⚠ <b>Datenschutz:</b> Ein Mitschnitt enthält <b>Spielernamen</b> und die <b>weltweit eindeutigen Laserforce-Mitglieds-IDs</b> der Spieler. Die Dateien nur an Personen weitergeben, denen diese Daten anvertraut werden dürfen — und danach wieder löschen.</p>
-      <p class="channel-note">Ordner auf diesem PC: <code id="cap-dir">…</code> · <span id="cap-state">—</span></p>
-      <div class="grid2">
-        <label>Grenze je Datei (MB)<input id="s-cap-maxfile" type="number" min="1" max="2000" /><small>Danach endet der Mitschnitt dieses Spiels; im Log und im Begleitzettel steht es. 1–2000.</small></label>
-        <label>Höchstzahl Dateien<input id="s-cap-maxfiles" type="number" min="1" max="1000" /><small>Älteste werden automatisch gelöscht. 1–1000.</small></label>
-        <label>Grenze für den Ordner (MB)<input id="s-cap-maxtotal" type="number" min="1" max="100000" /><small>Älteste werden automatisch gelöscht. Schützt die Platte des Hallen-PCs.</small></label>
-      </div>
-
-      <div class="sec-head mt"><h2>Mitschnitte</h2>
-        <div class="sec-tools">
-          <button class="ghost" id="cap-refresh">Aktualisieren</button>
-          <a class="ghost mini" id="cap-bundle">Alle als ZIP</a>
-          <button class="ghost mini" id="cap-delall">Alle löschen</button>
-        </div>
-      </div>
-      <div id="cap-files" class="cards"></div>
+      <p class="lead">Der Mitschnitt des Laserforce-Datenstroms hat einen eigenen Bereich: oben unter <b>Rohdaten</b>. Dort wird er ein- und ausgeschaltet, dort stehen die Dateien, und dort laufen die eingehenden Zeilen live mit.</p>
+      <button class="ghost" id="goto-raw" type="button">Zum Bereich „Rohdaten“</button>
     </div>
 
     <div class="panel">
@@ -349,6 +410,26 @@
     <p class="muted">Diese Instanz ist geschützt.</p>
     <input id="token-input" type="password" placeholder="Token" />
     <div class="row end"><button value="ok">Weiter</button></div>
+  </form>
+</dialog>
+
+<!-- Passwortbestätigung für löschende Eingriffe. Geprüft wird serverseitig
+     gegen denselben Hash wie bei der Anmeldung (docs/SECURITY.md); dieser
+     Dialog sammelt nur die Eingabe ein. -->
+<dialog id="pw-dialog" class="pw-dialog">
+  <form id="pw-form">
+    <span class="eyebrow">Bestätigung</span>
+    <h3 id="pw-title">Aktion bestätigen</h3>
+    <p class="muted" id="pw-lead"></p>
+    <ul class="pw-list" id="pw-list" hidden></ul>
+    <p class="channel-note alert" id="pw-warn">Das lässt sich nicht rückgängig machen.</p>
+    <label id="pw-field">Admin-Passwort<input id="pw-input" type="password" autocomplete="current-password" /></label>
+    <p class="channel-note" id="pw-nopw" hidden>Für diese Installation ist kein Admin-Passwort gesetzt — es gibt nichts zu prüfen.</p>
+    <p class="muted is-bad" id="pw-err" hidden></p>
+    <div class="row end">
+      <button type="button" class="ghost" id="pw-cancel">Abbrechen</button>
+      <button type="submit" id="pw-ok">Bestätigen</button>
+    </div>
   </form>
 </dialog>
 

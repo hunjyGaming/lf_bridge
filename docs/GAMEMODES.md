@@ -68,6 +68,17 @@ Die Familie ist **nicht** kosmetisch. Sie steuert:
 Was die Familie **nicht mehr** steuert: welche Spalten man zu sehen bekommt.
 Das macht seit dieser Version das Anzeigeprofil.
 
+> **Ein Unterschied, der beim Matchende zählt.** Die Familie `sm5` schickt am
+> Ende je Spieler eine **Typ-7-Zeile**; eine einzige genügt lf_live als Signal,
+> dass die Mission abgerechnet wird. **Laserball hat keine Typ-7-Zeilen.** Dort
+> hängt die Erkennung des Matchendes vollständig an den **Typ-6-Zeilen** — daran,
+> dass am Ende *jede* Entity eine meldet. Genau deshalb war die frühere
+> Zusatzbedingung „Exit-Code muss `02` sein" für Laserball besonders heikel: an
+> einer echten Anlage meldet ein reguläres Standardspiel `01`, und damit wurde
+> die Endabrechnung nie erkannt. Die Bedingung ist auf reine Vollständigkeit
+> umgestellt; Einzelheiten und der Beleg stehen in
+> [LASERFORCE.md](LASERFORCE.md#endabrechnung--einzelne-elimination).
+
 ---
 
 ## Die drei Anzeigeprofile
@@ -924,6 +935,7 @@ Im Stil der übrigen Doku: hier steht ehrlich, was **nicht** belegt ist.
 | **Bedeutung der elf amtlichen Typ-7-Felder** | `livesLeft` und `shotsLeft` sind aus den Namen klar. Für `medicHits`, `ownMedicHits`, `medicNukes`, `scoutRapid`, `lifeBoost`, `ammoBoost`, `nukesCancelled`, `ownNukeCancels`, `shot3Hit` ist die Bedeutung aus der lfstats-Spezifikation erschlossen und nicht gegen eine Anlage geprüft. Die Zahlen werden roh durchgereicht. | unbestätigt |
 | **Anzeigeprofil in der Web-Konsole** | `GET /api/modes` liefert die Scoreboard-Spalten heute unter den beiden **Familien**-Schlüsseln. Für ein Profil `standard` müsste der Endpunkt zusätzlich nach Profil ausliefern; solange keine Modus-Nummer auf `standard` zeigt, fällt das nicht an. | offen |
 | **Gesamtwertung in der Web-Konsole** | Die Tabelle „Gesamtwertung" im Statistik-Tab zeigt fest die Laserball-Spalten. Bei einer SM5-Gesamtwertung bleiben sie leer; die Zahlen stehen vollständig in `totals_sm5.csv`, die im selben Tab zum Download bereitsteht. Auch `GET /api/stats/totals` hat keinen Familien-Parameter. | offen |
+| **Matchende in Laserball** | Laserball hat keine Typ-7-Zeilen; die Erkennung der Endabrechnung hängt dort allein daran, dass am Ende **jede** Entity eine Typ-6-Zeile meldet. Dass sie das tut, ist Spezifikation, nicht Messung. Der Exit-Code taugt seit der [Beobachtung vom 17.09.2026](LASERFORCE.md#die-exit-codes-der-typ-6-zeile--unbestätigt) nicht mehr als Merkmal und wird nur noch protokolliert. Trifft die Annahme nicht zu, beendet der Watchdog das Match später — nie früher. | unbestätigt |
 | **Keine Typ-1-Zeile** | Sendet eine Anlage gar keine Typ-1-Zeile, bleibt der Modus dauerhaft `unknown`. Eine Möglichkeit, die Familie von Hand zu erzwingen, gibt es bewusst (noch) nicht. | bewusst offen |
 | **Beschreibung endet auf einer Zahl** | Kommt ein Stream **ohne** Tabulatoren **und ohne** Schema-Zeilen, und endet die Missionsbeschreibung auf einer Zahl, kann dieses letzte Token verlorengehen. Mit Tabulator oder mit Schema-Zeile korrekt. | bekannte Grenze |
 

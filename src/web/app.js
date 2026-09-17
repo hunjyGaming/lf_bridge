@@ -199,10 +199,18 @@ document.querySelectorAll('.tabs button').forEach((b) => b.addEventListener('cli
   document.querySelectorAll('.tab').forEach((s) => s.classList.toggle('active', s.id === 'tab-' + b.dataset.tab));
   if (b.dataset.tab === 'log') pollLogs();
   if (b.dataset.tab === 'stats') loadStats();
+  if (b.dataset.tab === 'raw') { loadCapture(); drawRawView(); }
   // Die Wertetabellen werden nur gebaut, solange der Live-Bereich zu sehen ist
   // — beim Zurückkommen holt ein Bild alles nach.
   if (b.dataset.tab === 'live') { boardsDue = true; schedulePaint(); }
+  // Die Live-Rohzeilen werden nur angefordert, solange der Bereich offen ist.
+  syncRawTap();
 }));
+/** Einen Bereich von aussen aufschlagen (z. B. der Verweis aus den Einstellungen). */
+function showTab(name) {
+  const b = document.querySelector(`.tabs button[data-tab="${name}"]`);
+  if (b) b.click();
+}
 document.querySelectorAll('[data-copy]').forEach((b) => b.addEventListener('click', async () => {
   try { await navigator.clipboard.writeText($(b.dataset.copy).textContent); toast('Kopiert'); }
   catch { toast('Kopieren nicht möglich', true); }
@@ -214,12 +222,16 @@ function connectWs() {
   const proto = location.protocol === 'https:' ? 'wss' : 'ws';
   const q = token ? `?token=${encodeURIComponent(token)}` : '';
   ws = new WebSocket(`${proto}://${location.host}/ws${q}`);
-  ws.onclose = () => { setChip('chip-lf', 'off', 'Laserforce'); setTimeout(connectWs, 2000); };
+  // Nach einem Verbindungsabriss muss der Dienst wieder erfahren, dass hier
+  // jemand auf die Rohzeilen schaut — sonst bleibt die Live-Ansicht stumm.
+  ws.onopen = () => { rawTapSent = null; syncRawTap(); };
+  ws.onclose = () => { setChip('chip-lf', 'off', 'Laserforce'); rawTapSent = null; setTimeout(connectWs, 2000); };
   ws.onerror = () => ws.close();
   ws.onmessage = (e) => {
     const m = JSON.parse(e.data);
     if (m.type === 'state') renderLive(m.data);
     else if (m.type === 'event') { pushFeed(m.data); events.add(m.data); fireFlow(); }
+    else if (m.type === 'raw') pushRawBatch(m);
   };
 }
 
@@ -251,6 +263,7 @@ function paintFrame() {
   if (document.hidden) return;
   flushFeed();
   flushFlow();
+  flushRawLive();
   if (boardsDue) {
     boardsDue = false;
     // Die Tabellen gehoeren in den Live-Bereich; ist ein anderer Reiter offen,
@@ -259,6 +272,9 @@ function paintFrame() {
   }
 }
 document.addEventListener('visibilitychange', () => {
+  // Im Hintergrund schaut niemand hin — dann braucht der Dienst uns auch keine
+  // Rohzeilen zu schicken. Beim Zurückkommen wird wieder angefordert.
+  syncRawTap();
   if (document.hidden) return;
   boardsDue = true;
   schedulePaint();
@@ -1468,30 +1484,140 @@ function renderTotals(rows) {
   }
   t.append(body);
 }
+const statsLink = (name) => `/api/stats/file?name=${encodeURIComponent(name)}` + (token ? `&token=${encodeURIComponent(token)}` : '');
+
 function renderStatsFiles(files) {
   const wrap = $('stats-files');
   wrap.textContent = '';
+  $('stats-reset').disabled = !files.length;
   if (!files.length) { wrap.append(el('p', { className: 'muted empty-note' }, 'Noch keine Dateien — sie entstehen automatisch am Ende jedes Matches.')); return; }
   for (const f of files) {
-    const url = `/api/stats/file?name=${encodeURIComponent(f.name)}` + (token ? `&token=${encodeURIComponent(token)}` : '');
-    const a = el('a', { href: url, className: 'ocard', download: f.name.split('/').pop() });
-    a.append(
-      el('div', { className: 'ocard-top' },
-        el('span', { className: 'badge amber' }, 'CSV'),
-        el('span', { className: 'ocard-name' }, f.name),
-        el('span', { className: 'ocard-target ml-auto' }, `${(f.size / 1024).toFixed(1)} kB · ${new Date(f.mtime).toLocaleString()}`)));
-    wrap.append(a);
+    const c = el('div', { className: 'ocard' });
+    const top = el('div', { className: 'ocard-top' },
+      el('span', { className: 'badge amber' }, 'CSV'),
+      el('a', { className: 'ocard-name', href: statsLink(f.name), download: f.name.split('/').pop() }, f.name),
+      el('span', { className: 'ocard-target' }, `${(f.size / 1024).toFixed(1)} kB · ${new Date(f.mtime).toLocaleString()}`));
+    const actions = el('div', { className: 'ocard-actions' });
+    actions.append(
+      el('a', { className: 'ghost mini', href: statsLink(f.name), download: f.name.split('/').pop() }, 'Herunterladen'),
+      ghost('Löschen', () => confirmWithPassword({
+        title: 'Statistik-Datei löschen',
+        lead: `„${f.name}“ wird aus dem Statistik-Ordner gelöscht.`,
+        items: statsDeleteHints(f.name),
+        confirmLabel: 'Löschen',
+        run: async (password) => {
+          await api('/api/stats/delete', { method: 'POST', body: { name: f.name, password }, raw: true });
+          toast('Gelöscht');
+          loadStats();
+        },
+      })));
+    top.append(actions);
+    c.append(top);
+    wrap.append(c);
   }
 }
-$('totals-refresh').addEventListener('click', loadStats);
 
-// ---------------- Roh-Mitschnitt ----------------
-// Same shape as the CSV file list above: list from the server, download through
-// /api/capture/file, delete through the mutating POST endpoint.
+/**
+ * Was der Betreiber über DIESE Datei wissen muss, bevor er sie löscht. Die
+ * Gesamtwertung und die Modus-Historie stehen nicht nur in der Datei, sondern
+ * auch im Arbeitsspeicher des Statistik-Schreibers — der Dienst leert ihn beim
+ * Löschen mit, sonst schriebe das nächste Matchende alles wieder hin.
+ */
+function statsDeleteHints(name) {
+  const base = String(name).split('/').pop();
+  if (/^totals_/.test(base) || base === 'totals.csv') {
+    return ['Die Gesamtwertung dieser Familie wird auch im Arbeitsspeicher geleert — sie wächst nicht aus alten Summen nach.',
+      'Die Einzelzeilen in all_players_*.csv bleiben; bei einem Neustart wächst die Gesamtwertung daraus wieder. Zum endgültigen Leeren „Alles zurücksetzen“.'];
+  }
+  if (base === 'player_modes.csv') return ['Die Modus-Historie wird auch im Arbeitsspeicher geleert.'];
+  if (base === 'matches.csv') return ['Die Missionsübersicht beginnt danach neu; Gesamtwertungen bleiben unberührt.'];
+  return [];
+}
+
+$('totals-refresh').addEventListener('click', loadStats);
+$('stats-refresh-files').addEventListener('click', loadStats);
+
+// ---- „Alles zurücksetzen": erst sagen WAS weggeht, dann Passwort verlangen ----
+$('stats-reset').addEventListener('click', async () => {
+  let plan;
+  try { plan = (await api('/api/stats/reset/plan')).data; }
+  catch (err) { return toast('Konnte nicht ermitteln, was gelöscht würde: ' + err.message, true); }
+  const items = (plan.groups || []).filter((g) => g.files > 0)
+    .map((g) => `${g.label}: ${fmtInt(g.files)} ${g.files === 1 ? 'Datei' : 'Dateien'} · ${(g.bytes / 1024).toFixed(1)} kB`);
+  if (!items.length) return toast('Es gibt nichts zurückzusetzen.');
+  confirmWithPassword({
+    title: 'Statistik zurücksetzen',
+    lead: `${fmtInt(plan.files)} ${plan.files === 1 ? 'Datei wird' : 'Dateien werden'} gelöscht (${(plan.bytes / 1024).toFixed(1)} kB in ${plan.dir}):`,
+    items,
+    warn: 'Gelöscht werden die Dateien UND die Summen, die der Dienst im Arbeitsspeicher hält — sonst schriebe das nächste Matchende alles wieder hin. Das lässt sich nicht rückgängig machen.',
+    confirmLabel: 'Zurücksetzen',
+    run: async (password) => {
+      const r = await api('/api/stats/reset', { method: 'POST', body: { password }, raw: true });
+      toast(`${r.data.deleted} Dateien gelöscht, Gesamtwertungen geleert`);
+      totalsProfile = null;
+      loadStats();
+    },
+  });
+});
+
+// ================= Rohdaten — Laserforce-Log =================
+//
+// Ein eigener Bereich, kein Anhängsel der Einstellungen: der Betreiber will
+// SEHEN, was die Anlage schickt. Drei Dinge hängen hier zusammen —
+//
+//   1. der Schalter für den Mitschnitt, mit Rückmeldung an Ort und Stelle
+//   2. die Leseansicht einer aufgezeichneten Datei, im Browser, ohne Download
+//   3. die mitlaufenden Rohzeilen, während ein Match läuft
+//
+// SICHERHEIT: alles, was hier auf den Schirm kommt, stammt aus einem
+// ungesicherten TCP-Feed und darf beliebige Bytes enthalten. Jede Zeile geht
+// ausschliesslich über Textknoten ins DOM (rawRow() unten) — nirgends innerHTML.
+
+/** Zeilenhöhe der Roh-Ansichten. MUSS mit `.rawrow` in styles.css übereinstimmen. */
+const RAW_ROW_H = 18;
+/** Harte Grenze der Live-Ansicht im Arbeitsspeicher. */
+const RAW_LIVE_MAX = 2000;
+/** Zeilen über und unter dem sichtbaren Ausschnitt der Leseansicht. */
+const RAW_OVERSCAN = 8;
+/** Ab dieser Größe wird vor dem Öffnen einer Datei gefragt. */
+const RAW_BIG_BYTES = 24 * 1024 * 1024;
+
+const fmtInt = (n) => Number(n || 0).toLocaleString('de-DE');
+const capLink = (name, inline) => `/api/capture/file?name=${encodeURIComponent(name)}`
+  + (inline ? '&inline=1' : '') + (token ? `&token=${encodeURIComponent(token)}` : '');
+
+/**
+ * EINE Rohzeile als DOM-Knoten — der einzige Weg, auf dem Fremdinhalt hier auf
+ * den Schirm kommt. Der Text wandert durch Textknoten, die Tabulatoren werden
+ * durch einen eigenen, LEEREN Knoten sichtbar gemacht (das Zeichen kommt aus
+ * dem Stylesheet). An den Tabulatoren hängt die ganze Spaltenlogik des
+ * TDF-Formats — wer sie nicht sieht, kann das Format nicht lesen.
+ */
+function rawRow(no, text, cls) {
+  const row = el('div', { className: 'rawrow' + (cls ? ' ' + cls : '') });
+  row.append(el('span', { className: 'ln' }, String(no)));
+  const tx = el('span', { className: 'tx' });
+  const parts = String(text == null ? '' : text).split('\t');
+  for (let i = 0; i < parts.length; i++) {
+    if (i) tx.append(el('span', { className: 'tabc' }));
+    if (parts[i]) tx.append(document.createTextNode(parts[i]));
+  }
+  row.append(tx);
+  return row;
+}
+/** Erste Spalte einer Zeile — der Zeilentyp, bzw. `;` für einen Schema-Kommentar. */
+function rawLineType(s) {
+  if (!s) return '';
+  if (s[0] === ';') return ';';
+  const m = /^([^\t\s]{1,8})/.exec(s);
+  return m ? m[1] : '';
+}
+const rawRowClass = (s) => (s && s[0] === ';' ? 'is-schema' : '');
+
+// ---------------- Mitschnitt: Schalter, Zustand, Dateien ----------------
 function capturePrivacy() {
   $('cap-privacy').hidden = !$('s-cap-enabled').checked;
 }
-$('s-cap-enabled').addEventListener('change', capturePrivacy);
 
 async function loadCapture() {
   try {
@@ -1503,24 +1629,36 @@ async function loadCapture() {
 
 function renderCaptureState(st) {
   const s = $('cap-state');
-  if (!st) { s.textContent = '—'; return; }
-  if (st.disabledByError) { s.textContent = 'nach Schreibfehlern abgeschaltet — aus- und wieder anschalten'; s.classList.add('is-bad'); return; }
+  const lbl = $('cap-switch-label');
+  const box = document.querySelector('.raw-switch');
   s.classList.remove('is-bad');
-  if (!st.enabled) { s.textContent = 'aus'; return; }
+  if (!st) { s.textContent = '—'; lbl.textContent = 'Mitschnitt'; return; }
+  box.classList.toggle('on', !!st.enabled && !st.disabledByError);
+  if (st.disabledByError) {
+    lbl.textContent = 'Mitschnitt abgeschaltet';
+    s.textContent = 'nach wiederholten Schreibfehlern abgeschaltet — aus- und wieder anschalten';
+    s.classList.add('is-bad');
+    return;
+  }
+  if (!st.enabled) {
+    lbl.textContent = 'Mitschnitt ist aus';
+    s.textContent = 'Es wird nichts aufgezeichnet. Die Live-Ansicht unten läuft trotzdem.';
+    return;
+  }
+  lbl.textContent = st.recording ? 'Mitschnitt läuft — es wird gerade aufgezeichnet' : 'Mitschnitt ist an';
   s.textContent = st.recording
-    ? `nimmt gerade auf: ${st.file} (${(st.bytes / 1024).toFixed(1)} kB, ${st.lines} Zeilen)`
-    : `an, wartet auf das nächste Spiel · Grenzen ${st.maxFileMB} MB/Datei · ${st.maxFiles} Dateien · ${st.maxTotalMB} MB gesamt`;
+    ? `${st.file} · ${(st.bytes / 1024).toFixed(1)} kB · ${fmtInt(st.lines)} Zeilen`
+    : `wartet auf die nächste Mission · Grenzen ${st.maxFileMB} MB/Datei · ${st.maxFiles} Dateien · ${st.maxTotalMB} MB gesamt`;
 }
 
 function renderCaptureFiles(files) {
   const wrap = $('cap-files');
   wrap.textContent = '';
-  const link = (name) => `/api/capture/file?name=${encodeURIComponent(name)}` + (token ? `&token=${encodeURIComponent(token)}` : '');
   $('cap-bundle').href = '/api/capture/bundle' + (token ? `?token=${encodeURIComponent(token)}` : '');
   $('cap-bundle').hidden = !files.length;
   $('cap-delall').hidden = !files.length;
   if (!files.length) {
-    wrap.append(el('p', { className: 'muted empty-note' }, 'Noch keine Mitschnitte — sie entstehen automatisch, sobald der Mitschnitt an ist und ein Spiel läuft.'));
+    wrap.append(el('p', { className: 'muted empty-note' }, 'Noch keine Mitschnitte — sie entstehen automatisch, sobald der Mitschnitt an ist und eine Mission läuft.'));
     return;
   }
   for (const f of files) {
@@ -1531,12 +1669,18 @@ function renderCaptureFiles(files) {
       el('span', { className: 'ocard-name' }, f.name),
       el('span', { className: 'ocard-target' }, [mode, f.recording ? 'läuft gerade' : ''].filter(Boolean).join(' · ')));
     const actions = el('div', { className: 'ocard-actions' });
-    const dl = el('a', { className: 'ghost mini', href: link(f.name), download: f.name }, 'Herunterladen');
-    actions.append(dl, ghost('Löschen', async () => {
-      if (!confirm(`„${f.name}" löschen?${f.kind === 'tdf' ? '\nDer zugehörige Begleitzettel (.txt) geht mit.' : ''}`)) return;
-      try { await api('/api/capture/delete', { method: 'POST', body: { name: f.name } }); toast('Gelöscht'); loadCapture(); }
-      catch (err) { toast('Löschen fehlgeschlagen: ' + err.message, true); }
-    }));
+    actions.append(
+      ghost('Ansehen', () => openCaptureFile(f)),
+      el('a', { className: 'ghost mini', href: capLink(f.name), download: f.name }, 'Herunterladen'),
+      ghost('Löschen', async () => {
+        if (!confirm(`„${f.name}" löschen?${f.kind === 'tdf' ? '\nDer zugehörige Begleitzettel (.txt) geht mit.' : ''}`)) return;
+        try {
+          await api('/api/capture/delete', { method: 'POST', body: { name: f.name } });
+          toast('Gelöscht');
+          if (rv && rv.name === f.name) closeCaptureFile();
+          loadCapture();
+        } catch (err) { toast('Löschen fehlgeschlagen: ' + err.message, true); }
+      }));
     top.append(actions);
     c.append(top, el('div', { className: 'ocard-meta' },
       el('span', {}, `${(f.size / 1024).toFixed(1)} kB`),
@@ -1546,11 +1690,322 @@ function renderCaptureFiles(files) {
 }
 
 $('cap-refresh').addEventListener('click', loadCapture);
-$('cap-delall').addEventListener('click', async () => {
-  if (!confirm('Wirklich ALLE Mitschnitte löschen?\nDas lässt sich nicht rückgängig machen.')) return;
-  try { const r = await api('/api/capture/delete', { method: 'POST', body: { all: true } }); toast(`${r.data.deleted} Dateien gelöscht`); loadCapture(); }
-  catch (err) { toast('Löschen fehlgeschlagen: ' + err.message, true); }
+$('goto-raw')?.addEventListener('click', () => showTab('raw'));
+
+// Der Schalter wirkt SOFORT — nicht erst beim Speichern unten. Wer den Haken
+// setzt, will jetzt mitschneiden; die drei Grenzwerte darunter bleiben beim
+// gemeinsamen Speichern (sie ändern nichts am Laufenden).
+$('s-cap-enabled').addEventListener('change', async () => {
+  const on = $('s-cap-enabled').checked;
+  capturePrivacy();
+  try {
+    await api('/api/config', { method: 'POST', body: { capture: { enabled: on } } });
+    if (cfg && cfg.capture) cfg.capture.enabled = on;
+    toast(on ? 'Mitschnitt eingeschaltet' : 'Mitschnitt ausgeschaltet');
+  } catch (err) {
+    $('s-cap-enabled').checked = !on;
+    capturePrivacy();
+    toast('Umschalten fehlgeschlagen: ' + err.message, true);
+  }
+  loadCapture();
 });
+
+$('cap-delall').addEventListener('click', () => confirmWithPassword({
+  title: 'Alle Mitschnitte löschen',
+  lead: 'Jede .tdf-Datei und jeder Begleitzettel im Mitschnitt-Ordner wird gelöscht. Eine gerade laufende Aufzeichnung bleibt bestehen.',
+  confirmLabel: 'Alle löschen',
+  run: async (password) => {
+    const r = await api('/api/capture/delete', { method: 'POST', body: { all: true, password }, raw: true });
+    toast(`${r.data.deleted} Dateien gelöscht`);
+    closeCaptureFile();
+    loadCapture();
+  },
+}));
+
+// ---------------- Leseansicht einer Datei ----------------
+// Eine 50-000-Zeilen-Datei hat 50 000 Knoten — kein Browser mag das. Im DOM
+// hängt deshalb immer nur der sichtbare Ausschnitt: ein Abstandhalter gibt die
+// volle Höhe (Zeilen × RAW_ROW_H), der Zeilenblock darin wird verschoben. Beim
+// Rollen wird höchstens einmal je Bild neu gezeichnet.
+let rv = null;      // { name, size, lines[], view (gefilterte Indizes|null), first, count }
+let rvRaf = 0;
+let findT = null;
+
+/** Rohtext holen — bewusst nicht über api(), das erwartet JSON. */
+async function fetchRawText(url) {
+  const headers = {};
+  if (token) headers['Authorization'] = 'Bearer ' + token;
+  const res = await fetch(url, { headers });
+  if (res.status === 401) { location.replace('/login'); return new Promise(() => {}); }
+  if (!res.ok) throw new Error(res.statusText || ('HTTP ' + res.status));
+  return res.text();
+}
+
+async function openCaptureFile(f) {
+  if (f.size > RAW_BIG_BYTES
+    && !confirm(`Die Datei ist ${(f.size / 1024 / 1024).toFixed(1)} MB groß. Zum Ansehen wird sie ganz in den Browser geladen. Trotzdem öffnen?`)) return;
+  const wrap = $('rawview');
+  wrap.hidden = false;
+  $('rawview-name').textContent = f.name;
+  $('rawview-info').textContent = 'lädt …';
+  $('rawview-dl').href = capLink(f.name);
+  $('rawview-dl').setAttribute('download', f.name);
+  $('rawview-lines').textContent = '';
+  $('rawview-find').value = '';
+  rv = null;
+  wrap.scrollIntoView({ block: 'start', behavior: 'smooth' });
+  try {
+    const text = await fetchRawText(capLink(f.name, true));
+    const lines = text.split('\n');
+    if (lines.length && lines[lines.length - 1] === '') lines.pop();
+    for (let i = 0; i < lines.length; i++) if (lines[i].endsWith('\r')) lines[i] = lines[i].slice(0, -1);
+    rv = { name: f.name, size: f.size, lines, view: null, first: -1, count: 0 };
+    buildRawTypeFilter(lines);
+    applyRawFilter();
+  } catch (err) {
+    $('rawview-info').textContent = 'Konnte nicht geladen werden: ' + err.message;
+  }
+}
+
+function closeCaptureFile() {
+  rv = null;
+  $('rawview').hidden = true;
+  $('rawview-lines').textContent = '';
+}
+$('rawview-close').addEventListener('click', closeCaptureFile);
+
+/** Die Zeilentypen, die in DIESER Datei wirklich vorkommen — mit Anzahl. */
+function buildRawTypeFilter(lines) {
+  const sel = $('rawview-type');
+  const counts = new Map();
+  for (const l of lines) {
+    const t = rawLineType(l);
+    if (!t) continue;
+    counts.set(t, (counts.get(t) || 0) + 1);
+  }
+  sel.textContent = '';
+  sel.append(el('option', { value: '' }, 'Alle Zeilentypen'));
+  const top = [...counts.entries()].sort((a, b) => b[1] - a[1]).slice(0, 14)
+    .sort((a, b) => String(a[0]).localeCompare(String(b[0]), 'de'));
+  for (const [t, n] of top) {
+    sel.append(el('option', { value: t }, `${t === ';' ? '; Schema-Kommentar' : 'Typ ' + t} · ${fmtInt(n)}`));
+  }
+  sel.value = '';
+}
+
+/** Suche + Zeilentyp-Filter auf die geladene Datei anwenden. */
+function applyRawFilter() {
+  if (!rv) return;
+  const q = $('rawview-find').value.trim().toLowerCase();
+  const t = $('rawview-type').value;
+  if (!q && !t) {
+    rv.view = null;                       // null = alles, ohne Indexliste
+  } else {
+    const out = [];
+    for (let i = 0; i < rv.lines.length; i++) {
+      const l = rv.lines[i];
+      if (t && rawLineType(l) !== t) continue;
+      if (q && l.toLowerCase().indexOf(q) < 0) continue;
+      out.push(i);
+    }
+    rv.view = out;
+  }
+  const n = rv.view ? rv.view.length : rv.lines.length;
+  rv.first = -1;
+  $('rawview-spacer').style.height = (n * RAW_ROW_H) + 'px';
+  $('rawview-scroll').scrollTop = 0;
+  $('rawview-info').textContent = (q || t)
+    ? `${fmtInt(n)} von ${fmtInt(rv.lines.length)} Zeilen · ${(rv.size / 1024).toFixed(1)} kB`
+    : `${fmtInt(n)} Zeilen · ${(rv.size / 1024).toFixed(1)} kB`;
+  drawRawView();
+}
+
+/** Nur den sichtbaren Ausschnitt zeichnen. */
+function drawRawView() {
+  if (!rv) return;
+  const sc = $('rawview-scroll');
+  const box = $('rawview-lines');
+  const n = rv.view ? rv.view.length : rv.lines.length;
+  if (!n) {
+    if (rv.first === 0 && rv.count === 0) return;
+    rv.first = 0; rv.count = 0;
+    box.textContent = '';
+    box.style.transform = 'translateY(0)';
+    box.append(el('div', { className: 'rawview-empty' }, 'Keine Zeile passt zu Suche und Zeilentyp.'));
+    return;
+  }
+  const per = Math.ceil(sc.clientHeight / RAW_ROW_H) + RAW_OVERSCAN * 2;
+  let first = Math.floor(sc.scrollTop / RAW_ROW_H) - RAW_OVERSCAN;
+  if (first + per > n) first = n - per;
+  if (first < 0) first = 0;
+  if (first === rv.first && per === rv.count) return;
+  rv.first = first; rv.count = per;
+  const frag = document.createDocumentFragment();
+  for (let k = first; k < Math.min(n, first + per); k++) {
+    const idx = rv.view ? rv.view[k] : k;
+    frag.append(rawRow(idx + 1, rv.lines[idx], rawRowClass(rv.lines[idx])));
+  }
+  box.textContent = '';
+  box.append(frag);
+  box.style.transform = `translateY(${first * RAW_ROW_H}px)`;
+}
+
+$('rawview-scroll').addEventListener('scroll', () => {
+  if (rvRaf) return;
+  rvRaf = requestAnimationFrame(() => { rvRaf = 0; drawRawView(); });
+}, { passive: true });
+window.addEventListener('resize', () => { if (rv) { rv.count = 0; drawRawView(); } });
+$('rawview-find').addEventListener('input', () => { clearTimeout(findT); findT = setTimeout(applyRawFilter, 150); });
+$('rawview-type').addEventListener('change', applyRawFilter);
+$('rawview-tabs').addEventListener('change', () => {
+  const off = !$('rawview-tabs').checked;
+  $('rawview-scroll').classList.toggle('no-tabs', off);
+  $('rawlive').classList.toggle('no-tabs', off);
+});
+
+// ---------------- Live-Rohzeilen ----------------
+// Der Dienst schickt sie GEBÜNDELT (eine Nachricht je Viertelsekunde bzw. je
+// 400 Zeilen, src/apiServer.js) und nur, solange dieser Bereich offen und die
+// Ansicht nicht angehalten ist. Gezeichnet wird höchstens einmal je Bild, über
+// denselben Takt wie alles andere (schedulePaint), und nie im Hintergrund.
+let rawPaused = false;
+let rawPending = [];
+let rawDue = false;
+let rawNo = 0;          // laufende Nummer seit dem letzten Leeren
+let rawDropped = 0;     // vom Dienst verworfen
+let rawSkipped = 0;     // hier verworfen, weil mehr anfiel als je Bild darstellbar
+let rawTapSent = null;  // was dem Dienst zuletzt gesagt wurde
+
+/** Ist der Bereich offen und sichtbar? Nur dann wird überhaupt angefordert. */
+function rawTabActive() {
+  return !document.hidden && $('tab-raw').classList.contains('active');
+}
+/** Dem Dienst sagen, ob hier jemand hinschaut. Nur bei einer Änderung. */
+function syncRawTap() {
+  const want = rawTabActive() && !rawPaused;
+  if (rawTapSent === want) return;
+  if (!ws || ws.readyState !== WebSocket.OPEN) { rawTapSent = null; return; }
+  try { ws.send(JSON.stringify({ type: 'rawtap', on: want })); rawTapSent = want; }
+  catch { rawTapSent = null; }
+}
+
+function pushRawBatch(m) {
+  if (rawPaused) return;
+  const lines = Array.isArray(m.lines) ? m.lines : [];
+  if (m.dropped) rawDropped += m.dropped;
+  for (const l of lines) rawPending.push(l);
+  // Mehr als die Speichergrenze kann ohnehin nicht stehenbleiben.
+  if (rawPending.length > RAW_LIVE_MAX) {
+    rawSkipped += rawPending.length - RAW_LIVE_MAX;
+    rawPending = rawPending.slice(-RAW_LIVE_MAX);
+  }
+  rawDue = true;
+  schedulePaint();
+}
+
+function flushRawLive() {
+  if (!rawDue) return;
+  rawDue = false;
+  if (!rawPending.length) return;
+  const box = $('rawlive');
+  if (!rawTabActive()) { rawPending.length = 0; return; }
+  const atBottom = box.scrollHeight - box.scrollTop - box.clientHeight < 40;
+  const frag = document.createDocumentFragment();
+  for (const l of rawPending) frag.append(rawRow(++rawNo, l, rawRowClass(l)));
+  rawPending.length = 0;
+  box.append(frag);
+  while (box.childElementCount > RAW_LIVE_MAX) box.removeChild(box.firstChild);
+  if (atBottom) box.scrollTop = box.scrollHeight;
+  renderRawLiveStat();
+}
+
+function renderRawLiveStat() {
+  const lost = rawDropped + rawSkipped;
+  $('rawlive-stat').textContent = rawPaused
+    ? 'angehalten — es wird nichts empfangen'
+    : `${fmtInt(rawNo)} Zeilen empfangen${lost ? ` · ${fmtInt(lost)} übersprungen` : ''}`;
+}
+
+$('rawlive-toggle').addEventListener('click', () => {
+  rawPaused = !rawPaused;
+  $('rawlive-toggle').textContent = rawPaused ? 'Fortsetzen' : 'Anhalten';
+  $('rawlive-toggle').classList.toggle('armed', rawPaused);
+  if (rawPaused) rawPending.length = 0;
+  syncRawTap();
+  renderRawLiveStat();
+});
+$('rawlive-clear').addEventListener('click', () => {
+  $('rawlive').textContent = '';
+  rawPending.length = 0;
+  rawNo = 0; rawDropped = 0; rawSkipped = 0;
+  renderRawLiveStat();
+});
+$('rawlive-max').textContent = fmtInt(RAW_LIVE_MAX);
+renderRawLiveStat();
+
+// ---------------- Passwortbestätigung ----------------
+// Serverseitig geprüft (src/apiServer.js _passwordOk) gegen denselben
+// scrypt-Hash wie die Anmeldung und hinter derselben Fehlversuchs-Bremse.
+// Dieser Dialog sammelt nur die Eingabe ein — eine Rückfrage im Browser allein
+// schützt nichts, denn wer vor der offenen Konsole steht, klickt sie weg.
+function confirmWithPassword(opts) {
+  const dlg = $('pw-dialog');
+  const form = $('pw-form');
+  const needPw = !!(cfg && cfg.adminPasswordSet);
+  $('pw-title').textContent = opts.title;
+  $('pw-lead').textContent = opts.lead || '';
+  const list = $('pw-list');
+  list.textContent = '';
+  for (const it of opts.items || []) list.append(el('li', {}, it));
+  list.hidden = !(opts.items || []).length;
+  $('pw-warn').textContent = opts.warn || 'Das lässt sich nicht rückgängig machen.';
+  $('pw-ok').textContent = opts.confirmLabel || 'Bestätigen';
+  $('pw-field').hidden = !needPw;
+  $('pw-nopw').hidden = needPw;
+  $('pw-input').value = '';
+  $('pw-err').hidden = true;
+  let busy = false;
+
+  function done() {
+    form.removeEventListener('submit', onSubmit);
+    $('pw-cancel').removeEventListener('click', onCancel);
+    $('pw-input').value = '';
+    dlg.close();
+  }
+  function onCancel() { done(); }
+  async function onSubmit(e) {
+    e.preventDefault();
+    if (busy) return;
+    busy = true;
+    $('pw-ok').disabled = true;
+    try {
+      await opts.run($('pw-input').value);
+      done();
+    } catch (err) {
+      const code = err && err.data && err.data.error;
+      if (code === 'bad_password' || code === 'locked_out') {
+        // Der Dialog bleibt offen: falsches Passwort heisst, es ist NICHTS passiert.
+        $('pw-err').textContent = code === 'locked_out'
+          ? `Zu viele Fehlversuche — erst in ${Math.ceil((err.data.retryAfterMs || 0) / 1000)} Sekunden wieder möglich.`
+          : 'Falsches Passwort — die Aktion wurde nicht ausgeführt.';
+        $('pw-err').hidden = false;
+        $('pw-input').value = '';
+        $('pw-input').focus();
+      } else if (code === 'unauthorized') {
+        location.replace('/login');
+      } else {
+        done();
+        toast('Fehlgeschlagen: ' + err.message, true);
+      }
+    }
+    busy = false;
+    $('pw-ok').disabled = false;
+  }
+  form.addEventListener('submit', onSubmit);
+  $('pw-cancel').addEventListener('click', onCancel);
+  dlg.showModal();
+  if (needPw) $('pw-input').focus();
+}
 
 // ---------------- outputs ----------------
 function renderOutputs() {

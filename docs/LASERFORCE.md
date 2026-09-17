@@ -14,6 +14,7 @@ TCP-Stream kommt. Dies ist die **einzige** Protokoll-Referenz des Projekts.
 - [Typ-2 (Team) im Detail](#typ-2-team-im-detail)
 - [Typ-3 (Login nach 0100) im Detail](#typ-3-login-nach-0100-im-detail)
 - [Typ-5 (Score) im Detail](#typ-5-score-im-detail)
+- [Typ-6 (Entity-Ende) im Detail](#typ-6-entity-ende-im-detail)
 - [Typ-7 (SM5-Endblock) im Detail](#typ-7-sm5-endblock-im-detail)
 - [Typ-4-Event-Codes: gemeinsame Match-Steuerung](#typ-4-event-codes-gemeinsame-match-steuerung)
 - [Typ-4-Event-Codes: Space Marines 5](#typ-4-event-codes-space-marines-5)
@@ -170,7 +171,7 @@ identische Ergebnisse.
 | `3` | entity-start | `3  time  id  type  desc  team  level  category  [battlesuit]  [memberId]` — `battlesuit` ab v2.003, `memberId` in späten 2.006 | je Entity 1×, **nach `0100`** | wenn `type == player` und `team != 5` → Spieler anlegen; `level`/`category`/`battlesuit`/`memberId` werden **jetzt gemerkt** |
 | `4` | **event** | `4  time  code  <actor>  <verb…>  <target>` | laufend | siehe Code-Tabellen |
 | `5` | score | `5  time  entity  old  delta  new` | begleitet jedes werterelevante Typ-4-Event | **Punktestand-Autorität** für alle Modi → `scores` / `players[id].score`, `scoreSource='tdf'`. Details: [Typ-5 im Detail](#typ-5-score-im-detail) |
-| `6` | entity-end | `6  time  id  type  score` — `type` = Exit-Code (`02` Ende, `04` eliminiert, `01` Kick, `17` Ref-Kick) | je Entity 1× (bei Elimination mitten im Spiel) | → `match_summary`-Ereignis (informativ, verändert den Zustand nicht) |
+| `6` | entity-end | `6  time  id  type  score` — `type` = Exit-Code, Zuordnung **unbestätigt**, siehe [Exit-Codes](#die-exit-codes-der-typ-6-zeile--unbestätigt) | je Entity 1× (am Ende oder bei Elimination mitten im Spiel) | → `match_summary`-Ereignis (informativ, verändert den Zustand nicht); Exit-Code wird in `exitCodes` festgehalten |
 | `7` | sm5-stats | `7  id  <23 benannte Felder>` = 24 Felder + Typ-Spalte | je Entity 1×, **nur SM5** — in Laserball nicht vorhanden | **offizielle Endstatistik** → `players[id].official`, überschreibt die SM5-Live-Zähler, `statsSource='tdf7'`. Details: [Typ-7 im Detail](#typ-7-sm5-endblock-im-detail) |
 | `8` | — | nicht dokumentiert / nicht beobachtet | — | – |
 | `9` | player-state | `9  time  entity  state` — ab v2.005 (SM5); in Laserball ab v2.004 | laufend | → `players[id].status` |
@@ -376,6 +377,67 @@ Modi, nicht nur für SM5.
 Gegen einen feindlichen Feed ist ein Team-Punktestand nur für einen plausiblen
 Team-Schlüssel (ein- oder zweistellig, maximal 32 verschiedene) zulässig — dieselbe
 Schutzgrenze wie bei Typ 2.
+
+---
+
+## Typ-6 (Entity-Ende) im Detail
+
+`6  <time>  <id>  <type>  <score>` — `type` ist der **Exit-Code**.
+
+Eine Typ-6-Zeile sagt: *für diese Entity ist die Mission vorbei.* Das passiert am
+regulären Matchende (dann für alle) **und** mitten im Spiel (dann für eine
+einzelne, ausgeschiedene oder hinausgeworfene Entity). Der Score dieser Zeile
+wird bewusst **nicht** übernommen — Autorität ist Zeile 5.
+
+### Die Exit-Codes der Typ-6-Zeile — unbestätigt
+
+Die Community-Spezifikation (lfstats, siehe [Quellen](#quellen)) ordnet zu:
+
+| Exit-Code | Bedeutung laut Fremdquelle | Status |
+|---|---|---|
+| `02` | Ende (Mission regulär vorbei) | **unbestätigt** |
+| `04` | eliminiert | **unbestätigt** |
+| `01` | Kick | **unbestätigt** |
+| `17` | Ref-Kick | **unbestätigt** |
+
+Diese Tabelle bleibt hier stehen — sie ist die Fremdquelle und die einzige
+Zuordnung, die es überhaupt gibt. Sie ist aber **durch eine Beobachtung an einer
+echten Anlage in Frage gestellt** und deshalb durchgehend als `unbestätigt`
+geführt.
+
+> **Belegte Abweichung — Beobachtung an einer echten Anlage, 17.09.2026.**
+> Der Hallenbetreiber hat das Missionsende an seiner eigenen Laserforce-Anlage
+> mitgelesen. Bei einem **regulären Standardspiel** meldet sie
+> `Abschluss <id> (Exit 01, Score 0)` — also Exit-Code **`01`**, den die
+> Fremdquelle als „Kick" führt, nicht `02` („Ende"). Eine zweite, für Laserball
+> genannte Zahl (`1095`) ist nicht eindeutig überliefert — ob Entity-Kennung
+> oder Exit-Code, lässt sich aus der Angabe **nicht** ableiten, und hier wird
+> nicht geraten. Roh-Mitschnitte stehen aus.
+>
+> **Konsequenz im Code:** lf_live gattert die Erkennung der Endabrechnung
+> **nicht mehr** am Exit-Code (das tat sie bis dahin auf `02` — an dieser Anlage
+> hätte sie damit **nie** gegriffen und jedes Match wäre in den
+> 120-Sekunden-Watchdog gelaufen). Maßgeblich ist jetzt allein die
+> **Vollständigkeit**, siehe
+> [Endabrechnung ≠ einzelne Elimination](#endabrechnung--einzelne-elimination).
+> Der Exit-Code wird nur noch **festgehalten** — er ist der Wert, gegen den die
+> Mitschnitte auszuwerten sind, kein Wert, auf den sich eine Entscheidung
+> stützen darf.
+
+### Was lf_live mit den Exit-Codes macht
+
+| Feld | Inhalt |
+|---|---|
+| `match_summary`-Ereignis | wie bisher `entityId`, `exitCode` (Rohtoken), `score` |
+| `gameState.exitCodes` | `{ Entity-Kennung: Exit-Code }` für das laufende/zuletzt gelaufene Match |
+| `gameState.exitCodesSeen` | die **verschiedenen** Exit-Codes dieses Matches, sortiert — z. B. `["01"]` oder `["01","02","17"]` |
+| `match_end`-Ereignis | trägt beide zusätzlich mit, plus `endSource` |
+
+Der Exit-Code wird als **Rohtoken** geführt (`"01"`, nicht `1`): die führende
+Null ist Teil der Beobachtung. Fremddaten — auf kurze alphanumerische Tokens
+begrenzt, damit sie weder Markup noch ein CSV-Trennzeichen transportieren
+können. `0100` (Mission-Start) leert beide Felder, ein Match erbt also nichts
+vom vorigen.
 
 ---
 
@@ -611,6 +673,29 @@ eines oder es lief noch keines** — nur dann darf eine Anzeige die Uhr
 weiterzählen lassen. Dieselben zwei Felder stehen unter `match` in
 `GET /api/status`, und das `match_end`-Ereignis trägt `reason`.
 
+### `endSource` — wodurch das Ende erschlossen wurde
+
+`endReason` sagt, **warum** ein Match als beendet gilt. Das reicht nicht: der
+Wert `watchdog` steht für **zwei völlig verschiedene Beobachtungen** — „die
+Endabrechnung wurde erkannt und die Frist lief ab" und „von der Anlage kam gar
+keine Zeile mehr". Für die Auswertung der Mitschnitte ist genau dieser
+Unterschied der interessante. Deshalb führt der Zustand zusätzlich
+`gameState.endSource`, und das `match_end`-Ereignis trägt ihn mit:
+
+| `endSource` | `endReason` | Bedeutung |
+|---|---|---|
+| `0101` | `mission_end` | die Anlage hat den Mission-End-Code selbst geschickt |
+| `summary_type6` | `watchdog` | **alle** Entities hatten eine Typ-6-Zeile gemeldet; kein `0101` kam nach |
+| `summary_type7` | `watchdog` | ein SM5-Typ-7-Endblock kam; kein `0101` kam nach |
+| `silence` | `watchdog` | keine einzige Zeile mehr — der eigentliche Watchdog |
+| `stream_lost` | `stream_lost` | die TCP-Verbindung kam nicht zurück |
+| `next_match` | `next_match` | ein `0100` beendete das vorige Match |
+| `shutdown` | `shutdown` | der Dienst wurde beendet |
+
+`endReason` ist unverändert und bleibt der Vertrag, auf den bestehende
+Konsumenten bauen. `endSource` ist **rein additiv**: eine Diagnose, kein
+Steuerwert.
+
 Alle drei Fristen sind in der Konsole und per `.env` einstellbar, **`0` schaltet
 den jeweiligen Weg ab** ([CONFIG.md](CONFIG.md)) — für den Fall, dass eine Anlage
 sich anders verhält als hier beschrieben.
@@ -620,26 +705,59 @@ sich anders verhält als hier beschrieben.
 Die Reihenfolge am Matchende ist `6`/`7` (Endabrechnung) → `0101`. Die
 Endabrechnung ist damit das stärkste vorhandene Signal für „Mission vorbei" —
 aber eine **einzelne** Typ-6-Zeile bedeutet nur, dass *eine* Entity ausgeschieden
-ist (Exit-Code `04` eliminiert, `01` Kick, `17` Ref-Kick), und das passiert
-mitten im Spiel. Sie darf das Match **auf keinen Fall** beenden. Unterschieden
-wird deshalb so:
+ist, und das passiert mitten im Spiel. Sie darf das Match **auf keinen Fall**
+beenden. Unterschieden wird deshalb so:
 
 - **Typ 7** kommt ausschließlich am Matchende (und nur in SM5). Eine einzige
   Zeile genügt als Signal.
-- **Typ 6** zählt nur mit **Exit-Code `02`** („Ende") — der Code, mit dem die
-  Entity die *Mission* verlässt, nicht der, mit dem sie stirbt. Zusätzlich
-  müssen es **mindestens zwei** Entities sein **und** alle, die noch im Match
-  sind; wer vorher mit `04`/`01`/`17` ausgeschieden ist, wird abgezogen, weil er
-  kein zweites Mal meldet. So deckt die Regel auch Laserball ab, wo es keine
-  Typ-7-Zeilen gibt.
+- **Typ 6** zählt über die **Vollständigkeit**, und über nichts anderes:
+
+  > Eine Endabrechnung liegt vor, wenn **jede** Entity dieses Matches eine
+  > Typ-6-Zeile gemeldet hat — **gleich welchen Exit-Code sie trug**.
+
+  Der Exit-Code ist als Prüfstein ausgeschieden: bis dahin verlangte die Regel
+  `02` („Ende"), und an einer echten Anlage endet ein reguläres Standardspiel
+  mit `01` (→ [Die Exit-Codes der Typ-6-Zeile](#die-exit-codes-der-typ-6-zeile--unbestätigt)).
+  Dort hätte die Erkennung nie gegriffen. Der Code wird jetzt nur noch
+  **festgehalten**.
+
+  **Warum die Vollständigkeit trotzdem nicht schwächer ist.** Eine Entity meldet
+  genau **einmal**. Wer mitten im Spiel ausscheidet, meldet *dann*; die übrigen
+  melden am Ende. Zählt man jede Meldung in dieselbe Menge, ist
+  „Meldungen ≥ Entities" arithmetisch exakt dieselbe Bedingung, die der Code
+  vorher als „Exit-02-Meldungen ≥ Entities − vorher Ausgeschiedene" schrieb —
+  nur ohne den Exit-Code-Filter davor. Die vorher Ausgeschiedenen werden also
+  weiterhin abgezogen; sie stehen jetzt als „hat bereits gemeldet" statt als
+  „fällt weg" in der Rechnung. Ein einzelner Kick mitten im Spiel ist nach wie
+  vor **eine** Meldung von N und beendet nichts. So deckt die Regel auch
+  Laserball ab, wo es keine Typ-7-Zeilen gibt.
+
+  **Die Mindestzahl von zwei Entities ist entfallen.** Für jedes Match mit zwei
+  oder mehr Entities war sie ohnehin die schwächere der beiden Bedingungen — die
+  Vollständigkeit verlangt dort mehr. Für ein Match mit **einer** Entity (selten,
+  aber möglich) machte sie die Regel dagegen wirkungslos: die Endabrechnung war
+  dort nie erkennbar und jedes solche Match lief in den Watchdog. Und bei genau
+  einer Entity fallen die beiden Lesarten ihrer Typ-6-Zeile zusammen — ob
+  hinausgeworfen oder regulär beendet, es ist niemand mehr da, der spielt.
 - Das Erkennen **beendet nichts**, es setzt nur eine Frist von
   `matchEnd.endBlockSeconds`. Kommt das `0101` — es folgt im echten Betrieb
   Millisekunden später —, gewinnt es und die Begründung ist `mission_end`.
 - Kommt danach noch ein Spiel-Ereignis (Typ 4) oder eine Punktezeile (Typ 5),
-  war es doch keine Endabrechnung: die Frist wird wieder verworfen.
+  war es doch keine Endabrechnung: die Frist wird wieder verworfen. **Das ist
+  der eigentliche Schutz** — eine zu früh erkannte Endabrechnung wird durch
+  weiterlaufendes Spiel von selbst wieder aufgehoben.
 
 Ein zu spät beendetes Match ist ärgerlich, ein fälschlich mitten im Spiel
 beendetes wäre schlimmer — im Zweifel läuft es weiter und der Watchdog fängt es.
+
+Die fünf Fälle, die `scripts/check.js` (`engine.matchEnd`) dauerhaft festnagelt:
+ein einzelner Kick mitten im Spiel beendet **nichts**; mehrere Ausgeschiedene
+nacheinander beenden **nichts**, solange noch jemand aktiv ist; melden am Ende
+alle Verbliebenen, wird die Endabrechnung erkannt und die Frist läuft; ein
+danach eintreffendes `0101` gewinnt mit `mission_end`; ein danach eintreffendes
+Spielereignis verwirft die Frist. Dazu die Beobachtung des Betreibers
+(alle melden `01`) und ein Fall mit gemischten Exit-Codes in derselben
+Endabrechnung.
 
 ---
 
@@ -655,7 +773,7 @@ beendetes wäre schlimmer — im Zweifel läuft es weiter und der Watchdog fäng
 | Zeile 2 | `teams[index] = {name, color}` |
 | Zeile 3 (`player`, `team != 5`) | Spieler angelegt; `player_join`-Event; zusätzlich `level`, `category`, `roleLabel`, `battlesuit`, `memberId` und die Zählerfelder der Familie |
 | Zeile 5 (Score) | **autoritativer Punktestand** → `scores[team]` bzw. `players[id].score`, `scoreSource='tdf'`; zusätzlich weiterhin das `score`-Event mit `teamId`/`old`/`new`/`delta` |
-| Zeile 6 (Entity-Ende) | `match_summary`-Event mit `entityId`/`exitCode`/`score` (informativ, kein Zustandswechsel); zählt zusätzlich zur [Erkennung der Endabrechnung](#endabrechnung--einzelne-elimination) — **nie allein** |
+| Zeile 6 (Entity-Ende) | `match_summary`-Event mit `entityId`/`exitCode`/`score` (informativ, kein Zustandswechsel); der Exit-Code wird in `exitCodes`/`exitCodesSeen` festgehalten; zählt zusätzlich zur [Erkennung der Endabrechnung](#endabrechnung--einzelne-elimination) — **nie allein** |
 | Zeile 7 (SM5-Endblock) | `players[id].official` (Rohwerte), überschreibt die SM5-Live-Zähler, `statsSource='tdf7'`, `sm5_stats`-Event; setzt die Frist der [Endabrechnung](#endabrechnung--einzelne-elimination) |
 | Zeile 9 | `players[id].status`; `status`-Event |
 
@@ -753,7 +871,10 @@ Es ist **erwartet**, dass diese Liste Lücken hat. Alles hier ist entweder nicht
 | **Offizieller Score / Endstand** | Zeile 5 ist jetzt die Autorität für `gameState.scores` und `players[id].score`, Zeile 7 die Autorität für die SM5-Endstatistik. Nicht übernommen wird weiterhin der Score aus Zeile 6 (bleibt rein informativ). | weitgehend geschlossen |
 | **Farb-Enum → RGB** | Fallback-RGB pro `colour-enum` (für v2.003-Feeds ohne `#rgb`) nicht implementiert. | offen |
 | **`0101` beim Beenden von Hand** | Ob die Anlage den Mission-End-Code auch dann schickt, wenn der Spielleiter die Mission an der Konsole abbricht, ist **nicht gemessen**. Deshalb die vier Beendigungswege in [Wann ein Match als beendet gilt](#wann-ein-match-als-beendet-gilt) — sie greifen unabhängig davon. Gegen einen Mitschnitt (`scripts/inspect.js`) prüfen. | unbestätigt |
-| **Typ-6 am Matchende** | Dass am regulären Ende **jede** verbliebene Entity eine Typ-6-Zeile mit Exit-Code `02` schickt, stammt aus der Spezifikation, nicht aus einer Messung der eigenen Anlage. Trifft es nicht zu, wird die Endabrechnung nicht erkannt und der Watchdog beendet das Match später — nie früher. | unbestätigt |
+| **Typ-6-Exit-Codes** | Die Zuordnung `02` Ende · `04` eliminiert · `01` Kick · `17` Ref-Kick stammt aus der Community-Spezifikation und ist durch eine **Beobachtung an einer echten Anlage (17.09.2026)** in Frage gestellt: dort endet ein reguläres Standardspiel mit `01`. Die Fremdtabelle bleibt stehen, gilt aber durchgehend als unbestätigt. lf_live entscheidet nichts mehr am Exit-Code, sondern hält ihn in `exitCodes`/`exitCodesSeen` fest. → [Typ-6 im Detail](#die-exit-codes-der-typ-6-zeile--unbestätigt) | **unbestätigt** |
+| **Zweite Zahl der Beobachtung (`1095`, Laserball)** | Der Betreiber nannte für Laserball eine Zahl `1095`. Ob Entity-Kennung oder Exit-Code, ist aus der Angabe **nicht** ableitbar. Hier wird nicht geraten; die Mitschnitte müssen es zeigen. | offen |
+| **Typ-6 am Matchende** | Dass am regulären Ende **jede** verbliebene Entity eine Typ-6-Zeile schickt, stammt aus der Spezifikation, nicht aus einer Messung der eigenen Anlage. Die Vollständigkeitsregel steht und fällt damit. Trifft es nicht zu, wird die Endabrechnung nicht erkannt und der Watchdog beendet das Match später — nie früher. | unbestätigt |
+| **Melden alle Entities gleichzeitig?** | Ob die Typ-6-Zeilen der Endabrechnung wirklich in einem Block kommen (und nicht über Sekunden verteilt), ist nicht gemessen. Relevant nur für die Länge der Frist `matchEnd.endBlockSeconds`. | unbestätigt |
 
 ---
 
@@ -767,13 +888,20 @@ Es ist **erwartet**, dass diese Liste Lücken hat. Alles hier ist entweder nicht
 | **lfstats — Penalty-Definitionen** | `https://github.com/zmaniacz/lfstats/blob/main/docs/SM5-penalty-definitions.md` | Kontext zu `0600`. |
 | **Original `lf_overlay/server.js`** | lokal: `C:\Users\menze\Desktop\lf_overlay\server.js` (von Dritten übergeben) | **Unabhängige Zweitquelle.** Bestätigt den Laserball-`11xx`-Satz sowie `0100`/`0101`/`0201`/`0900` exakt (deckungsgleiche `switch`-Fälle und Kommentare). Enthält keine SM5-`0xxx`-Auswertung. |
 | lfstats — Doku-Index & Chomper-Design | `https://github.com/zmaniacz/lfstats/blob/main/docs/README.md`, `.../docs/chomper-design.md` | Einordnung, Verweis auf `process_logs.php` als Laserball-Referenz. |
+| **Beobachtung an einer echten Anlage, 17.09.2026** | mündliche Angabe des Hallenbetreibers, mitgelesen an der eigenen Laserforce-Anlage: Standardspiel → `Abschluss <id> (Exit 01, Score 0)`; für Laserball zusätzlich eine nicht eindeutig überlieferte Zahl `1095`. | **Erstmessung an der Zielanlage.** Schlägt für den Exit-Code die Fremdquelle — sie beschreibt *diese* Firmware. Aber: mündlich, ohne Mitschnitt, ein einziger Fall, und die zweite Zahl ist mehrdeutig. Deshalb ist der Befund als *belegte Abweichung* geführt und **keine** der Zuordnungen gilt als bestätigt. Mitschnitte angekündigt. |
 | **Der Stream der eigenen Anlage** | `scripts/inspect.js` → `inspect-report.json` | **Die einzige Quelle, die eure Firmware wirklich beschreibt.** Modus-Nummern außer `5`/`28`, das tatsächliche Vorhandensein von `;`-Schema-Zeilen und die reale Feldzahl in Typ 7 lassen sich nur so belegen. Alles in dieser Datei, was nicht aus einer Aufzeichnung stammt, ist Fremdquelle. |
 
 Nicht als Quelle brauchbar: `spookybear0/laserforce.py` (nur die iPlayLaserforce-Web-API,
 kein TDF); diverse gleichnamige „TDF"-Projekte (Trusted Data Format, TheDraw-Fonts)
 sind unverwandt.
 
-**Konfliktfälle zwischen den Quellen:** keine inhaltlichen Widersprüche gefunden.
+**Konfliktfälle zwischen den Quellen:** **einer** — und er ist wichtig. Die
+lfstats-Spezifikation führt den Typ-6-Exit-Code `02` als „Ende" und `01` als
+„Kick"; die [Beobachtung an der echten Anlage (17.09.2026)](#die-exit-codes-der-typ-6-zeile--unbestätigt)
+zeigt ein regulär beendetes Standardspiel mit `01`. Aufgelöst ist der Konflikt
+**nicht** — beide Angaben stehen nebeneinander, beide gelten als unbestätigt,
+und lf_live stützt seit dem Befund keine Entscheidung mehr auf diese Spalte.
+Sonst keine inhaltlichen Widersprüche gefunden:
 lfstats und `server.js` benennen dieselben `11xx`-Codes und behandeln `1104`
 identisch (Reset vs. Block über den Ziel-Status). Wo `server.js` schweigt (der
 gesamte SM5-`0xxx`-Bereich), ist lfstats die einzige Quelle — entsprechend als
@@ -803,6 +931,21 @@ Den Laserforce-Export **temporär** auf `<PC>:9100` stellen, ein Match spielen,
 
 Damit lässt sich die obige Liste gegen eure Firmware verifizieren — besonders
 für 7SM/Nexus, Varianten und die als `unbestätigt` markierten Codes.
+
+**Was an den nächsten Mitschnitten konkret zu klären ist** (offen seit der
+[Beobachtung vom 17.09.2026](#die-exit-codes-der-typ-6-zeile--unbestätigt)):
+
+1. Welchen Exit-Code trägt eine Typ-6-Zeile am **regulären** Missionsende — je
+   Modus? Bestätigt sich `01` im Standardspiel, und was steht in Laserball?
+2. Welchen Exit-Code trägt eine Typ-6-Zeile bei einer **Elimination mitten im
+   Spiel**? Unterscheiden sich die beiden Fälle an dieser Anlage überhaupt?
+3. Was ist die Zahl `1095` aus der Beobachtung — Entity-Kennung oder Exit-Code?
+4. Meldet am Ende wirklich **jede** Entity eine Typ-6-Zeile, und kommen sie als
+   ein Block? Davon hängt die Erkennung der Endabrechnung ab.
+5. Kommt nach der Endabrechnung überhaupt ein `0101`?
+
+Im Betrieb beantworten dieselben Fragen auch die Felder `exitCodes`,
+`exitCodesSeen` und `endSource` des beendeten Matches, ohne Mitschnitt.
 
 Das Werkzeug meldet außerdem, wenn die Schema-Spalte `duration` und die alte
 Heuristik „vorletzte Spalte" **verschiedene** Werte liefern — genau der Fall, der
