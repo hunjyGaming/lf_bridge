@@ -72,10 +72,16 @@ engine.on('match_start', () => { const s = engine.snapshot(); stats.onMatchStart
 engine.on('match_end', () => { const s = engine.snapshot(); stats.onMatchEnd(s); eventLog.onMatchEnd(s); });
 
 // ---- one shared state tick ----
-// If any consumer is dirty, serialize the state exactly once and hand the same
-// pre-serialized string to every consumer.
+// If any consumer is dirty AND has somebody to send to, serialize the state
+// exactly once and hand the same pre-serialized string to every consumer.
+// `wantsState` (not just `stateDirty`) is the whole point: with the console
+// closed, the raw stream off and no state output configured — the normal state
+// of a hall PC — nothing is built at all. Before, a full snapshot plus a
+// JSON.stringify of the complete match state ran five times a second for
+// nobody. Each pushState() below still re-checks its own flag, so this is a
+// pure saving and changes nothing a consumer sees.
 const stateTick = setInterval(() => {
-  if (!api.stateDirty && !streamServer.stateDirty && !outputs.stateDirty) return;
+  if (!api.wantsState && !streamServer.wantsState && !outputs.wantsState) return;
   const snapshot = engine.snapshot();
   const str = JSON.stringify({ type: 'state', data: snapshot });
   api.pushState(str);

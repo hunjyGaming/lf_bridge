@@ -58,6 +58,7 @@ Dateirechten `0600` geschrieben.
 | `LF_EVENTLOG_ENABLED` | `true` | `eventLog.enabled` | lesbare Event-Log-Datei schreiben ([LOGGING.md](LOGGING.md)) |
 | `LF_EVENTLOG_DIR` | `data/logs` | `eventLog.dir` | Zielordner der Event-Log-Datei (relativ zum Programm) |
 | `LF_EVENTLOG_ROTATE` | `daily` | `eventLog.rotate` | `daily` = `events-YYYY-MM-DD.log` · `match` = `events-<matchId>.log` (neue Datei je Match) · `none` = `events.log` |
+| `LF_EVENTLOG_FLUSH_MS` | `250` | `eventLog.flushMs` | wie lange eine Zeile höchstens wartet, um sich einen Schreibvorgang mit den nächsten zu teilen (0–5000; `0` = jede Zeile einzeln). Inhalt und Reihenfolge der Datei sind in beiden Fällen gleich — siehe [PERFORMANCE.md](PERFORMANCE.md) |
 | `LF_EMIT_UNKNOWN_EVENTS` | `true` | `engine.emitUnknownEvents` | zusätzlich ein generisches `lf_event` für jeden Typ-4-Code, den der Parser nicht auswertet. Konsolen-Änderung wirkt sofort. |
 | `LF_LOCAL_ROSTER_ENABLED` | `false` | `localRoster.enabled` | Namensliste nutzen |
 | `LF_LOCAL_ROSTER_FILE` | `data/roster.csv` | `localRoster.file` | deren Pfad (setzt automatisch `enabled=true`) |

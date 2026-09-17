@@ -199,6 +199,9 @@ document.querySelectorAll('.tabs button').forEach((b) => b.addEventListener('cli
   document.querySelectorAll('.tab').forEach((s) => s.classList.toggle('active', s.id === 'tab-' + b.dataset.tab));
   if (b.dataset.tab === 'log') pollLogs();
   if (b.dataset.tab === 'stats') loadStats();
+  // Die Wertetabellen werden nur gebaut, solange der Live-Bereich zu sehen ist
+  // — beim Zurückkommen holt ein Bild alles nach.
+  if (b.dataset.tab === 'live') { boardsDue = true; schedulePaint(); }
 }));
 document.querySelectorAll('[data-copy]').forEach((b) => b.addEventListener('click', async () => {
   try { await navigator.clipboard.writeText($(b.dataset.copy).textContent); toast('Kopiert'); }
@@ -220,13 +223,74 @@ function connectWs() {
   };
 }
 
+// ---------------- Zeichentakt ----------------
+// Der Dienst schickt den Zustand fuenfmal je Sekunde und JEDES Ereignis
+// einzeln. Bei ueber fuenfzig Spielern kommen so leicht hundert Nachrichten pro
+// Sekunde herein — und jede einzelne loeste bisher sofort Zeichenarbeit aus.
+// Gemessen ging dabei der groesste Teil nicht ins Bauen der Knoten, sondern in
+// erzwungene Layout-Rechnungen (`offsetWidth`/`scrollHeight` mitten im
+// Nachrichtenfluss): drei Stueck je Ereignis, jede ueber die ganze Seite.
+//
+// Darum sammelt sich hier alles Gezeichnete und geht EINMAL je Bild raus. Was
+// in derselben 1/60 Sekunde mehrfach anfaellt, sieht ohnehin niemand doppelt.
+// Ist das Fenster im Hintergrund, wird gar nicht gezeichnet; beim Zurueckkehren
+// holt ein Bild alles nach. Ein Ersatz-Zeitgeber springt ein, falls der Browser
+// uns keine Bilder gibt (verdecktes Fenster) — die Konsole bleibt dann zwar
+// langsamer, steht aber nie still.
+let paintRaf = 0, paintTimer = null;
+let boardsDue = false;
+const PAINT_FALLBACK_MS = 100;
+function schedulePaint() {
+  if (document.hidden) return;
+  if (!paintRaf) paintRaf = requestAnimationFrame(paintFrame);
+  if (!paintTimer) paintTimer = setTimeout(paintFrame, PAINT_FALLBACK_MS);
+}
+function paintFrame() {
+  if (paintRaf) { cancelAnimationFrame(paintRaf); paintRaf = 0; }
+  if (paintTimer) { clearTimeout(paintTimer); paintTimer = null; }
+  if (document.hidden) return;
+  flushFeed();
+  flushFlow();
+  if (boardsDue) {
+    boardsDue = false;
+    // Die Tabellen gehoeren in den Live-Bereich; ist ein anderer Reiter offen,
+    // gibt es nichts zu zeigen. Der Umschalter oben holt das nach.
+    if (lastState && $('tab-live').classList.contains('active')) renderBoards(lastState);
+  }
+}
+document.addEventListener('visibilitychange', () => {
+  if (document.hidden) return;
+  boardsDue = true;
+  schedulePaint();
+});
+
 // ---------------- signal flow ----------------
-function fireFlow() {
+// Der Lichtpunkt auf der Leitung wird je Bild hoechstens einmal neu gestartet —
+// oefter kann ihn niemand sehen, denn der Browser zeichnet nicht haeufiger. Der
+// Neustart laeuft ueber die laufende Animation selbst; der alte Weg (Klasse ab,
+// `offsetWidth` lesen, Klasse dran) erzwang dafuer jedes Mal eine komplette
+// Layout-Rechnung und war unter Last der teuerste Einzelposten der Oberflaeche.
+let flowDue = false, flowOffT = null;
+function fireFlow() { flowDue = true; schedulePaint(); }
+function flushFlow() {
+  if (!flowDue) return;
+  flowDue = false;
   for (const id of ['wire-a', 'wire-b']) {
     const w = $(id);
-    w.classList.remove('fire'); void w.offsetWidth; w.classList.add('fire');
-    setTimeout(() => w.classList.remove('fire'), 700);
+    if (!w) continue;
+    const dot = w.querySelector('.pulse');
+    const anims = (w.classList.contains('fire') && dot && dot.getAnimations) ? dot.getAnimations() : [];
+    if (anims.length) {
+      // laeuft schon: einfach an den Anfang zuruecksetzen — kein Layout noetig
+      for (const a of anims) { try { a.currentTime = 0; a.play(); } catch {} }
+    } else {
+      w.classList.remove('fire'); void w.offsetWidth; w.classList.add('fire');
+    }
   }
+  clearTimeout(flowOffT);
+  flowOffT = setTimeout(() => {
+    for (const id of ['wire-a', 'wire-b']) $(id)?.classList.remove('fire');
+  }, 700);
 }
 function renderFlow(st) {
   const feeding = st.tcp.connected || (st.tcp.lastLineAt && Date.now() - st.tcp.lastLineAt < 8000);
@@ -525,6 +589,10 @@ function stopClock(stale) {
   else c.removeAttribute('title');
 }
 function startClock() {
+  // Bewusst NICHT idempotent: jeder State-Frame setzt den Zeitgeber neu auf. So
+  // zaehlt er nur in den Sekunden, in denen der Dienst gerade nichts schickt,
+  // und kann der Anzeige nie eine Sekunde vorweg- oder hinterherlaufen. Das
+  // kostet gemessen 0,02 ms je Frame — nichts, was sich zu aendern lohnte.
   stopClock(false);
   clockTimer = setInterval(() => {
     if (Date.now() - lastFeedAt > CLOCK_STALL_MS) return stopClock(true);
@@ -552,7 +620,11 @@ function renderLive(s) {
   renderMatchEnd(!!s.missionActive, s.endReason, s.endedAt);
 
   if (!MODES) loadModes();
-  renderBoards(s);
+  // Die Wertetabellen sind das Teuerste an dieser Anzeige. Sie werden darum
+  // nicht fuenfmal je Sekunde gebaut, sondern hoechstens einmal je Bild — und
+  // nur, wenn der Live-Bereich ueberhaupt zu sehen ist.
+  boardsDue = true;
+  schedulePaint();
 }
 
 // ---------------- adaptive Team-Anzeige ----------------
@@ -840,15 +912,33 @@ function drawClock() {
   if (fill) fill.style.width = (!clockUp && matchDur > 0) ? (Math.min(1, Math.max(0, 1 - ms / matchDur)) * 100).toFixed(1) + '%' : '0%';
 }
 function fmt(ms) { const t = Math.floor((ms || 0) / 1000); return `${Math.floor(t / 60)}:${String(t % 60).padStart(2, '0')}`; }
-function pushFeed(evt) {
-  const f = $('feed');
+// Der Verlauf zeigt die letzten 80 Zeilen. Die Ereignisse kommen einzeln
+// herein, angehaengt wird aber gebuendelt je Bild: das Nachfuehren des
+// Bildlaufs (`scrollHeight`) zwingt den Browser zu einer vollen Layout-Rechnung,
+// und die soll einmal je Bild anfallen, nicht einmal je Ereignis. Laenger als
+// 80 Zeilen wird der Stapel nie — auch nicht, wenn im Hintergrund gesammelt wird.
+const FEED_MAX = 80;
+const feedQueue = [];
+function feedLine(evt) {
   const cat = evtCategory(evt);
-  const line = el('div', { className: 'fe', style: `--cat:var(--cat-${cat})` },
+  return el('div', { className: 'fe', style: `--cat:var(--cat-${cat})` },
     el('span', { className: 'ft' }, fmt(evt.elapsedMs)),
     el('i', { className: 'flamp' }),
     el('span', { className: 'fx' + (cat === 'score' ? ' fg' : '') }, evtSentence(evt)));
-  f.append(line);
-  while (f.childElementCount > 80) f.removeChild(f.firstChild);
+}
+function pushFeed(evt) {
+  feedQueue.push(evt);
+  if (feedQueue.length > FEED_MAX) feedQueue.splice(0, feedQueue.length - FEED_MAX);
+  schedulePaint();
+}
+function flushFeed() {
+  if (!feedQueue.length) return;
+  const f = $('feed');
+  const frag = document.createDocumentFragment();
+  for (const evt of feedQueue) frag.append(feedLine(evt));
+  feedQueue.length = 0;
+  f.append(frag);
+  while (f.childElementCount > FEED_MAX) f.removeChild(f.firstChild);
   f.scrollTop = f.scrollHeight;
 }
 
@@ -877,23 +967,65 @@ const events = (() => {
     return row;
   };
 
+  // Wieviele Zeilen gerade sichtbar sind — mitgefuehrt, statt bei jedem
+  // Ereignis neu gezaehlt.
+  let shown = 0;
+  let emptyNode = null;
+
+  function syncCount() {
+    const c = $('ev-count');
+    if (c) c.textContent = LOG.length ? `${shown}/${LOG.length}` : '';
+  }
+  /** Der Hinweis, wenn nichts zu sehen ist — genau ein Knoten, nie mehrere. */
+  function syncEmpty(log) {
+    if (shown) { if (emptyNode) { emptyNode.remove(); emptyNode = null; } return; }
+    const text = LOG.length
+      ? 'Alle Kategorien ausgeblendet — oben wieder einblenden.'
+      : 'Noch keine Ereignisse — warten auf den Laserforce-Stream.';
+    if (!emptyNode) { emptyNode = el('p', { className: 'ev-empty' }, text); log.append(emptyNode); }
+    else if (emptyNode.textContent !== text) emptyNode.textContent = text;
+  }
+
+  /**
+   * Kompletter Neuaufbau — nur wo er noetig ist: beim ersten Oeffnen, nach
+   * einem Filterwechsel und nach dem Nachladen. NICHT je Ereignis: bei fuenfzig
+   * Spielern kamen so zweihundert Zeilen mal die Ereignisrate zusammen,
+   * gemessen ueber vierzigtausend verworfene Knoten je Sekunde — auch dann,
+   * wenn dieser Bereich gar nicht zu sehen war.
+   */
   function render() {
     const log = $('ev-log');
     if (!log) return;
     log.textContent = '';
-    let shown = 0;
+    emptyNode = null;
+    shown = 0;
+    const frag = document.createDocumentFragment();
     for (const e of LOG) {
       const row = rowFor(e);
       if (!row.hidden) shown++;
-      log.append(row);
+      frag.append(row);
     }
-    if (!shown) {
-      log.append(el('p', { className: 'ev-empty' },
-        LOG.length ? 'Alle Kategorien ausgeblendet — oben wieder einblenden.'
-                   : 'Noch keine Ereignisse — warten auf den Laserforce-Stream.'));
+    log.append(frag);
+    syncEmpty(log);
+    syncCount();
+  }
+
+  /** Eine neue Zeile nach oben, die aelteste raus — der Rest bleibt stehen. */
+  function addRow(e) {
+    const log = $('ev-log');
+    if (!log) return;
+    if (emptyNode) { emptyNode.remove(); emptyNode = null; }
+    const row = rowFor(e);
+    if (!row.hidden) shown++;
+    log.prepend(row);
+    while (log.childElementCount > MAX) {
+      const last = log.lastElementChild;
+      if (!last) break;
+      if (!last.hidden) shown--;
+      last.remove();
     }
-    const c = $('ev-count');
-    if (c) c.textContent = LOG.length ? `${shown}/${LOG.length}` : '';
+    syncEmpty(log);
+    syncCount();
   }
 
   function add(e) {
@@ -902,7 +1034,7 @@ const events = (() => {
     if (paused) { bufferedWhilePaused++; syncPause(); return; }
     LOG.unshift(e);
     if (LOG.length > MAX) LOG.length = MAX;
-    if (ready) render();
+    if (ready) addRow(e);
   }
 
   function syncPause() {
@@ -914,7 +1046,9 @@ const events = (() => {
 
   async function togglePause() {
     paused = !paused;
-    if (!paused && bufferedWhilePaused) { bufferedWhilePaused = 0; await backfill(); }
+    // Nach dem Nachladen einmal komplett neu — die nachgereichten Zeilen stehen
+    // mitten in der Liste, nicht oben.
+    if (!paused && bufferedWhilePaused) { bufferedWhilePaused = 0; await backfill(); if (ready) render(); }
     syncPause();
   }
 

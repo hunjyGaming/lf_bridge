@@ -114,7 +114,11 @@ class StreamServer {
 
   markDirty() { this.stateDirty = true; }
 
+  /** See ApiServer.wantsState — the shared state tick asks before serializing. */
+  get wantsState() { return this.stateDirty && this.clients.size > 0; }
+
   broadcastEvent(evt) {
+    if (this.clients.size === 0) return;      // off by default: serialize for nobody
     const line = JSON.stringify({ type: 'event', data: evt }) + '\n';
     for (const s of this.clients) { try { s.write(line); } catch {} }
   }

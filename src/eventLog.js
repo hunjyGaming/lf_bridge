@@ -24,6 +24,14 @@ const { describe, readable } = require('./eventCatalog');
  * Writes go through a small async queue (like logger.js); fs errors are caught
  * and surfaced once via the app logger as a warning — they never reach the
  * caller. A synchronous flush runs on process exit and on shutdown().
+ *
+ * Lines that pile up within `config.eventLog.flushMs` share ONE append call.
+ * That is a pure load measure and changes neither the content nor the order of
+ * the file — only how many write calls it takes. It matters: at 50 players one
+ * append per event accounted for 99.9 % of every write call the service made,
+ * and dropping it cut the whole service's CPU by about a third
+ * (docs/PERFORMANCE.md). `flushMs = 0` restores the old write-per-event
+ * behaviour.
  */
 
 // Longest real category ("possession") is 10 chars — pad every category to that
@@ -48,8 +56,13 @@ class EventLog {
     this.dir = path.resolve(process.cwd(), this._dirRel);
     this.rotate = ['daily', 'match', 'none'].includes(cfg.rotate) ? cfg.rotate : 'daily';
     this.prefix = String(cfg.filenamePrefix || 'events').replace(/[^a-zA-Z0-9._-]/g, '') || 'events';
+    // How long a line may wait to share an append with the next ones. The
+    // config layer clamps this to 0…5000; the fallback here keeps a hand-built
+    // config object (tests, scripts) on the old write-per-event behaviour.
+    this.flushMs = Number.isFinite(cfg.flushMs) ? Math.max(0, Math.min(5000, cfg.flushMs)) : 0;
 
     this._queue = [];
+    this._timer = null;
     this._writing = false;
     this._dirReady = false;
     this._mkdirPending = false;
@@ -85,7 +98,13 @@ class EventLog {
     if (!this.enabled) return;
     try {
       const s = snapshot || {};
-      if (this.rotate === 'match' && s.matchId) this._matchId = s.matchId;
+      if (this.rotate === 'match' && s.matchId && s.matchId !== this._matchId) {
+        // The target file is about to change. Anything still queued belongs to
+        // the match that just ended, so it goes to the OLD file first —
+        // currentFile() reads this._matchId, so the order here matters.
+        this.flush();
+        this._matchId = s.matchId;
+      }
       const id = s.matchId || '?';
       const mode = firstStr(s.mode, s.missionType, s.gameMode);
       const n = s.players && typeof s.players === 'object' ? Object.keys(s.players).length : null;
@@ -114,6 +133,7 @@ class EventLog {
 
   /** Synchronous best-effort flush — process exit / shutdown(). */
   flush() {
+    if (this._timer) { clearTimeout(this._timer); this._timer = null; }
     if (!this._queue.length) return;
     const chunk = this._queue.join('');
     this._queue.length = 0;
@@ -127,7 +147,21 @@ class EventLog {
   _enqueue(line) {
     if (line == null) return;
     this._queue.push(line.endsWith('\n') ? line : `${line}\n`);
-    this._drain();
+    this._schedule();
+  }
+
+  /**
+   * Let a burst of lines share one append. While a write is already in flight
+   * the queue collects anyway (that was always so) — this only adds the same
+   * coalescing for the idle case, where every single event used to cost its own
+   * append call. The timer is unref'd, so it never keeps the process alive, and
+   * flush() clears it.
+   */
+  _schedule() {
+    if (this._writing || this._timer) return;
+    if (!this.flushMs) { this._drain(); return; }
+    this._timer = setTimeout(() => { this._timer = null; this._drain(); }, this.flushMs);
+    this._timer.unref?.();
   }
 
   _drain() {

@@ -76,6 +76,10 @@ function defaults() {
       dir: 'data/logs',
       rotate: 'daily',             // 'daily' | 'match' | 'none'
       filenamePrefix: 'events',
+      // How long a line may wait so a burst shares ONE write call. Content and
+      // order of the file are unaffected; only the number of writes changes.
+      // 0 = write every event on its own (costly: see docs/PERFORMANCE.md).
+      flushMs: 250,
     },
 
     // Statistics -> CSV files on this PC (docs/STATS.md)
@@ -166,6 +170,7 @@ function applyEnv(cfg, pins) {
   if (Eb('LF_EVENTLOG_ENABLED') !== undefined) { cfg.eventLog.enabled = Eb('LF_EVENTLOG_ENABLED'); P('eventLog.enabled', 1); }
   if (E('LF_EVENTLOG_DIR')) { cfg.eventLog.dir = E('LF_EVENTLOG_DIR'); P('eventLog.dir', 1); }
   if (['daily', 'match', 'none'].includes(E('LF_EVENTLOG_ROTATE'))) { cfg.eventLog.rotate = E('LF_EVENTLOG_ROTATE'); P('eventLog.rotate', 1); }
+  if (Ei('LF_EVENTLOG_FLUSH_MS') !== undefined) { cfg.eventLog.flushMs = Ei('LF_EVENTLOG_FLUSH_MS'); P('eventLog.flushMs', 1); }
 
   if (Eb('LF_CSV_ENABLED') !== undefined) { cfg.csv.enabled = Eb('LF_CSV_ENABLED'); P('csv.enabled', 1); }
   if (E('LF_CSV_DIR')) { cfg.csv.dir = E('LF_CSV_DIR'); P('csv.dir', 1); }
@@ -311,6 +316,9 @@ function normalize(raw) {
   c.eventLog.dir = str(raw.eventLog?.dir, d.eventLog.dir).trim() || d.eventLog.dir;
   c.eventLog.rotate = (['daily', 'match', 'none'].includes(raw.eventLog?.rotate)) ? raw.eventLog.rotate : d.eventLog.rotate;
   c.eventLog.filenamePrefix = (str(raw.eventLog?.filenamePrefix, d.eventLog.filenamePrefix).trim() || d.eventLog.filenamePrefix).replace(/[^a-zA-Z0-9._-]/g, '') || d.eventLog.filenamePrefix;
+  // 0 = jede Zeile sofort schreiben. Obergrenze 5 s: länger darf eine Zeile
+  // nicht auf die Platte warten, sonst fehlt bei einem harten Stromausfall zu viel.
+  c.eventLog.flushMs = clampInt(raw.eventLog?.flushMs, d.eventLog.flushMs, 0, 5000);
 
   c.csv.enabled = bool(raw.csv?.enabled, d.csv.enabled);
   c.csv.dir = str(raw.csv?.dir, d.csv.dir).trim() || d.csv.dir;

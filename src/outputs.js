@@ -102,6 +102,15 @@ class Outputs {
   markDirty() { this.stateDirty = true; }
 
   /**
+   * See ApiServer.wantsState — the shared state tick asks before serializing.
+   * Only an enabled output with `sendState` ever receives one; without such a
+   * target the whole snapshot is not built at all.
+   */
+  get wantsState() {
+    return this.stateDirty && this.list().some((o) => o.enabled && o.sendState);
+  }
+
+  /**
    * Shared state tick (src/index.js): `snapshot` is engine.snapshot() and `str`
    * is the already-serialized {type:'state',data:snapshot}. Reuse `str` for the
    * newline-delimited tcp/udp targets; the webhook path keeps its own envelope.

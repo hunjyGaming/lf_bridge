@@ -1211,8 +1211,13 @@ try {
     eng.processLogLine('6 300000 @1 02 4200');
     assert.strictEqual(eng.checkMatchEnd(t0 + 1000), null, 'one of two entities: nothing yet');
     eng.processLogLine('6 300000 @2 02 3100');       // now every player has reported
-    assert.strictEqual(eng.checkMatchEnd(t0 + 9999), null, 'the grace period is respected — 0101 could still come');
-    assert.strictEqual(eng.checkMatchEnd(t0 + 10000), 'watchdog', 'after the grace period the summary ends the match');
+    // The grace period runs from the moment the engine ARMED it, which is a
+    // fresh Date.now() inside the line above — not from t0. On a busy machine
+    // whole milliseconds pass between two processLogLine() calls, so measuring
+    // from t0 made this assertion fail at random.
+    const armed = eng._endBlockAt;
+    assert.strictEqual(eng.checkMatchEnd(armed + 9999), null, 'the grace period is respected — 0101 could still come');
+    assert.strictEqual(eng.checkMatchEnd(armed + 10000), 'watchdog', 'after the grace period the summary ends the match');
     assert.ok(eng.snapshot().endedAt - eng.snapshot().updatedAt <= 0 || true, 'endedAt set');
     assert.strictEqual(eng.snapshot().missionActive, false, 'clock stopped ~110 s before the watchdog would have');
   }

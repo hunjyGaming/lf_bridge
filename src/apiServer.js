@@ -960,7 +960,15 @@ class ApiServer {
   _safe(ws, obj) { if (ws.readyState === ws.OPEN) { try { ws.send(JSON.stringify(obj)); } catch {} } }
 
   markDirty() { this.stateDirty = true; }
+  /**
+   * Would pushState() actually send anything? The shared state tick in
+   * src/index.js asks every consumer this BEFORE it serializes, so a closed
+   * console costs nothing at all instead of a full JSON.stringify of the whole
+   * match state five times a second.
+   */
+  get wantsState() { return this.stateDirty && this.clients.size > 0; }
   broadcastEvent(evt) {
+    if (this.clients.size === 0) return;      // nobody to serialize for
     const payload = JSON.stringify({ type: 'event', data: evt });
     for (const ws of this.clients) if (ws.readyState === ws.OPEN) { try { ws.send(payload); } catch {} }
   }
