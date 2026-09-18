@@ -9,9 +9,14 @@ Laserforce-Log-Stream, hält den Match-Zustand im Speicher und macht ihn im
 - **JSON-API + WebSocket** zum Abfragen / für Live-Push ([docs/API.md](docs/API.md))
 - **Roher TCP-Stream** für Tools ohne HTTP
 - **Ausgänge** — Daten aktiv an eine `IP:Port` schicken, per **Webhook / TCP / UDP**
+- **MQTT** — Rundenstart (mit der **genauen Laufzeit**), Rundenende und
+  Missionsbericht an den **FunZone-Locationserver**. Standardmäßig aus; ohne
+  Broker startet lf_live trotzdem sofort ([docs/MQTT.md](docs/MQTT.md))
 - **Spielmodus-Erkennung** — erkennt an der Laserforce-Missionszeile, ob Laserball
   oder Space Marines läuft, und zählt entsprechend. Ein unbekannter Modus läuft
-  trotzdem korrekt, ohne dass jemand etwas einträgt ([docs/GAMEMODES.md](docs/GAMEMODES.md))
+  trotzdem korrekt, ohne dass jemand etwas einträgt. Die eigenen Modus-Nummern
+  der Anlage trägt der Betreiber selbst in **JSON-Dateien unter `modes/`** ein —
+  eine Zahl in eine Liste, kein Code ([docs/GAMEMODES.md](docs/GAMEMODES.md#spielmodi-in-json-dateien))
 - **Statistik als CSV** — nach jedem Match, pro Spieler, plus Gesamtwertung je
   Spielmodus-Familie, dazu ein Match-Index und „wer hat wann welchen Modus
   gespielt" ([docs/STATS.md](docs/STATS.md))
@@ -86,6 +91,10 @@ Zwei Ebenen, die spätere gewinnt:
 | `LF_STATE_TICK_MS` | `200` | Takt für den gemeinsamen State-Push an WebSocket, Raw-Stream und Ausgänge · min `50`, max `5000` |
 | `LF_TRUST_PROXY` | `false` | `X-Forwarded-For` auswerten — nur hinter eigenem Reverse-Proxy |
 | `LF_OUTPUT_ALLOW` | *(leer = alles)* | erlaubte Ausgangs-Ziele: `host` / `host:port` / `*.suffix` (Komma-Liste) |
+| `LF_MQTT_ENABLED` | `false` | MQTT-Ausgang zum FunZone-Locationserver — [docs/MQTT.md](docs/MQTT.md) |
+| `LF_MQTT_URL` | `mqtt://127.0.0.1:1883` | Broker-Adresse (`mqtt` · `mqtts` · `ws` · `wss`) |
+| `LF_MQTT_TOPIC` | `/decs/lfpassthrough` | Topic, das der Locationserver abonniert |
+| `LF_MQTT_USERNAME` / `LF_MQTT_PASSWORD` | *(leer)* | Broker-Zugangsdaten — **nur Umgebung**, nie in `config.json` |
 | `LF_TCP_HOST` | `0.0.0.0` | Bind für den Laserforce-Eingang |
 | `LF_TCP_PORT` | `9000` | Laserforce verbindet sich hierher |
 | `LF_STREAM_ENABLED` | `false` | roher TCP-Stream-Server an/aus |
@@ -117,6 +126,7 @@ Feld-für-Feld: [docs/CONFIG.md](docs/CONFIG.md) · Sicherheit: [docs/SECURITY.m
 | Weg | Wofür | Doku |
 |---|---|---|
 | **Regie-Software (Next.js)** | Scoreboard, Torgrafiken, Trigger | [docs/REGIE.md](docs/REGIE.md) — fertige Bridge + React-Hook |
+| **FunZone-Locationserver** | Rundenstart mit genauer Laufzeit, Rundenende, Missionsbericht über MQTT | [docs/MQTT.md](docs/MQTT.md) |
 | REST / WebSocket / Raw-TCP / Webhook / TCP / UDP | alles andere | [docs/INTEGRATION.md](docs/INTEGRATION.md) |
 
 ```bash
@@ -159,12 +169,19 @@ src/
   apiServer.js    HTTP-API + WebSocket + Konsole (ein Port) + Härtung
   streamServer.js roher TCP-Stream raus
   outputs.js      ausgehende Ziele: webhook / tcp / udp
+  mqtt.js         MQTT-Ausgang zum FunZone-Locationserver (standardmäßig aus)
   statsWriter.js  Statistik → CSV
   eventLog.js     lesbare Event-Log-Datei (data/logs/)
   capture.js      Roh-Mitschnitt des TCP-Streams (data/capture/, standardmäßig aus)
   eventCatalog.js Event-Code-Nachschlagewerk (Label, Kategorie, Klartext)
   localRoster.js  optionale Namensliste (CSV)
   web/            die Konsole (statisch, kein Build)
+modes/            Spielmodi als JSON — je Modus eine Datei, von Hand pflegbar
+  _vorlage.json   Vorlage für einen neuen Modus (Dateien mit _ werden nie geladen)
+  standard.json   „Standard" — Nummer noch einzutragen (docs/GAMEMODES.md)
+  sm5.json        Space Marines 5 (Nummer 5)
+  laserball-ranked.json  Laserball Ranked (Nummer 28)
+  profile/        Anzeigeprofile: welche Spalten ein Modus zeigt
 scripts/
   check.js        Selbsttest            npm run check
   itest.js        End-to-End-Test       npm run itest
@@ -179,7 +196,7 @@ docs/
   REGIE.md        Regie-Software (Next.js) anbinden
   INTEGRATION.md  Fremdsoftware allgemein
   LASERFORCE.md   Anbindung, Log-Format, alle Event-Codes
-  GAMEMODES.md    Spielmodi: Erkennung, Zähler je Familie, neuen Modus eintragen
+  GAMEMODES.md    Spielmodi: Erkennung, Zähler je Familie, Modi in modes/*.json eintragen
   STATS.md        CSV-Dateien, Spalten, Auswertung
   LOGGING.md      lesbare Event-Log-Datei: Zeilenformat, Rotation
   CAPTURE.md      Roh-Mitschnitt: aufzeichnen, Grenzen, zurückspielen

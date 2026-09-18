@@ -1,0 +1,73 @@
+{
+  "beschreibung": "Anzeigeprofil \"Standard\": der schlanke Spaltensatz für ein ganz normales Spiel — Punkte, Spielerlevel und die drei Schusszahlen. Protokollfamilie sm5.",
+  "profil": "standard",
+  "anzeigename": "Standard",
+  "familie": "sm5",
+  "scoreboard": [
+    "score",
+    "level",
+    "shotsFired",
+    "shotsHit",
+    "accuracy"
+  ],
+  "csv": [
+    "shotsFired",
+    "shotsHit",
+    "accuracy",
+    "misses",
+    "timesHit",
+    "deactivations",
+    "timesDeactivated",
+    "shotTeam",
+    "timesHitByTeam",
+    "targetHits",
+    "targetDestroys",
+    "missileLocks",
+    "missileHits",
+    "missileMisses",
+    "missileDestroys",
+    "timesMissiled",
+    "missileTeam",
+    "nukesActivated",
+    "nukesDetonated",
+    "rapidFires",
+    "ammoResupplies",
+    "ammoReceived",
+    "livesResupplies",
+    "livesReceived",
+    "teamAmmoResupplies",
+    "teamLivesResupplies",
+    "penalties",
+    "beaconClaims",
+    "baseAwards",
+    "achievements",
+    "rewards"
+  ],
+  "sortierung": [
+    "score",
+    "shotsHit"
+  ],
+
+  "_bericht": {
+    "beschreibung": "Der Missionsbericht — die KURZFASSUNG, die nach jedem Match ans Backend geht (docs/INTEGRATION.md). Nicht zu verwechseln mit csv: dort steht der vollständige Zählerblock für die eigene Auswertung, hier nur das, was die Gegenseite wirklich braucht.",
+    "spieler": [
+      "score",
+      "level",
+      "shotsFired",
+      "shotsHit",
+      "accuracy"
+    ],
+    "uebersicht": [
+      "teams",
+      "sieger",
+      "ende",
+      "punktequelle",
+      "dauer",
+      "spielerzahl"
+    ],
+    "namen": true,
+    "hinweis": "Spieler-Kennung, Mitglied-oder-Gast, Team und Ausgang stehen IMMER im Bericht und müssen hier nicht genannt werden; ebenso Match-Kennung, Start, Ende und Modus in der Übersicht. Mit \"accuracy\" gehen automatisch \"accuracySource\" und \"accuracyIsEstimate\" mit — die Trefferquote ist während des Spiels nur eine Schätzung und liegt systematisch zu hoch. \"namen\": false lässt die Spielernamen weg; dann verlässt nur noch die Kennung den Rechner."
+  },
+
+  "hinweis": "scoreboard = Spalten der Live-Anzeige, csv = Spalten des Zählerblocks in den CSV-Dateien, sortierung = wonach eine Gesamtwertung rangiert, _bericht = was im Missionsbericht ans Backend geht. Alle Kennzahlnamen müssen aus der Tabelle METRICS in src/gameModes.js stammen (Liste in docs/GAMEMODES.md)."
+}

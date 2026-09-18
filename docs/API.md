@@ -1,5 +1,12 @@
 # API-Referenz
 
+> **Du baust nur eine Anzeige** (Beamer-Scoreboard, Overlay, Turniersystem)?
+> Dann brauchst du von hier nur zwei Dinge: das Kapitel
+> **[Für Anzeige-Entwickler](#für-anzeige-entwickler)** ganz unten und die
+> Kurzanleitung
+> [„Anzeige auf einem zweiten Rechner anbinden"](SECURITY.md#anzeige-auf-einem-zweiten-rechner-anbinden).
+> Der Rest dieser Seite richtet sich an jemanden, der den Dienst betreibt.
+
 Basis: `http://<hallen-pc>:8080` (Port aus der Konfiguration).
 
 Solange die Ersteinrichtung offen ist (kein Admin-Passwort gesetzt), antwortet
@@ -110,6 +117,42 @@ aufrufende bekommt einen frischen Cookie.
 | `400 { "error": "weak_password", "hint": … }` | zu kurz/leer |
 | `401 { "error": "bad_password" }` | `current` stimmt nicht |
 | `409 { "error": "pinned" }` | `LF_ADMIN_PASSWORD` steht in der `.env` |
+
+### `GET /api/access`  — immer offen
+
+**„Warum komme ich nicht rein?"** — der Endpunkt für eine Anzeige auf einem
+zweiten Rechner. Er beantwortet genau die zwei Fragen, an denen am Turniertag
+alles scheitert: *ist mein Token angekommen* und *ist meine Herkunft
+freigegeben*. Ohne diese Antwort blockt der Browser still, und niemand weiß
+warum. Kurzanleitung: [SECURITY.md](SECURITY.md#anzeige-auf-einem-zweiten-rechner-anbinden).
+
+```jsonc
+{ "data": {
+  "service": "lf-live",
+  "origin": "http://anzeige-pc:5173",  // was der Aufrufer selbst geschickt hat
+  "originAllowed": false,              // false => der Browser verwirft jede Antwort STILL
+  "authenticated": true,               // würde genau diese Anfrage durchgelassen?
+  "tokenRequired": true,
+  "tokenSent": true,
+  "tokenAccepted": true,               // null, wenn gar kein Token verlangt wird
+  "loginRequired": false,
+  "viaSession": false,
+  "setupPending": false,
+  "websocket": { "path": "/ws", "corsApplies": false, "tokenRequired": true },
+  "problems": [                        // im Klartext, was zu tun ist; leer = alles gut
+    "die Herkunft http://anzeige-pc:5173 steht nicht in cors[] — der Browser verwirft die Antwort still; Origin in LF_CORS_ORIGINS eintragen"
+  ],
+  "ts": 1699999999999
+} }
+```
+
+Bewusst ohne Anmeldung erreichbar — wer **nicht** hereinkommt, ist genau der,
+der die Antwort braucht. Verraten wird dabei nichts Neues: die eigene Herkunft
+hat der Aufrufer selbst geschickt, ob sie freigegeben ist sagt schon das
+Vorhandensein des `Access-Control-Allow-Origin`-Headers, und ob ein Token oder
+ein Login verlangt wird steht bereits in `/api/auth/session`. Die **Liste** der
+erlaubten Herkünfte gibt der Endpunkt nie heraus, und über das Token selbst sagt
+er nichts. Das Rate-Limit gilt wie überall.
 
 ### `GET /api/network`
 
@@ -248,6 +291,33 @@ negativ wird.
 Kurz: ist `remainingMs` gleich `null`, wird aufwärts gezählt. Sonst abwärts.
 So macht es auch die mitgelieferte Web-Konsole.
 
+### `GET /api/display`
+
+**Der Anzeige-Datensatz** — alles, was ein Scoreboard, ein Beamer-Overlay oder
+ein Turniersystem braucht, und nichts sonst. Gebaut aus **demselben**
+`engine.snapshot()` wie `/api/state`, kann also nie davon abweichen.
+
+| Parameter | Wirkung |
+|---|---|
+| *(keiner)* | kompletter Datensatz inkl. Spielerliste |
+| `?players=none` | ohne Spielerliste (`players: null`) — für eine reine Punkteanzeige |
+
+Vollständiges kommentiertes Beispiel, was stabil ist und was nicht, und ein
+lauffähiges Minimalbeispiel: **[Für Anzeige-Entwickler](#für-anzeige-entwickler)**
+weiter unten. Über WebSocket heißt derselbe Datensatz `/ws?feed=display`.
+
+**Warum es ihn gibt, gemessen bei 50 Spielern (SM5-Profil, 15 Spalten):**
+
+| | eine Antwort | bei 5 Pushes/s je Verbraucher |
+|---|---|---|
+| `/api/state` (voller Snapshot) | 69,5 KiB | 348 KiB/s |
+| `/api/display` | 31,3 KiB (−55 %) | 157 KiB/s |
+| `/api/display?players=none` | 2,4 KiB (−97 %) | 12 KiB/s |
+
+Eine Anzeige, die nur Punkte und Uhr zeigt, kommt also mit einem Dreißigstel
+aus. Der Datensatz enthält **keine** Ereignisliste, keine Rohwerte der Anlage
+und nur die Spalten des laufenden Modus.
+
 ### `GET /api/modes`
 
 Die Modus-Registry und der gerade erkannte Modus. Read-only, dieselbe
@@ -329,6 +399,40 @@ Auth-, CORS-, Token- und Rate-Limit-Behandlung wie jeder andere GET-Endpunkt.
   die mitgelieferte Konsole nicht — eine eigene Liste von Spaltennamen.
 - Die Antwort enthält **nur** Registry-Daten: keine Pfade, keine Dateien, keine
   Konfiguration.
+
+- **`config` (additiv)** — ein Urteil über die handgepflegten Dateien unter
+  `modes/`: `{ "ok": true, "problems": 0, "loadedAt": "2026-09-18T08:48:30.288Z" }`.
+  Ist `ok` falsch, steht in
+  [`/api/modes/status`](#get-apimodesstatus), welche Datei was hat.
+- Die Profile werden **je Anfrage** aufgelöst, nicht einmal beim Start: die
+  Modus-Dateien werden bei jedem Speichern in der Konsole neu eingelesen, und
+  eine nachgetragene Missionsnummer muss ohne Dienstneustart hier erscheinen.
+  Zwischengespeichert wird gegen `loadedAt`, damit das nichts kostet
+  (Neuaufbau 0,08 ms, Cache-Prüfung 0,008 ms — gemessen).
+
+### `GET /api/modes/status`
+
+Welche Dateien unter `modes/` gelesen wurden, was sie definieren, und alles, was
+an ihnen falsch ist. Ohne diesen Endpunkt landet ein Tippfehler in einer
+Modus-Datei nur im Log.
+
+```jsonc
+{ "data": {
+  "dir": "C:\\lf-live\\modes",
+  "files": ["modes/profile/laserball.json", "modes/sm5.json", …],
+  "profiles": ["standard", "sm5", "laserball"],
+  "modes": [ { "file": "modes/sm5.json", "key": "sm5", "label": "Space Marines 5",
+               "family": "sm5", "profile": "sm5", "numbers": [5] } ],
+  "problems": [ { "level": "error", "file": "modes/standard.json",
+                  "message": "Die Datei ist kein gültiges JSON: …" } ],
+  "ok": false,
+  "loadedAt": "2026-09-18T08:48:30.288Z"
+} }
+```
+
+`problems` ist leer, solange alles in Ordnung ist. Eine fehlerhafte Datei wird
+**übersprungen** — es gelten dann die eingebauten Vorgaben, der Dienst läuft
+weiter. Einzelheiten: [GAMEMODES.md](GAMEMODES.md).
 
 Die Liste `modes` enthält nur die **bekannten** Nummern. Läuft gerade ein
 unbekannter Modus, steht er in `current` mit `known: false`, aber nicht in
@@ -537,26 +641,93 @@ Was der Dienst schickt:
 
 ```jsonc
 { "type": "hello", "service": "lf-live", "ts": 1699999999999 }
+{ "type": "ready", "feed": "state", "batch": false, "batchMs": 100, "players": true, "ts": … }
 { "type": "state", "data": { …kompletter Snapshot… } }   // bei Verbindung + danach im Takt LF_STATE_TICK_MS (Default 200 ms ≈ 5/s), nur wenn sich etwas geändert hat
 { "type": "event", "data": { …ein Event… } }             // sofort pro Ereignis
 { "type": "raw",   "lines": ["4\t1000\t1107\t#1001", …], "dropped": 0, "ts": … }
+// nur auf ausdrückliche Anforderung:
+{ "type": "display", "data": { …Anzeige-Datensatz… } }   // statt/neben `state`, siehe ?feed=
+{ "type": "events",  "data": [ {…}, {…} ], "dropped": 0, "ts": … }  // gebündelte Ereignisse, siehe ?events=batch
 ```
 
 Bei Verbindungsabbruch mit kurzem Backoff neu verbinden; nach dem Reconnect kommt
-zuerst wieder ein `state`.
+zuerst wieder ein `state` bzw. `display`.
 
-### Die eine Nachricht, die ein Client senden darf
+`ready` ist **additiv** und nennt, worauf der Client tatsächlich angemeldet
+wurde. Damit fällt ein Tippfehler in der Verbindungs-URL sofort auf, statt still
+zu wirken. Ältere Verbraucher ignorieren die Nachricht einfach.
 
-Bis auf **eine** werden eingehende Nachrichten ignoriert — alles über 256 Bytes
+### Was ein Client anfordern kann — `?feed=` · `?events=`
+
+**Die Vorgaben sind unverändert:** ohne Parameter bekommt ein Client genau das,
+was dieser Dienst immer geschickt hat — einen vollen `state`-Rahmen je Takt und
+einen `event`-Rahmen je Ereignis. Alles andere muss ausdrücklich angefordert
+werden, beim Verbindungsaufbau in der URL:
+
+| Parameter | Werte | Wirkung |
+|---|---|---|
+| `feed` | `state` *(Vorgabe)* · `display` · `both` | voller Snapshot · [Anzeige-Datensatz](#für-anzeige-entwickler) · beides |
+| `events` | `single` *(Vorgabe)* · `batch` | ein Rahmen je Ereignis · **gebündelte** Rahmen |
+| `batchMs` | 20…1000, Vorgabe `100` | Bündelfenster |
+| `players` | `full` *(Vorgabe)* · `none` | Spielerliste im `display`-Rahmen weglassen |
+
+```
+ws://<hallen-pc>:8080/ws?feed=display&events=batch&token=<token>
+ws://<hallen-pc>:8080/ws?feed=display&players=none&token=<token>   # nur Punkte + Uhr
+```
+
+Dasselbe geht zur Laufzeit mit einer `subscribe`-Nachricht (siehe unten). Ein
+unbekannter Wert wird **ignoriert**, der bisherige bleibt stehen — ein Tippfehler
+schaltet nie versehentlich etwas ab. Was gilt, steht im `ready`-Rahmen.
+
+### Gebündelte Ereignisse — `{"type":"events"}`
+
+Bei hoher Ereignisrate wird **ein WebSocket-Rahmen je Ereignis** teuer: schon das
+Auspacken kostet den Verbraucher je Rahmen einen `JSON.parse` und einen
+Handler-Aufruf. Gemessen, 1200 Ereignisse so schnell wie die Anlage sie liefert:
+
+| | WS-Rahmen | Ereignisse | `JSON.parse` gesamt beim Verbraucher |
+|---|---|---|---|
+| `events=single` (Vorgabe) | 1200 | 1200 | 11,5 ms |
+| `events=batch&batchMs=100` | **6** | 1200 | **3,2 ms** |
+
+Also 99,5 % weniger Rahmen und rund ein Drittel der Auspack-Kosten, bei
+**gleicher** Ereigniszahl — es geht nichts verloren.
+
+```jsonc
+{ "type": "events", "data": [ { …Event… }, { …Event… } ], "dropped": 0, "ts": 1699999999999 }
+```
+
+- Die Warteschlange ist **je Client**: ein langsamer Verbraucher bremst keinen
+  schnellen.
+- Sie ist **begrenzt** (2000 Ereignisse). Läuft sie über, werden die
+  **ältesten** verworfen und in `dropped` des nächsten Rahmens gezählt — der
+  Dienst lässt lieber Ereignisse fallen, als für einen Verbraucher zu wachsen,
+  der nicht mitkommt. `dropped: 0` ist der Normalfall.
+- Ein Stau von 200 Ereignissen geht sofort raus, ohne das Fenster abzuwarten.
+- `events`-Rahmen und `event`-Rahmen kommen **nie gemischt**: ein Client bekommt
+  das eine oder das andere.
+
+### Die Nachrichten, die ein Client senden darf
+
+Bis auf **zwei** werden eingehende Nachrichten ignoriert — alles über 256 Bytes
 wird verworfen, ohne überhaupt geparst zu werden.
 
 ```jsonc
 { "type": "rawtap", "on": true }    // "ich schaue auf die Rohzeilen"
 { "type": "rawtap", "on": false }   // "ich schaue nicht mehr hin"
+
+// dieselben vier Schalter wie in der URL, jederzeit änderbar:
+{ "type": "subscribe", "feed": "display", "events": "batch", "batchMs": 100, "players": "none" }
 ```
 
-Erst danach kommen `raw`-Rahmen, und nur an die Clients, die sich gemeldet
-haben. **Ohne Anmeldung erzeugt der Dienst überhaupt keine Rohzeilen** — er
+Auf `subscribe` antwortet der Dienst mit einem `ready`-Rahmen; hat sich die
+Anmeldung wirklich geändert, kommt gleich darauf der passende Eröffnungsrahmen
+(`state` bzw. `display`), damit der Client nicht auf den nächsten Takt warten
+muss.
+
+Zu `rawtap`: erst danach kommen `raw`-Rahmen, und nur an die Clients, die sich
+gemeldet haben. **Ohne Anmeldung erzeugt der Dienst überhaupt keine Rohzeilen** — er
 zerlegt den TCP-Strom dafür nicht einmal in Zeilen. Beim Schließen der
 Verbindung meldet der Client sich automatisch ab; nach einem Reconnect muss er
 sich neu melden.
@@ -567,6 +738,42 @@ messbar teurer als die eigentliche Arbeit. `dropped` zählt die Zeilen, die der
 Dienst seit dem letzten Rahmen verworfen hat, weil mehr ankam als abfließen
 konnte (Grenze: 4000 wartende Zeilen). Einzelheiten in
 [CAPTURE.md](CAPTURE.md#live-rohdaten).
+
+### Wenn der Handshake abgelehnt wird
+
+Eine abgewiesene WebSocket-Verbindung ist von außen sonst nicht vom falschen
+Port, einer Firewall oder einem abgestürzten Dienst zu unterscheiden — der
+schlimmste Fall am Turniertag. Deshalb trägt die Ablehnung einen Grund:
+
+```
+HTTP/1.1 401 Unauthorized
+X-LF-Reason: unauthorized
+Content-Type: application/json; charset=utf-8
+
+{"error":"unauthorized","hint":"gültiges ?token=<token> anhängen"}
+```
+
+| Status | `X-LF-Reason` | Bedeutung |
+|---|---|---|
+| `401` | `unauthorized` | kein oder falsches `?token=`, und keine gültige Browser-Sitzung |
+| `404` | `not_found` | ein anderer Pfad als `/ws` |
+
+Zusätzlich schreibt der Dienst eine `warn`-Zeile im Scope `ws` mit Client-IP und
+Herkunft. Der Rumpf verrät nichts, was ein Angreifer nicht ohnehin messen kann;
+ob ein Token gesetzt ist oder wie nah das gesendete dran war, steht nicht drin.
+
+> **Achtung, Browser:** JavaScript sieht vom abgelehnten Handshake nur ein
+> `error`-Ereignis ohne Begründung — das ist eine Festlegung der WebSocket-API,
+> nicht dieses Dienstes. Status, Header und Rumpf stehen im Netzwerk-Tab der
+> Entwicklerwerkzeuge und im Dienst-Log. Zum Prüfen aus dem Programm heraus:
+> [`GET /api/access`](#get-apiaccess--immer-offen).
+
+> **Der WebSocket unterliegt NICHT der CORS-Liste.** Browser wenden CORS auf
+> WebSocket-Verbindungen nicht an. Eine Anzeige auf einem zweiten Rechner kommt
+> über `/ws` also allein mit dem Token durch, auch ohne Eintrag in `cors`. Für
+> `fetch()` auf `/api/*` braucht dieselbe Seite den Eintrag sehr wohl — genau
+> diese Asymmetrie kostet erfahrungsgemäß die meiste Zeit. Kurzanleitung:
+> [SECURITY.md](SECURITY.md#anzeige-auf-einem-zweiten-rechner-anbinden).
 
 ---
 
@@ -689,6 +896,437 @@ gilt als Vorlage (genau wie im Originalsystem).
 
 ---
 
+# Für Anzeige-Entwickler
+
+Dieses Kapitel setzt **nichts** über lf_live voraus. Wer nur eine Anzeige baut —
+Beamer-Scoreboard, Overlay, Turniersystem — braucht nur, was hier steht.
+
+## In fünf Minuten
+
+1. **Adresse** — `http://<hallen-pc>:8080`. Läuft die Anzeige auf einem **anderen
+   Rechner**, müssen dort zwei Einstellungen gesetzt sein; Kurzanleitung:
+   [SECURITY.md](SECURITY.md#anzeige-auf-einem-zweiten-rechner-anbinden).
+2. **Prüfen, ob du hereinkommst** — `GET /api/access`. `problems: []` heißt: alles
+   gut. Sonst steht dort im Klartext, was fehlt.
+3. **Verbinden** — `ws://<hallen-pc>:8080/ws?feed=display&token=<token>`.
+4. **Empfangen** — Rahmen vom Typ `display`. Darin steckt alles Folgende.
+5. Einmalig dazu, wenn du Tooltips/Hilfetexte zu den Spalten willst:
+   `GET /api/modes` (`metrics`, `scoreboard` → `help`, `group`, `groupLabel`).
+
+Alternativ ohne WebSocket: `GET /api/display` alle 1–2 Sekunden pollen. Gleicher
+Inhalt, gleiche Feldnamen.
+
+## Ein vollständiger Datensatz, kommentiert
+
+Echte Antwort eines laufenden Laserball-Matches mit zwei Teams und zwei
+Spielern. **Nichts ist weggekürzt** — so viele Felder sind es, und nicht mehr.
+
+```jsonc
+{ "data": {
+  "v": 1,                        // Version des Datensatzes; steigt nur bei einer BRECHENDEN Änderung
+  "service": "lf-live",
+  "ts": 1789721491583,           // wann dieser Datensatz gebaut wurde (ms seit Epoche)
+  "updatedAt": 1789721490269,    // wann die Engine zuletzt etwas geändert hat
+  "ageMs": 1314,                 // wie alt das ist. Groß und wachsend => die Anlage schickt nichts mehr
+
+  "match": {
+    "active": true,              // läuft gerade ein Match?
+    "matchId": "mu6pys0q",       // wechselt bei jedem Matchstart; null vor dem ersten
+    "mode": {
+      "number": 28,              // Missionsnummer der Anlage, oder null
+      "key": "laserball_ranked", // stabiler Kurzname — DAS ist der Schlüssel für eigene Logik
+      "label": "Laserball Ranked",   // AUSGESCHRIEBENER Name. Kommt ggf. AUS DEM STREAM -> nur als Text ausgeben, nie als HTML
+      "family": "laserball",     // 'laserball' | 'sm5' — was die Anlage überhaupt zählen kann
+      "profile": "laserball",    // welche Spalten gezeigt werden (siehe "columns")
+      "profileLabel": "Laserball",   // ausgeschriebener Name des Anzeigeprofils
+      "known": true,             // false = diese Nummer steht nicht in der Registry
+      "source": "tdf",           // 'tdf' = von der Anlage | 'inferred' = zur Laufzeit erkannt | 'default'
+      "description": "Laserball Ranked"  // Beschreibung aus der Typ-1-Zeile, oder null
+    },
+    "clock": {
+      "direction": "down",       // ---> 'down' = Restzeit, 'up' = Laufzeit. NIE selbst ausrechnen.
+      "displayMs": 840000,       // ---> DIE Zahl, die auf den Bildschirm gehört
+      "elapsedMs": 60000,        // verstrichene Spielzeit
+      "remainingMs": 840000,     // Restzeit; null <=> es wird AUFWÄRTS gezählt
+      "durationMs": 900000,      // Gesamtdauer — bei durationKnown:false ein VORGABEWERT ohne Bezug zum Spiel
+      "durationKnown": true,     // hat die Anlage eine Dauer gemeldet?
+      "running": true            // false => die Uhr muss STEHEN, egal was noch hereinkommt
+    },
+    "scoreSource": "internal",   // 'tdf' = Punkte von der Anlage | 'internal' = von der Bridge mitgezählt
+    "scoreSourceLabel": "von der Bridge mitgezählt",
+    "end": {                     // alles null, solange das Match läuft
+      "reason": null,            // 'mission_end'|'watchdog'|'stream_lost'|'next_match'|'shutdown'
+      "reasonLabel": null,       // derselbe Grund, ausgeschrieben auf Deutsch
+      "source": null,            // WORAN das Ende erkannt wurde (siehe Tabelle unten)
+      "sourceLabel": null,
+      "at": null                 // Zeitpunkt des Endes (ms seit Epoche)
+    }
+  },
+
+  // Immer ein ARRAY, nie eine Map — und immer nach Team-id sortiert, damit
+  // "links/rechts" über das ganze Match gleich bleibt. Funktioniert mit 1 bis 7
+  // Teams genauso wie mit einem einzigen.
+  "teams": [
+    { "id": "0", "name": "Rote Kugeln",  "color": "#ef4444", "score": 1, "players": 1, "rank": 1 },
+    { "id": "1", "name": "Blaue Kugeln", "color": "#3b82f6", "score": 0, "players": 0, "rank": 2 }
+  ],
+  "teamCount": 2,                // Länge von teams[] — KANN Teams aus einem früheren Match enthalten
+  "teamsWithPlayers": 2,         // davon die, in denen gerade jemand steht  <-- das ist meist die Zahl, die du willst
+  "freeForAll": false,           // "Jeder gegen jeden": >= 3 bemannte Teams, in jedem genau ein Spieler
+  "playerCount": 2,
+  "ballHolderId": null,          // nur Laserball: wer den Ball hat, sonst null
+
+  // Die Spalten, die für DIESEN Modus zählen — fertig beschriftet.
+  // Pflege keine eigene Spaltenliste: ein neuer Zähler taucht hier von selbst auf.
+  "columns": [
+    { "key": "goals",   "label": "Tore",            "short": "Tore",   "format": "int",     "unit": null },
+    { "key": "assists", "label": "Vorlagen",        "short": "Vorlagen","format": "int",    "unit": null },
+    { "key": "stealsDone", "label": "Ball abgenommen", "short": "Ball abgenommen", "format": "int", "unit": null,
+      "received": "stealsReceived", "receivedLabel": "Ball verloren" },   // Gegenstück für "gemacht / kassiert"
+    { "key": "blocksDone", "label": "Gegner geblockt", "short": "Geblockt", "format": "int", "unit": null,
+      "received": "blocksReceived", "receivedLabel": "Selbst geblockt worden" },
+    { "key": "resetsDone", "label": "Gegner zurückgesetzt", "short": "Zurückgesetzt", "format": "int", "unit": null,
+      "received": "resetsReceived", "receivedLabel": "Selbst zurückgesetzt worden" },
+    { "key": "clearsDone", "label": "Befreiungspässe gespielt", "short": "Befreiungspässe", "format": "int", "unit": null,
+      "received": "clearsReceived", "receivedLabel": "Befreiungspässe erhalten" },
+    { "key": "passesDone", "label": "Pässe gespielt", "short": "Pässe", "format": "int", "unit": null,
+      "received": "passesReceived", "receivedLabel": "Pässe erhalten" },
+    { "key": "score",   "label": "Punkte",          "short": "Punkte", "format": "int",     "unit": null },
+    { "key": "level",   "label": "Spielerlevel",    "short": "Level",  "format": "int",     "unit": null }
+  ],
+
+  // null (nicht []), wenn mit ?players=none / players:"none" abgefragt wurde.
+  // Sortiert: bester zuerst, nach der Wertung des Modus. Gleichstand teilt den Rang.
+  "players": [
+    {
+      "id": "1001", "name": "Mara",          // Name kommt AUS DEM STREAM -> nur als Text ausgeben
+      "teamId": "0", "teamName": "Rote Kugeln", "teamColor": "#ef4444",
+      "score": 0,                            // Punkte dieses Spielers
+      "status": 0,                           // Hardware-Status (0 normal, 2 im Reset, 3 aus)
+      "roleLabel": "Commander",              // SM5-Rolle, sonst null
+      "rank": 1,
+      "stats": {                             // EIN Eintrag je columns[].key (+ je received)
+        "goals": 1, "assists": 0,
+        "stealsDone": 1, "stealsReceived": 0,
+        "blocksDone": 0, "blocksReceived": 0,
+        "resetsDone": 0, "resetsReceived": 0,
+        "clearsDone": 0, "clearsReceived": 0,
+        "passesDone": 0, "passesReceived": 1,
+        "score": 0, "level": 3
+      },
+      // ---- Herkunftskennzeichen ----
+      "statsSource": "live",                 // 'live' = laufend mitgezählt | 'tdf7' = amtliche Endabrechnung
+      "statsSourceLabel": "laufend mitgezählt (Untergrenze)",
+      "accuracy": null,                      // Anteil 0…1, oder null
+      "accuracyIsEstimate": null,            // true = GESCHÄTZT (zu hoch); null = für diesen Modus nicht gemeldet
+      "accuracySource": null,                // 'live' | 'tdf7' | null
+      "officialStats": false                 // true, sobald der Endblock der Anlage für diesen Spieler da ist
+    },
+    { "id": "2001", "name": "Lea", "teamId": "1", "teamName": "Blaue Kugeln", "teamColor": "#3b82f6",
+      "score": 0, "status": 0, "roleLabel": "Commander", "rank": 2,
+      "stats": { "goals": 0, "assists": 1, "stealsDone": 0, "stealsReceived": 1,
+                 "blocksDone": 0, "blocksReceived": 0, "resetsDone": 0, "resetsReceived": 0,
+                 "clearsDone": 0, "clearsReceived": 0, "passesDone": 1, "passesReceived": 0,
+                 "score": 0, "level": 3 },
+      "statsSource": "live", "statsSourceLabel": "laufend mitgezählt (Untergrenze)",
+      "accuracy": null, "accuracyIsEstimate": null, "accuracySource": null, "officialStats": false }
+  ]
+} }
+```
+
+## Die Uhr — die eine Regel, an der alles hängt
+
+> **Rechne niemals selbst `durationMs - elapsedMs`.**
+
+Meldet die Anlage keine Missionsdauer, steht in `durationMs` ein **Vorgabewert,
+der mit dem laufenden Spiel nichts zu tun hat**. Eine Eigenberechnung ergibt dann
+einen frei erfundenen Countdown, der irgendwann negativ wird. Genau dieser Fehler
+fällt im Test nie auf und am Turniertag sofort.
+
+Der Dienst hat die Entscheidung schon getroffen:
+
+| `clock.direction` | `clock.displayMs` | `remainingMs` | Anzeige |
+|---|---|---|---|
+| `"down"` | die Restzeit | Zahl ≥ 0 | **abwärts** zählen |
+| `"up"` | die Laufzeit | `null` | **aufwärts** zählen, von 0 |
+
+```js
+const c = d.match.clock;
+// zwischen zwei Rahmen lokal weiterlaufen lassen — aber nur, solange das Match läuft
+const seit = c.running ? Date.now() - empfangenUm : 0;
+const ms = c.direction === "down"
+  ? Math.max(0, c.displayMs - seit)
+  : c.displayMs + seit;
+```
+
+Zwei Dinge dazu:
+
+- **`clock.running === false` ⇒ die Uhr steht.** Eine Uhr darf nie über das
+  Matchende hinauslaufen, auch nicht, wenn danach nichts mehr hereinkommt.
+- `elapsedMs` kommt **von der Anlage**, nicht aus einer lokalen Uhr. Zwischen
+  zwei Zeilen steht der Wert still. Deshalb lokal interpolieren — aber die
+  **Richtung** und den **Startwert** immer vom Dienst nehmen.
+
+## Teams: eins bis sieben, und „Jeder gegen jeden"
+
+`teams` ist **immer ein Array**, auch bei einem einzigen Team, und immer nach
+`id` sortiert — die Reihenfolge ändert sich während eines Matches nicht, „links"
+bleibt also links. `rank` ist der Platz nach Punkten (Gleichstand teilt sich
+einen Platz: 1, 2, 2, 4).
+
+- **`teamCount` ist nicht die Zahl der spielenden Teams.** Die Anlage meldet
+  Teams einmal, und sie bleiben über Matchgrenzen hinweg bekannt. Nach einem
+  Sieben-Team-Turnier stehen in `teams` weiter sieben Einträge, auch wenn gerade
+  nur zwei spielen. Nimm **`teamsWithPlayers`**, oder filtere auf `players > 0`.
+- **`freeForAll: true`** heißt: mindestens drei bemannte Teams, und in jedem
+  steht genau ein Spieler. Dann ist eine Teamspalte sinnlos — zeig eine
+  Einzelrangliste. Bei zwei Ein-Mann-Teams ist es ein Duell und bleibt `false`.
+- `color` ist ein Hex-Wert mit `#` und ist nie `null`, solange die Anlage das
+  Team gemeldet hat. Der Teamname kann sich **während** des Matches noch ändern
+  (die Namensliste überschreibt ihn, sobald genug Spieler angemeldet sind) —
+  also nicht beim ersten Rahmen einfrieren.
+
+## Spieler und Spalten
+
+`columns` ist die Spaltenliste für **genau diesen Modus**, fertig beschriftet.
+Baue die Tabelle daraus, dann ändert sich nichts an deinem Code, wenn ein Modus
+dazukommt.
+
+| `format` | Wert | so rendern |
+|---|---|---|
+| `int` | Zahl | als Zahl |
+| `text` | Zeichenkette | als Text (z. B. Rolle „Commander") |
+| `percent` | Anteil `0…1` | als Prozent: `0.43` → `43 %` (`unit` ist dann `"%"`) |
+| **alle** | `null` | **leer lassen** — nie `0`, nie ein Strich als Zahl |
+
+`unit` ist die Einheit, die `format` mit sich bringt (`"%"` oder `null`) — damit
+braucht der Renderer keine eigene Tabelle. Hat eine Spalte ein `received`, gehört
+dazu ein Gegenstück-Wert unter diesem Schlüssel in `stats` („gemacht / kassiert",
+z. B. `stealsDone` / `stealsReceived`); `receivedLabel` ist dessen Beschriftung.
+
+**Hilfetexte** (`help`) und die Gruppierung (`group`, `groupLabel`) stehen
+absichtlich **nicht** im Anzeige-Datensatz — sie ändern sich pro Modus nie und
+würden fünfmal je Sekunde mitfahren. Sie kommen aus derselben Quelle über
+[`GET /api/modes`](#get-apimodes), einmal beim Start abgeholt und über denselben
+`key` zugeordnet.
+
+## Herkunftskennzeichen — welche Zahl wie viel wert ist
+
+Der Dienst schummelt nicht: jede Zahl sagt, woher sie kommt.
+
+| Feld | Werte | Bedeutung für die Anzeige |
+|---|---|---|
+| `match.scoreSource` | `tdf` | die Punkte kommen **von der Anlage** — verlässlich |
+| | `internal` | die Bridge hat **selbst mitgezählt**, weil die Anlage keine Punktezeilen schickt |
+| `players[].statsSource` | `live` | laufend mitgezählt — eine **Untergrenze**, die Anlage meldet nicht jeden Schuss |
+| | `tdf7` | die **amtliche Endabrechnung** der Anlage ist da |
+| `players[].officialStats` | `true` | dito, als Boolean zum Abfragen |
+| `players[].accuracyIsEstimate` | `true` | die Trefferquote ist **geschätzt** und systematisch **zu hoch** — als solche kennzeichnen |
+| | `false` | amtlich |
+| | `null` | für diesen Modus gar nicht gemeldet |
+
+Eine ehrliche Anzeige markiert Live-Zahlen erkennbar (z. B. mit `~`) und nimmt
+die Markierung weg, sobald `statsSource` auf `tdf7` springt — das passiert
+**vor** dem Matchende.
+
+## Wie und warum ein Match endete
+
+`match.end.reason` ist `null`, solange eines läuft oder noch keines lief. Erst
+dann darf eine Anzeige die Uhr weiterlaufen lassen.
+
+| `reason` | `reasonLabel` | wann |
+|---|---|---|
+| `mission_end` | regulär beendet | die Anlage hat das Ende selbst gemeldet (`0101`) |
+| `watchdog` | vom Spielleiter beendet bzw. Zeitüberschreitung | **kein `0101`** — Endabrechnung erkannt oder anhaltende Stille |
+| `stream_lost` | Verbindung zur Anlage verloren | die TCP-Verbindung brach während des Matches ab |
+| `next_match` | durch ein neues Match abgelöst | die Anlage startete ein neues, ohne das alte zu beenden |
+| `shutdown` | Dienst beendet | der Dienst wurde beendet, während das Match lief |
+
+`match.end.source` sagt **woran** es erkannt wurde und trennt die beiden sehr
+verschiedenen `watchdog`-Fälle: `0101` · `summary_type6` (alle Abschluss-Zeilen
+da) · `summary_type7` (SM5-Endblock da) · `silence` (nichts mehr gekommen) ·
+`stream_lost` · `next_match` · `shutdown`. Ein Match, das mit `summary_type6`
+endet, hat vollständige Zahlen; eines mit `silence` womöglich nicht.
+
+## Fehlende und leere Werte
+
+Es gibt drei verschiedene Dinge, und sie bedeuten nicht dasselbe:
+
+| | heißt | so behandeln |
+|---|---|---|
+| `null` | **noch nicht gemeldet** | Feld **leer** lassen |
+| `0` | gemessene Null | `0` anzeigen |
+| Feld fehlt ganz | dieser Dienst ist älter als das Feld | wie `null` behandeln |
+
+Der häufigste Fall: `livesLeft`, `shotsLeft` und die übrigen Endblock-Zahlen
+kommen erst mit der Endabrechnung. Eine `0` dort sähe aus wie „keine Leben mehr".
+Deshalb sind sie bis dahin `null` — und darum bitte niemals `?? 0` oder
+`|| 0` darüberschreiben.
+
+```js
+const v = p.stats[c.key];
+const txt = v === null ? "" : (c.format === "percent" ? `${Math.round(v * 100)} %` : String(v));
+```
+
+Umgekehrt gilt: **lies nie ein Feld, das nicht in `columns` steht.** Die
+Spaltenliste ist die Erlaubnis; alles andere kann je nach Modus fehlen.
+
+## Was stabil ist und was sich noch ändern kann
+
+**Stabil** — darauf darf man bauen; eine Änderung daran erhöht `v`:
+
+- `v`, `ts`, `updatedAt`, `ageMs`
+- `match.active`, `match.matchId`
+- `match.mode.{number,key,label,family,profile,known,source}`
+- `match.clock.{direction,displayMs,elapsedMs,remainingMs,durationMs,durationKnown,running}`
+- `match.scoreSource`, `match.end.{reason,source,at}`
+- `teams[].{id,name,color,score,players,rank}`, `teamCount`, `playerCount`
+- `columns[].{key,label,short,format}`
+- `players[].{id,name,teamId,score,rank,stats,statsSource}`
+- die Werte von `reason`, `source`, `scoreSource`, `statsSource`, `format`
+
+**Kann sich noch ändern** — benutzbar, aber bitte nicht tragend:
+
+- alle `*Label`-Felder (`reasonLabel`, `sourceLabel`, `scoreSourceLabel`,
+  `statsSourceLabel`, `profileLabel`) — das sind **deutsche Anzeigetexte**, der
+  Wortlaut darf sich bessern. Logik immer am unübersetzten Feld festmachen.
+- `columns[].unit` und `columns[].receivedLabel`
+- `freeForAll` und `teamsWithPlayers` — die Herleitung kann sich verfeinern
+- `players[].status` — die Bedeutung der Hardware-Codes ist nicht vollständig belegt
+- `match.mode.description` — kommt roh aus dem Stream
+
+**Verlass dich nie auf:** die Reihenfolge der Schlüssel in `stats`, den genauen
+Wortlaut von `label`/`short` (die stehen in JSON-Dateien und darf der Betreiber
+ändern), oder darauf, dass `mode.number` gesetzt ist.
+
+> **Alle Namen und Beschriftungen, die aus dem Stream kommen** — `mode.label`,
+> `mode.description`, Team- und Spielernamen — sind **Text**, niemals HTML.
+> In einer Weboberfläche über `textContent` ausgeben, nie über `innerHTML`.
+
+## Verbindungsabbruch, und wenn die Anlage nichts sendet
+
+Das sind **zwei verschiedene Fälle**, und eine gute Anzeige unterscheidet sie:
+
+| Lage | woran erkennbar | was die Anzeige tun sollte |
+|---|---|---|
+| **WebSocket weg** | `onclose` / `onerror` | letzten Stand stehen lassen, sichtbar als „getrennt" markieren, alle 2 s neu verbinden |
+| **Dienst läuft, Anlage schweigt** | `ageMs` wächst über ~12 000 | Uhr anhalten, Zahlen stehen lassen, „keine Daten von der Anlage" zeigen |
+| **Match zu Ende** | `clock.running === false` | Uhr anhalten, Endstand mit `end.reasonLabel` zeigen |
+
+Weiteres, worauf man sich verlassen darf:
+
+- Nach jedem Reconnect kommt **sofort** wieder ein voller `display`-Rahmen — es
+  gibt keinen Zustand, den der Client über die Trennung hinweg halten müsste.
+- Der Dienst sendet nur, wenn sich etwas **geändert** hat. Ein ausbleibender
+  Rahmen ist also normal und kein Fehler — dafür ist `ageMs` da.
+- Tote Verbindungen werden alle 30 s per Ping/Pong erkannt und getrennt; die
+  Gegenseite sieht ein sauberes `onclose`.
+- **Backoff einbauen.** Ein Reconnect-Sturm gegen den Hallen-PC läuft ins
+  Rate-Limit (`429`).
+
+## Lauffähiges Minimalbeispiel
+
+Verbindet sich, empfängt den Zustand, zeigt Punktestand und Uhr — **beide
+Laufrichtungen** — und die modusrelevanten Spielerzahlen. Läuft unverändert
+gegen Laserball, SM5, 7 Teams, „Jeder gegen jeden" und ein Match ohne `0101`.
+
+```bash
+npm i ws
+node anzeige.js ws://192.168.1.10:8080/ws <token>
+```
+
+```js
+'use strict';
+// Im Browser entfällt die nächste Zeile — dort ist WebSocket eingebaut,
+// der Rest des Codes ist identisch.
+const WebSocket = require('ws');
+
+const BASE = process.argv[2] || 'ws://127.0.0.1:8080/ws';
+const TOKEN = process.argv[3] || '';
+// feed=display -> der schlanke Anzeige-Datensatz statt des vollen Snapshots.
+const URL = `${BASE}?feed=display${TOKEN ? `&token=${encodeURIComponent(TOKEN)}` : ''}`;
+
+let letzte = null;          // zuletzt empfangener Datensatz
+let tickAb = 0;             // Date.now() beim Empfang — für die Uhr zwischen den Rahmen
+
+function mmss(ms) {
+  const s = Math.max(0, Math.floor(ms / 1000));
+  return `${String(Math.floor(s / 60)).padStart(2, '0')}:${String(s % 60).padStart(2, '0')}`;
+}
+
+/** Die Uhr. Die Richtung kommt vom Dienst — niemals selbst dauer-minus-verstrichen rechnen. */
+function uhr(d) {
+  const c = d.match.clock;
+  // Zwischen zwei Rahmen lokal weiterlaufen lassen, aber NUR solange das Match läuft.
+  const seit = c.running ? Date.now() - tickAb : 0;
+  const ms = c.direction === 'down'
+    ? Math.max(0, c.displayMs - seit)      // Restzeit: herunter
+    : c.displayMs + seit;                  // Laufzeit: hoch (remainingMs war null)
+  return (c.direction === 'up' ? '+' : '') + mmss(ms);
+}
+
+function zeichnen() {
+  const d = letzte;
+  if (!d) return;
+  const kopf = d.match.active
+    ? `LÄUFT  ${d.match.mode.label}`
+    : `ENDE   ${d.match.mode.label}` + (d.match.end.reasonLabel ? `  (${d.match.end.reasonLabel})` : '');
+  const zeilen = [];
+  zeilen.push(`${kopf}   ${uhr(d)}   Punkte: ${d.match.scoreSourceLabel}`);
+  zeilen.push(d.freeForAll
+    ? `Jeder gegen jeden — ${d.teamsWithPlayers} Spieler`
+    : `${d.teamsWithPlayers} Team(s), ${d.playerCount} Spieler`);
+  for (const t of d.teams) {
+    if (t.players === 0 && d.teams.length > 2) continue;   // leere Teams früherer Matches nicht zeigen
+    zeilen.push(`  #${t.rank} ${t.name.padEnd(16)} ${String(t.score).padStart(5)}  ${t.color || ''}`);
+  }
+  // Die Spalten kommen mit dem Datensatz — keine eigene Spaltenliste pflegen.
+  if (d.players && d.players.length) {
+    const kopfz = ['#', 'Spieler', 'Team'].concat(d.columns.map((c) => c.short));
+    zeilen.push('  ' + kopfz.join(' | '));
+    for (const p of d.players.slice(0, 8)) {
+      const werte = d.columns.map((c) => {
+        const v = p.stats[c.key];
+        if (v === null) return '—';                        // leer, NICHT 0
+        if (c.format === 'percent') return `${Math.round(v * 100)}${c.unit}`;
+        return String(v);
+      });
+      zeilen.push('  ' + [p.rank, p.name, p.teamName || '?'].concat(werte).join(' | '));
+    }
+  }
+  process.stdout.write(zeilen.join('\n') + '\n\n');
+}
+
+function verbinden() {
+  const ws = new WebSocket(URL);
+  ws.on('open', () => console.log('verbunden'));
+  ws.on('message', (raw) => {
+    const m = JSON.parse(raw);
+    if (m.type === 'display') { letzte = m.data; tickAb = Date.now(); zeichnen(); }
+  });
+  ws.on('close', () => { console.log('Verbindung weg — neuer Versuch in 2 s'); setTimeout(verbinden, 2000); });
+  ws.on('error', (e) => console.log('Fehler:', e.message));
+}
+
+verbinden();
+setInterval(zeichnen, 1000);   // Uhr läuft weiter, auch wenn gerade nichts kommt
+```
+
+Ausgabe gegen ein Laserball-Match ohne gemeldete Dauer, nach dem Ende ohne
+`0101` — man sieht die aufwärts zählende Uhr am `+` und den Endgrund:
+
+```
+ENDE   Laserball ohne Dauer  (vom Spielleiter beendet bzw. Zeitüberschreitung)   +00:20   Punkte: von der Bridge mitgezählt
+2 Team(s), 2 Spieler
+  #1 Rot                  1  #ef4444
+  #2 Blau                 0  #3b82f6
+  # | Spieler | Team | Tore | Vorlagen | Ball abgenommen | Geblockt | Zurückgesetzt | Befreiungspässe | Pässe | Punkte | Level
+  1 | Pia | Rot | 1 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 3
+  2 | Ron | Blau | 0 | 0 | 0 | 0 | 0 | 0 | 1 | 0 | 3
+```
+
+---
+
 ## Fehlercodes
 
 | Status | Bedeutung |
@@ -699,3 +1337,15 @@ gilt als Vorlage (genau wie im Originalsystem).
 | `404` | unbekannte Route oder Datei |
 | `400` | ungültiges JSON im POST-Body, oder ein abgewiesener Dateiname (`bad_name`, `protected`) |
 | `500` | interner Fehler (wird geloggt) |
+
+Der `401`-Rumpf nennt seit Neuestem zusätzlich `tokenRequired`, `tokenSent`,
+`originAllowed` und `see: "/api/access"` — alles rein additiv, und alles
+Angaben, die der Aufrufer ohnehin selbst messen kann. Beim WebSocket steht der
+Grund im Header `X-LF-Reason` (siehe
+[Wenn der Handshake abgelehnt wird](#wenn-der-handshake-abgelehnt-wird)).
+
+**Der Fall ohne Statuscode:** eine Anfrage aus einem Browser, deren Herkunft
+nicht in `cors` steht, wird mit `200` beantwortet — und vom **Browser** still
+verworfen. Erkennbar am fehlenden `Access-Control-Allow-Origin` und am
+zusätzlichen Header `X-LF-Origin-Allowed: 0`, dazu eine `warn`-Zeile im Log.
+Nachfragen lässt es sich über [`GET /api/access`](#get-apiaccess--immer-offen).

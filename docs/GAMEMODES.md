@@ -12,7 +12,8 @@ Die Protokollgrundlage (Zeilentypen, Event-Codes, Modus-Nummern) steht in
 - [Wie der Modus erkannt wird](#wie-der-modus-erkannt-wird)
 - [Das `mode`-Objekt](#das-mode-objekt)
 - [Die Registry](#die-registry)
-- [„Standard" eintragen — die eine Zeile](#standard-eintragen--die-eine-zeile)
+- [**Spielmodi in JSON-Dateien — die Anleitung ohne Programmierkenntnisse**](#spielmodi-in-json-dateien)
+- [„Standard" eintragen — die eine Zahl](#standard-eintragen--die-eine-zahl)
 - [Unbekannter Modus — warum das trotzdem funktioniert](#unbekannter-modus--warum-das-trotzdem-funktioniert)
 - [Laufzeit-Selbstkorrektur (`inferred`)](#laufzeit-selbstkorrektur-inferred)
 - [Zählerfelder: Familie `laserball`](#zählerfelder-familie-laserball)
@@ -33,8 +34,10 @@ Die Protokollgrundlage (Zeilentypen, Event-Codes, Modus-Nummern) steht in
 
 1. Die Anlage schickt ganz am Anfang einer Mission eine **Typ-1-Zeile**. Deren
    zweite Spalte ist die **Modus-Nummer**.
-2. lf_live schlägt diese Nummer in einer kleinen **Registry** nach
-   ([`src/gameModes.js`](../src/gameModes.js)). Belegt sind bisher nur `5`
+2. lf_live schlägt diese Nummer in einer kleinen **Registry** nach. Die steht
+   seit dieser Version in **JSON-Dateien im Ordner [`modes/`](../modes)** — je
+   Spielmodus eine Datei, die man ohne Programmierkenntnisse bearbeitet
+   ([Anleitung](#spielmodi-in-json-dateien)). Belegt sind bisher nur `5`
    (Space Marines 5) und `28` (Laserball Ranked).
 3. Jeder Modus gehört zu einer von **zwei Familien** — `sm5` oder `laserball`.
    Die Familie entscheidet, welche Zähler ein Spieler hat.
@@ -124,11 +127,14 @@ stehen könnte.
 
 Die CSV-Spaltensätze je Profil stehen in [STATS.md](STATS.md#spalten-spieler-zeilen).
 
-### Wo das im Code steht
+### Wo das steht
 
-Alles in [`src/gameModes.js`](../src/gameModes.js), Konstante `PROFILE_DEFS` —
-Scoreboard-Spalten, CSV-Block und Sortierkennzahl eines Profils stehen dort
-nebeneinander in **einem** Objekt.
+Je Profil **eine JSON-Datei** unter [`modes/profile/`](../modes/profile) —
+Scoreboard-Spalten, CSV-Block und Sortierkennzahl stehen dort nebeneinander in
+**einer** Datei ([Anleitung](#spielmodi-in-json-dateien)). Dieselben drei Profile
+stehen zusätzlich als **Rückfallebene** fest in
+[`src/gameModes.js`](../src/gameModes.js), Konstante `BUILTIN_PROFILE_DEFS`:
+fehlt oder klemmt eine Datei, gilt der eingebaute Satz.
 
 | Funktion | Liefert |
 |---|---|
@@ -216,12 +222,15 @@ Steht im Zustands-Snapshot unter `gameState.mode` und wird über
 
 ## Die Registry
 
-[`src/gameModes.js`](../src/gameModes.js), Konstante `REGISTRY`. Stand heute:
+Die Registry ist die Zuordnung **Modus-Nummer → Modus**. Sie steht in den
+JSON-Dateien unter [`modes/`](../modes) ([Anleitung](#spielmodi-in-json-dateien)).
+Stand heute:
 
-| Nummer | `key` | `label` | Familie | Profil | Status |
-|---|---|---|---|---|---|
-| `5` | `sm5` | Space Marines 5 | `sm5` | `sm5` | verified |
-| `28` | `laserball_ranked` | Laserball Ranked | `laserball` | `laserball` | verified |
+| Nummer | `key` | `label` | Familie | Profil | Datei | Status |
+|---|---|---|---|---|---|---|
+| `5` | `sm5` | Space Marines 5 | `sm5` | `sm5` | `modes/sm5.json` | verified |
+| `28` | `laserball_ranked` | Laserball Ranked | `laserball` | `laserball` | `modes/laserball-ranked.json` | verified |
+| *(keine)* | `standard` | Standard | `sm5` | `standard` | `modes/standard.json` | **Nummer offen** |
 
 Das ist die **gesamte** öffentlich belegte Modus-Nummerierung. Alles andere —
 „Standard", 7SM/Nexus, Junior, Zombies, VIP, Attack & Defend, Zone Control,
@@ -229,33 +238,333 @@ sämtliche Laserball-Varianten — hat Nummern, die nirgends dokumentiert sind. 
 zu ermitteln ist Sache des Hallenbetreibers, siehe
 [unten](#eigene-modus-nummern-ermitteln-und-eintragen).
 
+Dieselben zwei Nummern stehen **zusätzlich** fest in
+[`src/gameModes.js`](../src/gameModes.js) (`BUILTIN_REGISTRY`). Das ist die
+Rückfallebene: sind die JSON-Dateien weg oder kaputt, läuft lf_live damit weiter.
+
 ---
 
-## „Standard" eintragen — die eine Zeile
+## Spielmodi in JSON-Dateien
+
+**Für wen dieser Abschnitt ist:** für den Hallenbetreiber. Es wird **kein**
+Programmieren verlangt. Gebraucht werden ein Texteditor (Notepad, Notepad++,
+VS Code — irgendeiner) und die Modus-Nummer, die
+[`scripts/inspect.js`](../scripts/inspect.js) gemessen hat.
+
+### Wo die Dateien liegen
+
+Im Ordner **`modes/`** direkt im Programmverzeichnis von lf_live:
+
+```
+lf_bridge/
+├── modes/
+│   ├── _vorlage.json            ← Vorlage zum Kopieren. Wird NIE geladen.
+│   ├── standard.json            ← "Standard" — Nummer noch einzutragen
+│   ├── sm5.json                 ← Space Marines 5, Nummer 5
+│   ├── laserball-ranked.json    ← Laserball Ranked, Nummer 28
+│   └── profile/
+│       ├── _vorlage.json        ← Vorlage für einen eigenen Spaltensatz
+│       ├── standard.json        ← Spaltensatz "Standard"
+│       ├── sm5.json             ← Spaltensatz "SM5"
+│       └── laserball.json       ← Spaltensatz "Laserball"
+├── src/
+└── docs/
+```
+
+Zwei Sorten Dateien, und das ist der ganze Trick:
+
+| Ordner | Beantwortet | Wie oft angefasst |
+|---|---|---|
+| `modes/` | **Welche Nummer ist welcher Modus?** | ständig — hier kommen die gemessenen Nummern rein |
+| `modes/profile/` | **Welche Spalten zeigt so ein Modus?** | so gut wie nie — die drei mitgelieferten reichen |
+
+**Deshalb sind es zwei Sorten:** Ein Spaltensatz hat über vierzig Einträge.
+Müsste man ihn für jede neue Modus-Nummer mitkopieren, wäre jede Ergänzung eine
+Fleißarbeit mit vierzig Gelegenheiten für einen Tippfehler. So verweist eine
+Modus-Datei mit **einem Wort** (`"profil": "sm5"`) auf einen fertigen
+Spaltensatz, und beliebig viele Modi teilen sich denselben.
+
+> **Dateien, die mit `_` anfangen, werden nie geladen.** Genau deshalb sind die
+> Vorlagen `_vorlage.json` gefahrlos: sie liegen sichtbar daneben, wirken aber
+> nicht mit.
+>
+> **JSON kennt keine Kommentarzeilen.** Ein `//` oder `#` macht die Datei
+> ungültig. Was erklärt werden muss, steht deshalb in den Textfeldern
+> `"beschreibung"` und `"hinweis"` — die liest lf_live mit, wertet sie aber nicht
+> aus. Zusätzlich darf jedes Feld, dessen Name mit `_` beginnt, frei benutzt
+> werden (`"_notiz": "gemessen am 12.03."`).
+
+### So sieht eine Modus-Datei aus — vollständiges Beispiel
+
+`modes/sm5.json`, ungekürzt:
+
+```json
+{
+  "beschreibung": "Space Marines 5 — der klassische SM5-Modus.",
+  "schluessel": "sm5",
+  "anzeigename": "Space Marines 5",
+  "missionsnummern": [
+    5
+  ],
+  "familie": "sm5",
+  "profil": "sm5",
+  "hinweis": "Weitere SM5-Varianten brauchen keine eigene Datei: einfach ihre Nummer zusätzlich in \"missionsnummern\" schreiben."
+}
+```
+
+| Feld | Pflicht | Was hineingehört |
+|---|---|---|
+| `schluessel` | ja | Gleichbleibender Kurzname für CSV und API. Kleinbuchstaben, Ziffern, Unterstriche. **Einmal vergeben nicht mehr ändern** — sonst passen alte und neue Auswertungen nicht zusammen. |
+| `anzeigename` | ja | Der Name, den ein Mensch liest. Schickt die Anlage selbst eine Beschreibung mit, gewinnt die. |
+| `missionsnummern` | ja | **Die Liste der Nummern dieses Modus.** Ganze Zahlen 0–65535, ohne Anführungszeichen. `[]` ist erlaubt (Modus dann wirkungslos). Eine Nummer darf nur in **einer** Datei stehen. |
+| `familie` | ja | `"sm5"` oder `"laserball"` — mehr gibt es nicht. Im Zweifel `"sm5"`. |
+| `profil` | nein | Welcher Spaltensatz. Weglassen = Standardprofil der Familie (`sm5` → `sm5`, `laserball` → `laserball`). |
+| `beschreibung`, `hinweis` | nein | Freier Text. Ihr Notizzettel. |
+
+### Aufgabe 1 — eine gemessene Modus-Nummer eintragen
+
+Angenommen, der Inspektor hat gezeigt: **Modus 17** ist Ihre SM5-Variante
+„Zombies", Codes `0xxx`, und sie soll wie SM5 aussehen.
+
+1. `modes/sm5.json` im Texteditor öffnen.
+2. Die Zeile mit `"missionsnummern"` suchen. Da steht:
+
+   ```json
+     "missionsnummern": [
+       5
+     ],
+   ```
+
+3. Die neue Zahl **mit Komma davor** ergänzen:
+
+   ```json
+     "missionsnummern": [
+       5,
+       17
+     ],
+   ```
+
+   Kürzer geht es auch, das ist dasselbe: `"missionsnummern": [5, 17],`
+4. Speichern. **Fertig — das war alles.** Es wurde eine Zahl geschrieben, kein
+   Spaltensatz kopiert.
+5. In der Web-Konsole einmal **Einstellungen → Speichern** drücken; damit liest
+   lf_live die Modus-Dateien sofort neu. Wer lieber neu startet: geht genauso.
+
+> **Komma-Regel, die einzige echte Stolperfalle:** zwischen zwei Zahlen gehört
+> ein Komma, **nach der letzten Zahl nicht**. `[5, 17]` ist richtig,
+> `[5, 17,]` ist kaputt.
+
+### Aufgabe 2 — einen ganz neuen Modus anlegen
+
+Wenn der neue Modus **einen eigenen Namen in den Statistiken** bekommen soll
+(eigene `key`-Spalte, eigene Zeile in `player_modes.csv`), bekommt er eine eigene
+Datei. Beispiel: „Zombies", Nummer 17, SM5-Protokoll, Spalten wie SM5.
+
+1. `modes/_vorlage.json` kopieren.
+2. Die Kopie umbenennen, zum Beispiel in **`zombies.json`** — **ohne**
+   führenden Unterstrich, sonst wird sie nicht geladen.
+3. Die Kopie öffnen und die fünf Felder füllen. Die `_zu_...`-Zeilen der Vorlage
+   dürfen stehen bleiben oder gelöscht werden — sie sind nur Erklärung:
+
+   ```json
+   {
+     "beschreibung": "Zombies — Hausvariante, gemessen am 12.03.",
+     "schluessel": "zombies",
+     "anzeigename": "Zombies",
+     "missionsnummern": [17],
+     "familie": "sm5",
+     "profil": "sm5"
+   }
+   ```
+
+4. Speichern, in der Konsole **Einstellungen → Speichern**. Der Modus ist da.
+
+**Welche Familie?** Im Inspektorbericht nachsehen, welche Event-Codes in diesem
+Modus vorkamen: `11xx` ⇒ `"laserball"`, `0xxx` ⇒ `"sm5"`. Unsicher? **`"sm5"`
+eintragen.** lf_live stellt beim ersten `11xx`-Code selbständig um; ein falsches
+`"laserball"` wird dagegen nicht zurückkorrigiert.
+
+**Welches Profil?** `"sm5"` (alle SM5-Spalten), `"standard"` (nur Punkte, Level,
+Schüsse, Quote) oder `"laserball"`. Ein **eigener** Spaltensatz braucht eine
+neue Datei unter `modes/profile/` — Vorlage liegt dort, die gültigen
+Kennzahlnamen stehen unter [Spaltenbeschriftungen](#spaltenbeschriftungen).
+
+### Was passiert, wenn ich mich vertippe?
+
+**Nichts Schlimmes. Die Bridge läuft weiter.** Das ist fest zugesichert: eine
+kaputte Modus-Datei darf einen Spielbetrieb nie anhalten.
+
+| Fehler | Was lf_live tut |
+|---|---|
+| Datei ist kein gültiges JSON (Komma zu viel, Anführungszeichen fehlt, Kommentar drin) | Datei wird **ganz übersprungen**, es gilt die eingebaute Vorgabe |
+| Pflichtfeld fehlt oder ist leer | Datei wird **ganz übersprungen** |
+| Unbekannte Familie oder unbekanntes Profil | Datei wird **ganz übersprungen** |
+| Dieselbe Missionsnummer in zwei Dateien | **nur diese Nummer** wird übersprungen, der Rest der Datei gilt |
+| Unbekannter Kennzahlname in einem Spaltensatz | **nur diese Spalte** wird übersprungen |
+| Unbekannter Kennzahlname in `_bericht` | **nur dieses Feld** wird übersprungen — der Missionsbericht geht trotzdem raus |
+| Datei leer, unlesbar oder größer als 256 KB | Datei wird **ganz übersprungen** |
+| Ordner `modes/` ganz gelöscht | lf_live läuft mit den **eingebauten** Modi `5` und `28` |
+
+Die eingebauten Vorgaben verschwinden also nie. Eine JSON-Datei **überschreibt**
+sie — sie ersetzt sie nicht als letzte Instanz.
+
+### Wie finde ich den Fehler?
+
+Jede Beanstandung wird **auf Deutsch, mit Dateinamen**, ins Log geschrieben —
+dorthin, wo auch die übrigen Meldungen von lf_live landen (Konsolenfenster des
+Dienstes bzw. Fehlerausgabe). Sie sieht so aus:
+
+```
+[2026-09-18T08:40:05.326Z] ERROR gamemodes: modes/zombies.json: Die Datei ist kein
+gültiges JSON: Expected double-quoted property name in JSON at position 84 (line 5
+column 1). Häufigste Ursachen: ein Komma zu viel vor der schließenden Klammer, ein
+fehlendes Anführungszeichen, oder ein Kommentar — JSON kennt keine Kommentare,
+benutzen Sie dafür das Feld "beschreibung". Die Datei wird übersprungen; es gelten
+die eingebauten Vorgaben.
+```
+
+Die Meldung nennt immer drei Dinge: **welche Datei**, **was nicht stimmt**, und
+**was lf_live stattdessen tut**. Bei kaputtem JSON steht sogar die Zeilennummer
+dabei.
+
+Dasselbe noch einmal zum Nachsehen, ohne Log-Suche — ein Befehl im
+Programmverzeichnis:
+
+```bash
+node -e "console.log(JSON.stringify(require('./src/gameModes').modeConfigStatus(), null, 2))"
+```
+
+Ausgegeben wird, welcher Ordner gelesen wurde, welche Dateien gefunden wurden,
+welche Modi und Profile daraus geworden sind (`modes`, `profiles`) und die Liste
+`problems` — leer, wenn alles in Ordnung ist. `ok: true` heißt: keine einzige
+Beanstandung.
+
+### Wann greift eine Änderung?
+
+| Was geändert wurde | Wirkt |
+|---|---|
+| Eine **Modus-Nummer** in `modes/*.json` (der Normalfall) | **sofort**, sobald in der Web-Konsole einmal Einstellungen gespeichert wurde — kein Neustart nötig |
+| Eine ganz neue Modus-Datei | ebenso sofort |
+| Die **Spalten** eines Profils in `modes/profile/*.json` | erst nach einem **Neustart** von lf_live — die Web-Konsole merkt sich die Spaltenliste beim Start |
+| Der Abschnitt **`_bericht`** eines Profils | **ab dem nächsten Match** — er wird bei jedem Missionsende frisch gelesen, ganz ohne Neustart |
+
+Im Zweifel: lf_live neu starten, dann stimmt in jedem Fall alles.
+
+### Der Abschnitt `_bericht` — was ans Backend geht
+
+Ein Anzeigeprofil bestimmt nicht nur die Spalten der Konsole und der
+CSV-Dateien, sondern auch den **Missionsbericht**: die Kurzfassung, die nach
+jedem beendeten Match an ein angeschlossenes System geschickt wird. Was der
+Bericht enthält und wie er aussieht, steht in
+[INTEGRATION.md → Missionsbericht](INTEGRATION.md#missionsbericht-die-kurzfassung-eines-matches).
+Eingestellt wird er hier:
+
+```json
+"_bericht": {
+  "spieler": ["score", "level", "shotsFired", "shotsHit", "accuracy"],
+  "uebersicht": ["teams", "sieger", "ende", "punktequelle", "dauer", "spielerzahl"],
+  "namen": true
+}
+```
+
+| Eintrag | Was es tut |
+|---|---|
+| `spieler` | Welche Kennzahlen in **jedem Spielerblock** stehen, in dieser Reihenfolge. Namen aus [Spaltenbeschriftungen](#spaltenbeschriftungen). Höchstens **64**. |
+| `uebersicht` | Welche Blöcke der Missionsübersicht mitgehen. Erlaubt sind genau sechs: `teams`, `sieger`, `ende`, `punktequelle`, `dauer`, `spielerzahl`. |
+| `namen` | `false` lässt die **Spielernamen** weg; dann verlässt nur noch die Kennung den Rechner. Vorgabe `true`. |
+
+**Ein Feld aufnehmen heißt: seinen Namen dazuschreiben.** Mehr ist nicht zu tun.
+Soll der Bericht zusätzlich die Fehlschüsse führen, wird aus
+
+```json
+  "spieler": ["score", "level", "shotsFired", "shotsHit", "accuracy"],
+```
+
+einfach
+
+```json
+  "spieler": ["score", "level", "shotsFired", "shotsHit", "accuracy", "misses"],
+```
+
+**Immer dabei und deshalb nicht aufzuführen:** Spieler-Kennung, ob Mitglied oder
+Gast, Mitglieds-ID, Team, Spielausgang und die Herkunft der Zahlen — sowie in
+der Übersicht Match-Kennung, Start, Ende und Modus. Ohne die könnte die
+Gegenseite den Bericht nicht einordnen, also sind sie nicht abwählbar.
+
+**`accuracy` reist nie allein.** Wird die Trefferquote genannt, gehen
+`accuracySource` und `accuracyIsEstimate` automatisch mit — sie ist während des
+Spiels [systematisch zu hoch](#die-trefferquote--und-warum-sie-live-zu-hoch-ist),
+und ohne diese Kennzeichnung würde ein Backend eine Schätzung wie eine Messung
+verrechnen.
+
+**Warum der Unterstrich im Namen.** Der Modus-Lader kennt nur die Anzeigefelder
+(`scoreboard`, `csv`, `sortierung`) und meldete ein `bericht` sonst bei jedem
+Start als unbekanntes Feld. Felder, die mit `_` beginnen, sind ausdrücklich für
+andere Leser frei — der Missionsbericht ist so einer.
+
+**Fehlt der Abschnitt ganz**, gilt die eingebaute Vorgabe des Profils:
+
+| Profil | Vorgabe `spieler` |
+|---|---|
+| `standard` | `score`, `level`, `shotsFired`, `shotsHit`, `accuracy` |
+| `sm5` | dazu `roleLabel`, `livesLeft`, `shotsLeft`, `deactivations`, `timesDeactivated` |
+| `laserball` | `score`, `level`, `goals`, `assists`, `blocksDone`, `clearsDone`, `stealsDone`, `passesDone` |
+
+Ein Tippfehler kostet keine Mission. Der falsche Name wird auf Deutsch gemeldet,
+das Feld übersprungen — und der Bericht geht **trotzdem** raus:
+
+```
+[2026-09-18T09:11:59.014Z] WARN bericht: modes/profile/sm5.json: Unbekannte Kennzahl
+"schuesse_gesamt" in "_bericht.spieler" — dieses Feld wird übersprungen, der Bericht
+geht trotzdem raus. Die gültigen Kennzahlnamen stehen in docs/GAMEMODES.md,
+Abschnitt "Spaltenbeschriftungen".
+```
+
+### Die Dateien gehören ins Repository
+
+`modes/` ist **versioniert** und wird mitgeliefert — anders als `data/` und
+`config.json`, die beide `.gitignore`-t sind. Eine eingetragene Modus-Nummer ist
+damit Teil des Projektstands und geht bei einem Update nicht verloren.
+
+---
+
+## „Standard" eintragen — die eine Zahl
 
 Der Modus **„Standard"** hat ein fertiges Anzeigeprofil (`standard`), aber
 **seine Modus-Nummer ist unbekannt.** Sie wird an der Anlage gemessen; hier wird
-sie **nicht geraten**, weil ein falscher Registry-Eintrag schlechter ist als gar
-keiner (ein unbekannter Modus läuft ohnehin sauber als Familie `sm5`).
+sie **nicht geraten**, weil ein falscher Eintrag schlechter ist als gar keiner
+(ein unbekannter Modus läuft ohnehin sauber als Familie `sm5`).
 
-**Die Stelle:** [`src/gameModes.js`](../src/gameModes.js), Konstante `REGISTRY`.
-Direkt darüber steht ein Kommentarkasten mit genau dieser Zeile. Sobald die
-Nummer per [`scripts/inspect.js`](../scripts/inspect.js) gemessen ist
-([Anleitung unten](#eigene-modus-nummern-ermitteln-und-eintragen)), wird `<NR>`
-ersetzt und die Zeile in `REGISTRY` eingefügt:
+**Die Stelle:** [`modes/standard.json`](../modes/standard.json). Die Datei ist
+fertig — nur die Nummernliste ist leer:
 
-```js
-const REGISTRY = {
-  5:  { number: 5,  key: 'sm5',              label: 'Space Marines 5',  family: FAMILIES.SM5,       profile: PROFILES.SM5 },
-  28: { number: 28, key: 'laserball_ranked', label: 'Laserball Ranked', family: FAMILIES.LASERBALL, profile: PROFILES.LASERBALL },
-
-  // ▼ hier, sobald die Nummer gemessen ist — <NR> ersetzen, sonst nichts ändern:
-  <NR>: { number: <NR>, key: 'standard', label: 'Standard', family: FAMILIES.SM5, profile: PROFILES.STANDARD },
-};
+```json
+{
+  "beschreibung": "Standard — das normale Spiel Ihrer Anlage. Das Anzeigeprofil steht bereit, die Missionsnummer ist NICHT bekannt und wird hier bewusst NICHT geraten.",
+  "schluessel": "standard",
+  "anzeigename": "Standard",
+  "missionsnummern": [],
+  "familie": "sm5",
+  "profil": "standard",
+  "hinweis": "HIER DIE GEMESSENE NUMMER EINTRAGEN. …"
+}
 ```
 
-Mehr ist nicht zu tun: Familie `sm5` (dasselbe Protokoll wie SM5), Profil
-`standard` (die schlanke Spaltenauswahl). Danach lf_live neu starten.
+Sobald die Nummer per [`scripts/inspect.js`](../scripts/inspect.js) gemessen ist
+([Anleitung unten](#eigene-modus-nummern-ermitteln-und-eintragen)), wird aus der
+leeren Liste eine mit genau einer Zahl — angenommen, gemessen wurde `9`:
+
+```json
+  "missionsnummern": [9],
+```
+
+Mehr ist nicht zu tun; Familie und Profil stehen schon richtig drin. Danach in
+der Konsole Einstellungen speichern (oder lf_live neu starten). Ab dann meldet
+sich der Modus als `known: true`, `key: "standard"`, `profile: "standard"` und
+zeigt den schlanken Spaltensatz.
+
+Solange die Liste **leer** bleibt, ist die Datei wirkungslos und ein
+Standardspiel läuft als unbekannter `sm5`-Modus — völlig in Ordnung.
 
 ---
 
@@ -877,35 +1186,42 @@ nennt er für jeden unbekannten Modus genau die Zeile, die zu melden ist:
 
 ### Schritt 7 — Den Modus eintragen
 
-In [`src/gameModes.js`](../src/gameModes.js), Konstante `REGISTRY`, eine Zeile
-ergänzen:
+Das geschieht in einer **JSON-Datei**, nicht mehr im Programmcode. Die
+Schritt-für-Schritt-Anleitung samt vollständigem Beispiel steht oben:
+[Spielmodi in JSON-Dateien](#spielmodi-in-json-dateien). In Kurzform, für einen
+neuen Modus „7SM Nexus" mit der gemessenen Nummer 14 — Datei `modes/nexus.json`:
 
-```js
-const REGISTRY = {
-  5:  { number: 5,  key: 'sm5',              label: 'Space Marines 5',  family: FAMILIES.SM5,       profile: PROFILES.SM5 },
-  28: { number: 28, key: 'laserball_ranked', label: 'Laserball Ranked', family: FAMILIES.LASERBALL, profile: PROFILES.LASERBALL },
-  14: { number: 14, key: 'sm7_nexus',        label: '7SM Nexus',        family: FAMILIES.SM5 },
-};
+```json
+{
+  "beschreibung": "7SM Nexus, Nummer am 16.09. gemessen.",
+  "schluessel": "sm7_nexus",
+  "anzeigename": "7SM Nexus",
+  "missionsnummern": [14],
+  "familie": "sm5"
+}
 ```
 
 Regeln für den Eintrag:
 
-- **`number`** — die Nummer aus der Typ-1-Zeile, als Zahl.
-- **`key`** — stabiler Kurzname in Kleinbuchstaben mit Unterstrichen. Er landet
-  in CSV-Dateien und in der API; einmal vergeben, sollte er sich nicht mehr
-  ändern, sonst passen alte und neue Auswertungen nicht zusammen.
-- **`label`** — Anzeigename. Wird von der Beschreibung aus dem Stream
+- **`missionsnummern`** — die Nummer(n) aus der Typ-1-Zeile, als Zahlen in einer
+  Liste. Gehören mehrere Nummern zum selben Modus, kommen sie alle in dieselbe
+  Liste: `[14, 15]`. Eine Nummer darf nur in **einer** Datei stehen.
+- **`schluessel`** — stabiler Kurzname in Kleinbuchstaben mit Unterstrichen. Er
+  landet in CSV-Dateien und in der API; einmal vergeben, sollte er sich nicht
+  mehr ändern, sonst passen alte und neue Auswertungen nicht zusammen.
+- **`anzeigename`** — Anzeigename. Wird von der Beschreibung aus dem Stream
   überschrieben, sofern die Anlage eine schickt.
-- **`family`** — `FAMILIES.LASERBALL` **nur**, wenn im Inspektor `11xx`-Codes
-  aufgetaucht sind. In allen anderen Fällen `FAMILIES.SM5`.
-- **`profile`** — **optional.** Weglassen heißt: Standardprofil der Familie
+- **`familie`** — `"laserball"` **nur**, wenn im Inspektor `11xx`-Codes
+  aufgetaucht sind. In allen anderen Fällen `"sm5"`.
+- **`profil`** — **optional.** Weglassen heißt: Standardprofil der Familie
   (`sm5` → `sm5`, `laserball` → `laserball`). Nur angeben, wenn der Modus
   bewusst einen **anderen** Spaltensatz zeigen soll als seine Familie —
-  `PROFILES.STANDARD` ist genau dafür da (siehe
-  [„Standard" eintragen](#standard-eintragen--die-eine-zeile)).
+  `"standard"` ist genau dafür da (siehe
+  [„Standard" eintragen](#standard-eintragen--die-eine-zahl)).
 
-Danach lf_live neu starten. Ohne Eintrag funktioniert der Modus trotzdem — er
-heißt dann nur `mode_14` statt `sm7_nexus` und ist als unbekannt markiert.
+Danach in der Web-Konsole einmal Einstellungen speichern (oder lf_live neu
+starten). Ohne Eintrag funktioniert der Modus trotzdem — er heißt dann nur
+`mode_14` statt `sm7_nexus` und ist als unbekannt markiert.
 
 > Wer sich bei der Familie unsicher ist, trägt sie **nicht** ein: ein fehlender
 > Eintrag landet bei `sm5` und wird bei `11xx`-Codes zur Laufzeit automatisch
@@ -931,7 +1247,9 @@ Im Stil der übrigen Doku: hier steht ehrlich, was **nicht** belegt ist.
 | **SM5-Live-Zähler ohne Typ-7-Pendant** | `misses`, `targetHits`, `targetDestroys`, `missileLocks`, `missileMisses`, `missileDestroys`, `rapidFires`, alle Resupply-Zähler, `beaconClaims`, `baseAwards`, `achievements`, `rewards`, `timesHit`, `timesHitByTeam` bleiben Untergrenzen — die Anlage liefert dafür keine offizielle Endzahl. | bekannte Grenze |
 | **`shotsFired` live** | Laserforce meldet keinen Schuss-Event. Die Live-Zahl ist systematisch zu niedrig. | bekannte Grenze |
 | **Trefferquote live** | Weil nur der Nenner unvollständig ist, fällt die Live-Quote systematisch **zu hoch** aus. Sie ist deshalb als Näherung gekennzeichnet (`accuracyIsEstimate`) und wird nach dem Typ-7-Block amtlich. Wie groß der Fehler an einer echten Anlage ist, ist **nicht** gemessen. | bekannte Grenze |
-| **Modus-Nummer „Standard"** | Nicht belegt. Wird an der Anlage gemessen; das Anzeigeprofil `standard` steht bereit, die Registry-Zeile fehlt bewusst. | offen |
+| **Modus-Nummer „Standard"** | Nicht belegt. Wird an der Anlage gemessen; das Anzeigeprofil `standard` steht bereit, `modes/standard.json` liegt fertig da, die Nummernliste ist bewusst leer. | offen |
+| **Profil-Spalten ohne Neustart** | Eine neue **Modus-Nummer** greift nach einem Speichern in der Konsole sofort. Ändert jemand dagegen die **Spalten** eines Profils in `modes/profile/*.json`, zeigt die Web-Konsole sie erst nach einem Neustart: `GET /api/modes` löst die Profilliste beim Programmstart einmal auf. | bekannte Grenze |
+| **Modus-Fehler in der Web-Konsole** | Beanstandungen an den Modus-Dateien stehen im Log und in `modeConfigStatus()`, aber noch nicht im Status-Endpunkt und damit nicht in der Konsolenoberfläche. Dafür müsste `/api/status` das Feld mitliefern. | offen |
 | **Bedeutung der elf amtlichen Typ-7-Felder** | `livesLeft` und `shotsLeft` sind aus den Namen klar. Für `medicHits`, `ownMedicHits`, `medicNukes`, `scoutRapid`, `lifeBoost`, `ammoBoost`, `nukesCancelled`, `ownNukeCancels`, `shot3Hit` ist die Bedeutung aus der lfstats-Spezifikation erschlossen und nicht gegen eine Anlage geprüft. Die Zahlen werden roh durchgereicht. | unbestätigt |
 | **Anzeigeprofil in der Web-Konsole** | `GET /api/modes` liefert die Scoreboard-Spalten heute unter den beiden **Familien**-Schlüsseln. Für ein Profil `standard` müsste der Endpunkt zusätzlich nach Profil ausliefern; solange keine Modus-Nummer auf `standard` zeigt, fällt das nicht an. | offen |
 | **Gesamtwertung in der Web-Konsole** | Die Tabelle „Gesamtwertung" im Statistik-Tab zeigt fest die Laserball-Spalten. Bei einer SM5-Gesamtwertung bleiben sie leer; die Zahlen stehen vollständig in `totals_sm5.csv`, die im selben Tab zum Download bereitsteht. Auch `GET /api/stats/totals` hat keinen Familien-Parameter. | offen |

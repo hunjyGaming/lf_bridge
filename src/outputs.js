@@ -14,6 +14,7 @@ const dgram = require('dgram');
  * All three carry the same envelope as the WebSocket feed:
  *   {"type":"event","data":{…}}      one per event
  *   {"type":"state","data":{…}}      snapshot, only if the output has sendState
+ *   {"type":"report","data":{…}}     the mission report, once per finished match
  *
  * TCP outputs hold the connection open and reconnect with backoff. A dead
  * output never blocks the engine or the other outputs.
@@ -141,6 +142,72 @@ class Outputs {
     }
   }
 
+  // ---- mission report ----
+  /**
+   * The short form of a finished mission (src/matchReport.js), as a third kind
+   * of payload beside `event` and `state`.
+   *
+   * WHO GETS IT. There is no separate `sendReports` switch, because an unknown
+   * field would not survive `normalizeOutput()` in src/config.js. The existing
+   * filter answers the question just as well: an enabled output with
+   * `sendEvents` on whose `events` list is `["*"]` (the default) or explicitly
+   * names `match_report`. An operator who wants an output to carry ONLY the
+   * mission report sets `events` to `["match_report"]` and gets exactly that.
+   *
+   * WHAT COUNTS AS DELIVERED, and this is what the queue in matchReport.js
+   * hangs off:
+   *   webhook — the target answered 2xx (after its own three attempts).
+   *   tcp     — the connection stood and the line went into the socket.
+   *   udp     — never gates the queue. UDP cannot acknowledge anything, and a
+   *             50-player report is bigger than a datagram anyway: it is sent
+   *             when it fits, loudly skipped when it does not, and either way
+   *             it is not a reason to hold a mission back forever.
+   *
+   * @returns {Promise<{ok:boolean, detail:string, targets:number}>}
+   */
+  async sendReport(report) {
+    const targets = this.list().filter((o) => o.enabled && o.sendEvents !== false && wantsReport(o));
+    if (!targets.length) return { ok: true, detail: 'kein Ausgang für Missionsberichte eingerichtet', targets: 0 };
+
+    const line = JSON.stringify({ type: 'report', data: report }) + '\n';
+    const buf = Buffer.from(line);
+    const problems = [];
+    let ok = true;
+
+    await Promise.all(targets.map(async (o) => {
+      if (!this.allowed(o)) { this._denied(o, 'match_report'); ok = false; problems.push(`${o.name}: blocked by outputAllow`); return; }
+      if (o.kind === 'webhook') {
+        const good = await this._sendWebhook(o, report, 'match_report', 1, 'match_report');
+        if (!good) { ok = false; problems.push(`${o.name}: ${this.status[o.id]?.detail || 'HTTP-Fehler'}`); }
+        return;
+      }
+      if (o.kind === 'tcp') {
+        const conn = this._tcp.get(o.id);
+        if (conn && conn.connected) {
+          conn.socket.write(buf);
+          this.status[o.id] = { ok: true, detail: 'match_report', at: Date.now() };
+        } else {
+          ok = false;
+          problems.push(`${o.name}: nicht verbunden`);
+          this.status[o.id] = { ok: false, detail: 'not connected', at: Date.now() };
+        }
+        return;
+      }
+      if (o.kind === 'udp') {
+        if (buf.length > UDP_MAX_BYTES) {
+          this.log.warn('output', `"${o.name}": der Missionsbericht ist ${Math.round(buf.length / 1024)} KB groß und passt in kein UDP-Paket (Grenze ${UDP_MAX_BYTES / 1024} KB) — er wird für diesen Ausgang übersprungen. Für vollständige Berichte bitte Webhook oder TCP verwenden.`);
+          this.status[o.id] = { ok: false, detail: 'report too large for udp', at: Date.now() };
+          return;                                   // deliberately does NOT set ok = false
+        }
+        this._udp.send(buf, o.port, o.host, (err) => {
+          this.status[o.id] = err ? { ok: false, detail: err.message, at: Date.now() } : { ok: true, detail: 'match_report', at: Date.now() };
+        });
+      }
+    }));
+
+    return { ok, detail: problems.join(' · ') || 'ok', targets: targets.length };
+  }
+
   _send(o, envelope, label) {
     if (!this.allowed(o)) return this._denied(o, label);
     if (o.kind === 'webhook') return this._sendWebhook(o, envelope.data, label);
@@ -164,15 +231,22 @@ class Outputs {
   }
 
   // ---- webhook ----
-  async _sendWebhook(o, data, label, attempt = 1) {
+  /**
+   * `eventName` overrides the event label for a payload that is not an engine
+   * event and therefore has no `data.type` of its own — the mission report.
+   * Returns true when the target answered 2xx, so a caller can wait on it; the
+   * existing fire-and-forget callers ignore the value exactly as before.
+   */
+  async _sendWebhook(o, data, label, attempt = 1, eventName) {
     const ts = Date.now();
-    const payload = { event: data.type, ts, data };
+    const event = eventName || data.type;
+    const payload = { event, ts, data };
     if (o.includeState || o.sendState) payload.state = this.getState();
     const body = JSON.stringify(payload);
     const headers = {
       'Content-Type': 'application/json',
       'User-Agent': 'lf-live/1.0',
-      'X-LFB-Event': data.type,
+      'X-LFB-Event': event,
       'X-LFB-Timestamp': String(ts),
     };
     if (o.secret) headers['X-LFB-Signature'] = 'sha256=' + crypto.createHmac('sha256', o.secret).update(`${ts}.${body}`).digest('hex');
@@ -182,10 +256,12 @@ class Outputs {
     try {
       const res = await fetch(o.url, { method: 'POST', headers, body, signal: ctl.signal });
       this.status[o.id] = { ok: res.ok, detail: `HTTP ${res.status}`, at: Date.now() };
-      if (!res.ok && attempt < 3) { clearTimeout(to); await sleep(attempt * 1000); return this._sendWebhook(o, data, label, attempt + 1); }
+      if (!res.ok && attempt < 3) { clearTimeout(to); await sleep(attempt * 1000); return this._sendWebhook(o, data, label, attempt + 1, eventName); }
+      return res.ok;
     } catch (err) {
-      if (attempt < 3) { clearTimeout(to); await sleep(attempt * 1000); return this._sendWebhook(o, data, label, attempt + 1); }
+      if (attempt < 3) { clearTimeout(to); await sleep(attempt * 1000); return this._sendWebhook(o, data, label, attempt + 1, eventName); }
       this.status[o.id] = { ok: false, detail: err.message, at: Date.now() };
+      return false;
     } finally {
       clearTimeout(to);
     }
@@ -265,6 +341,20 @@ class Outputs {
 }
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+/**
+ * Practical ceiling for one UDP datagram. The theoretical IPv4 limit is 65507
+ * bytes; anything near it is fragmented and dropped by half the world's
+ * switches, so a mission report above this goes out over TCP or webhook or not
+ * at all — never half.
+ */
+const UDP_MAX_BYTES = 60000;
+
+/** Does this output want the mission report? Uses the existing `events` filter. */
+function wantsReport(o) {
+  const evs = o.events || ['*'];
+  return evs.includes('*') || evs.includes('match_report');
+}
 
 /** { host, port } an output would talk to, lower-cased; null if it is unusable. */
 function targetHostPort(o) {

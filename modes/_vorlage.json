@@ -1,0 +1,20 @@
+{
+  "beschreibung": "VORLAGE für einen neuen Spielmodus. Diese Datei selbst wird nie geladen: der Name beginnt mit einem Unterstrich, und alles, was mit _ anfängt, überspringt lf_live. Zum Anlegen eines Modus diese Datei kopieren, die Kopie z. B. zombies.json nennen (ohne Unterstrich!) und die Felder unten ausfüllen. JSON kennt keine Kommentarzeilen mit // oder # — was hier erklärt werden muss, steht deshalb in den Textfeldern beschreibung und hinweis. Die werden mitgelesen, aber nicht ausgewertet.",
+
+  "schluessel": "mein_modus",
+  "_zu_schluessel": "PFLICHT. Gleichbleibender Kurzname für CSV-Dateien und API. Nur Kleinbuchstaben, Ziffern und Unterstriche, beginnend mit einem Buchstaben. Einmal vergeben nicht mehr ändern, sonst passen alte und neue Auswertungen nicht zusammen.",
+
+  "anzeigename": "Mein Modus",
+  "_zu_anzeigename": "PFLICHT. Der Name, den ein Mensch liest. Schickt die Anlage zu Missionsbeginn selbst eine Beschreibung mit, gewinnt die.",
+
+  "missionsnummern": [],
+  "_zu_missionsnummern": "PFLICHT. Liste der Modus-Nummern dieser Anlage, die zu diesem Modus gehören — ganze Zahlen von 0 bis 65535, ohne Anführungszeichen. Mehrere sind erlaubt: [17] oder [17, 23, 24]. Eine leere Liste [] ist in Ordnung; der Modus ist dann nur wirkungslos. Die Nummern werden mit 'node scripts/inspect.js 9100' an der Anlage gemessen (docs/GAMEMODES.md). Eine Nummer darf nur in EINER Modus-Datei stehen.",
+
+  "familie": "sm5",
+  "_zu_familie": "PFLICHT. Genau zwei Werte erlaubt: 'sm5' (Schüsse, Treffer, Raketen) oder 'laserball' (Tore, Pässe, Bälle). Im Zweifel 'sm5' — lf_live korrigiert sich zur Laufzeit selbst, sobald 11xx-Event-Codes auftauchen. 'laserball' nur eintragen, wenn der Inspektor tatsächlich 11xx-Codes gezeigt hat.",
+
+  "profil": "sm5",
+  "_zu_profil": "Welcher Spaltensatz angezeigt und geschrieben wird. Mitgeliefert sind 'standard', 'sm5' und 'laserball' — je eine Datei unter modes/profile/. Das Feld darf weggelassen werden; dann gilt das Standardprofil der Familie (sm5 -> sm5, laserball -> laserball). Ein eigener Spaltensatz braucht KEINE Änderung hier, sondern eine neue Datei unter modes/profile/. Dasselbe Profil bestimmt auch, was im MISSIONSBERICHT ans Backend geht — im Abschnitt '_bericht' der Profil-Datei (docs/INTEGRATION.md). Hier in modes/ wird dazu nichts eingestellt.",
+
+  "hinweis": "Nach dem Speichern: in der Web-Konsole einmal Einstellungen speichern — dann greift die Datei sofort. Sonst lf_live neu starten. Tippfehler legen nichts lahm: lf_live meldet sie im Log in verständlichem Deutsch mit Dateinamen und läuft mit den eingebauten Vorgaben weiter."
+}

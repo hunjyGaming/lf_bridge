@@ -10,6 +10,7 @@ Ordner (Standard): `data/stats/` neben dem Programm. Änderbar per `.env`
 > Zusätzlich schreibt lf_live eine **lesbare Event-Log-Datei** nach `data/logs/`
 > (eine Zeile je Ereignis, zum Mitlesen/Grep). Eigene Doku: [LOGGING.md](LOGGING.md).
 
+- [CSV oder Missionsbericht?](#csv-oder-missionsbericht)
 - [Getrennt nach Familie — und warum](#getrennt-nach-familie--und-warum)
 - [Anzeigeprofil: was in welcher Spalte steht](#anzeigeprofil-was-in-welcher-spalte-steht)
 - [Die Dateien](#die-dateien)
@@ -27,6 +28,32 @@ Ordner (Standard): `data/stats/` neben dem Programm. Änderbar per `.env`
 - [Einstellungen (Konsole → Statistik)](#einstellungen-konsole--statistik)
 - [Löschen und Zurücksetzen](#löschen-und-zurücksetzen)
 - [API](#api)
+
+---
+
+## CSV oder Missionsbericht?
+
+Am Ende eines Matches entstehen **zwei** Dinge, und sie beantworten verschiedene
+Fragen. Beide werden aus demselben Zustand gebaut und widersprechen sich nie.
+
+| | CSV-Dateien | [Missionsbericht](INTEGRATION.md#missionsbericht-die-kurzfassung-eines-matches) |
+|---|---|---|
+| **Wofür** | die eigene Auswertung: Bestenlisten, Excel, pandas | die Gegenseite: Buchungs-/Mitgliederverwaltung |
+| **Wohin** | `data/stats/` auf **diesem** PC | über die Ausgänge und MQTT **aus dem Haus** |
+| **Umfang** | **alles** — bis zu 41 Zähler je Spieler | die **Kurzfassung** — was der Betreiber ausgewählt hat |
+| **Format** | `snake_case`-Spalten, eine Zeile je Spieler | JSON, `camelCase`, ein Block je Spieler |
+| **Spieler-Kennung** | `player_id` (ohne Präfix) | zusätzlich `entityId`, `idKind`, `memberId` — **Mitglied und Gast sind unterscheidbar** |
+| **Wenn das Ziel weg ist** | betrifft die CSV nicht | Warteschlange auf Platte, übersteht einen Neustart |
+| **Eingestellt in** | `csv` im Anzeigeprofil | `_bericht` im **selben** Anzeigeprofil |
+
+Beide Auswahllisten stehen in derselben Datei `modes/profile/<profil>.json` und
+benutzen dieselben Kennzahlnamen — nur schreibt die eine CSV-Spalten und die
+andere JSON-Felder. Die Zuordnung „Feldname ↔ CSV-Spalte" steht in
+[GAMEMODES.md → Spaltenbeschriftungen](GAMEMODES.md#spaltenbeschriftungen).
+
+Eine Regel gilt in beiden, und sie ist wichtiger als jede andere: **ein Wert, den
+die Anlage nicht gemeldet hat, bleibt leer bzw. `null` — nie `0`.** Siehe
+[Leere Zellen sind Absicht](#leere-zellen-sind-absicht).
 
 ---
 

@@ -9,6 +9,18 @@ Zwei Ebenen, die spätere gewinnt:
 
 Reihenfolge beim Start: **Defaults → `config.json` → `.env`**.
 
+> **Dritte, eigenständige Sache: die Spielmodi.** Welche Modus-Nummer welcher
+> Spielmodus ist und welche Spalten er zeigt, steht **nicht** in `config.json`,
+> sondern in eigenen JSON-Dateien unter **[`modes/`](../modes)** — je Modus eine
+> Datei, dazu je Anzeigeprofil eine unter `modes/profile/`. Sie werden von Hand
+> im Texteditor gepflegt, sind **versioniert** (anders als `config.json`) und
+> werden **zu denselben zwei Zeitpunkten gelesen** wie die Konfiguration: beim
+> Start und bei jedem Speichern in der Web-Konsole. Eine neu eingetragene
+> Modus-Nummer greift damit ohne Dienstneustart. Ein Tippfehler in einer dieser
+> Dateien legt nichts lahm: lf_live meldet ihn auf Deutsch mit Dateinamen im Log
+> und läuft mit den eingebauten Vorgaben weiter.
+> Vollständige Anleitung: [GAMEMODES.md](GAMEMODES.md#spielmodi-in-json-dateien).
+
 **Env-Pins:** Ein in `.env` gesetzter Wert ist gepinnt — die Konsole zeigt das
 Feld dann nur lesbar mit der Markierung *„aus .env"*. Ein Speichern in der
 Konsole kann ihn nicht überschreiben. Lass einen Wert also entweder nur in
@@ -35,6 +47,22 @@ Dateirechten `0600` geschrieben.
 | `LF_STATE_TICK_MS` | `200` | `stateTickMs` | Takt für den gemeinsamen State-Push an WebSocket, Raw-TCP-Stream und Ausgänge. Ein `change` markiert nur „dirty"; einmal pro Takt wird der Snapshot einmal serialisiert und an alle drei weitergereicht. Events gehen weiterhin sofort raus. min `50`, max `5000`. Änderung über die Konsole wirkt **erst nach Neustart**. |
 | `LF_TRUST_PROXY` | `false` | `http.trustProxy` | `true` → Client-IP kommt aus dem **linkesten** `X-Forwarded-For`-Eintrag (Rate-Limit + Audit-Log). Nur einschalten, wenn ein eigener Reverse-Proxy davorsteht — sonst ist der Header fälschbar. |
 | `LF_OUTPUT_ALLOW` | *(leer = alles)* | `outputAllow` | Komma-Liste erlaubter Ausgangs-Ziele: `host` oder `host:port`, `*.suffix` möglich. Nicht gelistete Ziele werden mit einer Warnung übersprungen. |
+| `LF_MQTT_ENABLED` | `false` | `mqtt.enabled` | MQTT-Ausgang zum FunZone-Locationserver ([MQTT.md](MQTT.md)). Aus = es passiert nichts; ohne laufenden Broker startet lf_live trotzdem sofort. |
+| `LF_MQTT_URL` | `mqtt://127.0.0.1:1883` | `mqtt.url` | Broker-Adresse. Erlaubt: `mqtt` `mqtts` `ws` `wss` `tcp` `tls`. Ein anderes Schema wird verworfen und die Vorgabe benutzt. |
+| `LF_MQTT_TOPIC` | `/decs/lfpassthrough` | `mqtt.topic` | Das Topic, das der Locationserver abonniert — **wörtlich, ohne Platzhalter**. Ändern trennt die Anbindung. |
+| `LF_MQTT_TOPIC_SUFFIXES` | `false` | `mqtt.topicSuffixes` | `true` = jede Nachricht geht auf `<topic>/<event>`. **Der Locationserver kann das nicht empfangen** — nur für einen eigenen Broker mit Platzhalter-Abonnement. |
+| `LF_MQTT_STATUS_TOPIC` | *(leer)* | `mqtt.statusTopic` | eigenes Topic für `bridge_online` und den Last Will; leer = dasselbe wie `mqtt.topic` |
+| `LF_MQTT_QOS` | `1` | `mqtt.qos` | `0` \| `1` \| `2`. `1` entspricht Abonnement und Weiterleitung der Gegenseite. |
+| `LF_MQTT_RETAIN` | `false` | `mqtt.retain` | Nachrichten vom Broker aufbewahren lassen |
+| `LF_MQTT_CLIENT_ID` | *(automatisch)* | `mqtt.clientId` | leer = `lf-bridge-<rechner>-<zufall>` |
+| `LF_MQTT_RECONNECT_SECONDS` | `5` | `mqtt.reconnectSeconds` | Abstand der Wiederverbindungsversuche (1–3600) |
+| `LF_MQTT_QUEUE_MAX` | `0` | `mqtt.queueMax` | Nachrichten im **Arbeitsspeicher**, solange der Broker weg ist. `0` = keine — ein Speicherpuffer übersteht keinen Neustart, deshalb liegt die Aufbewahrung beim Missionsbericht. Höher gesetzt gilt eine harte Obergrenze: bei Überlauf fällt die **älteste** Nachricht heraus und wird gezählt (0–10000). |
+| `LF_MQTT_TLS_INSECURE` | `false` | `mqtt.tlsInsecure` | `mqtts://` mit selbstsigniertem Zertifikat zulassen |
+| `LF_MQTT_MATCH_START` | `true` | `mqtt.publishMatchStart` | Rundenstart-Nachricht senden |
+| `LF_MQTT_MATCH_END` | `true` | `mqtt.publishMatchEnd` | Rundenende-Nachricht senden |
+| `LF_MQTT_STATUS` | `true` | `mqtt.publishStatus` | `bridge_online` beim Verbinden + `bridge_offline` als Last Will |
+| `LF_MQTT_USERNAME` | *(leer)* | **–** | Broker-Benutzer. **Nur Umgebung**: steht bewusst in keinem Config-Feld, siehe unten. |
+| `LF_MQTT_PASSWORD` | *(leer)* | **–** | Broker-Passwort. **Nur Umgebung.** |
 | `LF_TCP_HOST` | `0.0.0.0` | `tcp.host` | Bind des Laserforce-Eingangs |
 | `LF_TCP_PORT` | `9000` | `tcp.port` | Laserforce verbindet sich hierher. Änderung wird im Betrieb übernommen (Neu-Bind). |
 | `LF_STREAM_ENABLED` | `false` | `streamServer.enabled` | roher TCP-Stream-Server an/aus |
@@ -47,9 +75,13 @@ Dateirechten `0600` geschrieben.
 | `LF_CSV_EVENTS` | `true` | `csv.writeEvents` | zusätzlich Event-Log pro Match |
 | `LF_CSV_LIVE` | `false` | `csv.writeLive` | Match-CSV schon während des Matches aktualisieren |
 
-> Für die Modus-Erkennung gibt es **keine** eigenen Einstellungen. Dass die
-> CSV-Ablage seit dieser Version je Spielmodus-Familie getrennt schreibt,
-> passiert automatisch — Dateinamen und Spalten: [STATS.md](STATS.md).
+> Für die Modus-Erkennung gibt es in `.env` und `config.json` **keine**
+> Einstellungen — die Spielmodi stehen in [`modes/`](../modes), siehe
+> [GAMEMODES.md](GAMEMODES.md#spielmodi-in-json-dateien). Die einzige
+> Umgebungsvariable dazu ist `LF_MODES_DIR` (Standard: `modes/` neben `src/`);
+> sie verschiebt nur das Verzeichnis und wird im Normalbetrieb nicht gebraucht.
+> Dass die CSV-Ablage seit dieser Version je Spielmodus-Familie getrennt
+> schreibt, passiert automatisch — Dateinamen und Spalten: [STATS.md](STATS.md).
 | `LF_CAPTURE_ENABLED` | `false` | `capture.enabled` | rohen TDF-Stream mitschneiden ([CAPTURE.md](CAPTURE.md)) — **Diagnose, kein Dauerbetrieb**; die Dateien enthalten Spielernamen und Mitglieds-IDs. Konsolen-Änderung wirkt sofort |
 | `LF_CAPTURE_DIR` | `data/capture` | `capture.dir` | Zielordner der Mitschnitte |
 | `LF_CAPTURE_MAX_FILE_MB` | `20` | `capture.maxFileMB` | Grenze je Datei; danach endet der Mitschnitt dieser Mission (1–2000) |
@@ -68,12 +100,25 @@ Dateirechten `0600` geschrieben.
 | `LF_MATCH_END_BLOCK_SECONDS` | `10` | `matchEnd.endBlockSeconds` | Endabrechnung (Typ 6/7) erkannt und **kein** `0101` danach: Frist bis zum Ende. `0` = Erkennung aus, dann greift nur der Watchdog |
 | `LF_LOG_LEVEL` | `info` | `logLevel` | `debug` \| `info` \| `warn` \| `error` |
 | `LF_CONFIG_FILE` | `config.json` | – | wo die Konsolen-Konfiguration liegt |
+| `LF_MODES_DIR` | `modes` | – | wo die Spielmodus-Dateien liegen ([GAMEMODES.md](GAMEMODES.md#spielmodi-in-json-dateien)). Standard ist der Ordner `modes/` im Programmverzeichnis; im Normalbetrieb nicht setzen |
 | `LF_ENV_FILE` | `.env` | – | alternative .env-Datei |
 
 Dazu die Benachrichtigungs-Variablen (`LF_NOTIFY_*`) — eigene Seite:
 [NOTIFY.md](NOTIFY.md).
 
 Leere Werte (`LF_API_TOKEN=`) zählen als „nicht gesetzt".
+
+> **Broker-Zugangsdaten gehören ausschließlich in die Umgebung.**
+> `LF_MQTT_USERNAME` und `LF_MQTT_PASSWORD` haben **keine** Entsprechung in
+> `config.json` und sind deshalb in der Spalte „Config-Feld" mit `–` markiert.
+> Alles, was in `config.json` steht, wird in diese Datei geschrieben **und** von
+> `GET /api/config` an die Konsole ausgeliefert; ein Broker-Passwort hat in
+> beidem nichts zu suchen. Die beiden Werte werden erst im Moment des
+> Verbindungsaufbaus direkt aus der Umgebung gelesen (`mqttCredentials()` in
+> `src/config.js`) und nirgends zwischengespeichert. `GET /api/status` meldet
+> nur `authConfigured: true|false`. Trägt die Broker-URL Zugangsdaten
+> (`mqtt://benutzer:geheim@host`), erscheinen sie in Log und Status als
+> `mqtt://***@host`. Einzelheiten: [MQTT.md](MQTT.md).
 
 ---
 
@@ -129,6 +174,22 @@ Leere Werte (`LF_API_TOKEN=`) zählen als „nicht gesetzt".
     "maxFileMB": 20, "maxFiles": 50, "maxTotalMB": 500
   },
   "localRoster": { "enabled": false, "file": "data/roster.csv" },
+  "mqtt": {                                  // Anbindung an den FunZone-Locationserver — MQTT.md
+    "enabled": false,                        // standardmäßig aus
+    "url": "mqtt://127.0.0.1:1883",
+    "topic": "/decs/lfpassthrough",          // WÖRTLICH das Topic der Gegenseite; Ändern trennt die Anbindung
+    "topicSuffixes": false,                  // true = <topic>/<event> — das empfängt der Locationserver NICHT
+    "statusTopic": "",                       // "" = dasselbe wie "topic"
+    "qos": 1, "retain": false,
+    "clientId": "",                          // "" = lf-bridge-<rechner>-<zufall>
+    "reconnectSeconds": 5,
+    "queueMax": 0,                           // Nachrichten im Arbeitsspeicher bei totem Broker; 0 = keine
+    "tlsInsecure": false,
+    "publishMatchStart": true,
+    "publishMatchEnd": true,
+    "publishStatus": true
+    // KEIN username/password: die stehen nur in der Umgebung (siehe oben)
+  },
   "outputs": [
     {
       "id": "out_…",              // automatisch

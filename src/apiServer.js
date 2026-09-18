@@ -13,23 +13,46 @@ const { reachability } = require('./netinfo');
 const {
   FAMILIES, DEFAULT_FAMILY, DEFAULT_PROFILE, PROFILE_LIST, FAMILY_DEFAULT_PROFILE,
   listModes, listProfiles, scoreboardColumns, metricLabels, metricGroups, profileLabel,
+  resolveProfile, profileSort, metricInfo, modeConfigStatus,
 } = require('./gameModes');
 
 /** The only family names a request may name. Everything else falls back. */
 const FAMILY_KEYS = [FAMILIES.LASERBALL, FAMILIES.SM5];
 
 /**
- * The display profiles, resolved once — the registry is static.
- * `listProfiles()` gives { profile, family, scoreboard, csv, sort } per profile.
+ * The display profiles — resolved PER REQUEST, not once at start.
+ *
+ * The profiles and mode numbers live in hand-editable JSON under `modes/`, and
+ * src/config.js re-reads them on every console save (`reloadModes()`) so the
+ * hall operator can add a mission number he just measured without restarting
+ * the service. Resolving `listProfiles()` once at module load would have made
+ * that reload path end here: the console would keep showing the old columns
+ * until a restart.
+ *
+ * Rebuilding it on every call is wasted work though — `/api/modes` is what
+ * every console asks for the moment it connects. So it is cached against
+ * `modeConfigStatus().loadedAt`, the stamp `reloadModes()` sets: unchanged
+ * config -> the cached array; a reload -> rebuilt exactly once, on the next
+ * request. Measured cost of the rebuild: see docs/API.md.
+ *
+ * `PROFILE_LIST` and `FAMILY_DEFAULT_PROFILE` above need no such treatment —
+ * `reloadModes()` mutates those in place, so the imported bindings stay live.
  */
-const PROFILE_INFO = listProfiles();
+let _profileCache = null;
+function profileInfo() {
+  const stamp = (modeConfigStatus() || {}).loadedAt || null;
+  if (!_profileCache || _profileCache.stamp !== stamp) {
+    _profileCache = { stamp, info: listProfiles() };
+  }
+  return _profileCache.info;
+}
 
 // The German display name of a profile comes from gameModes.profileLabel() —
 // it lives next to the profile definitions, so console, API and legend all read
 // the same string. This file no longer keeps a table of its own.
 
 /** The family a profile belongs to; null for anything that is not a profile. */
-const profileFamily = (p) => (PROFILE_INFO.find((x) => x.profile === p) || {}).family || null;
+const profileFamily = (p) => (profileInfo().find((x) => x.profile === p) || {}).family || null;
 /** The profile a family's files are shown under (its default profile). */
 const familyProfile = (f) => FAMILY_DEFAULT_PROFILE[f] || DEFAULT_PROFILE;
 
@@ -71,8 +94,81 @@ const SESSION_COOKIE = 'lf_sess';
 const RAW_BATCH_MS = 250;
 const RAW_BATCH_LINES = 400;
 const RAW_QUEUE_MAX = 4000;
-/** Longest control frame a console may send us; anything larger is dropped unparsed. */
+/** Longest control frame a client may send us; anything larger is dropped unparsed. */
 const WS_MSG_MAX = 256;
+
+// ---------------------------------------------------------------------------
+// Bundled event frames (docs/API.md "Gebündelte Ereignisse")
+//
+// One WebSocket frame PER EVENT is what this service has always sent, and it is
+// what every existing consumer expects — so that stays the default and is never
+// taken away. But a measurement at a high event rate showed the per-frame cost
+// dominating: at ~120 events/s the unpacking alone (one JSON.parse + one event
+// handler per frame) kept a browser consumer's queue growing. A consumer may
+// therefore ASK for bundling, either at connect time (`/ws?events=batch`) or
+// with a `subscribe` control frame; it then gets `{"type":"events","data":[…]}`
+// instead of many `{"type":"event","data":{…}}`.
+//
+// The queue is per client, so a slow consumer cannot slow down a fast one, and
+// it is bounded: past EV_QUEUE_MAX the oldest events are dropped and the count
+// is carried in the next frame, rather than the service growing a buffer for a
+// consumer that cannot keep up. Same rule as the raw-line tap above.
+const EV_BATCH_MS_DEFAULT = 100;
+const EV_BATCH_MS_MIN = 20;
+const EV_BATCH_MS_MAX = 1000;
+/** A burst this long goes out at once instead of waiting for the timer. */
+const EV_BATCH_MAX = 200;
+/** Hard ceiling per client; beyond it the OLDEST events are dropped. */
+const EV_QUEUE_MAX = 2000;
+
+/** Version of the `display` payload — bumped only on a breaking change. */
+const DISPLAY_VERSION = 1;
+
+/**
+ * Written-out German reason a match ended. The vocabulary itself is the
+ * engine's (`END_REASONS` in src/engine.js); only the wording lives here,
+ * because it is a display concern and nothing else reads it. Identical to the
+ * table in docs/API.md.
+ */
+const END_REASON_LABEL = {
+  mission_end: 'regulär beendet',
+  watchdog: 'vom Spielleiter beendet bzw. Zeitüberschreitung',
+  stream_lost: 'Verbindung zur Anlage verloren',
+  next_match: 'durch ein neues Match abgelöst',
+  shutdown: 'Dienst beendet',
+};
+/** Written-out German form of `endSource` — through WHAT the end was noticed. */
+const END_SOURCE_LABEL = {
+  '0101': 'Mission-End-Zeile 0101 der Anlage',
+  summary_type6: 'Abschluss-Zeilen (Typ 6) aller Spieler',
+  summary_type7: 'SM5-Endblock (Typ 7)',
+  silence: 'keine Daten mehr von der Anlage',
+  stream_lost: 'TCP-Verbindung abgebrochen',
+  next_match: 'Start des nächsten Matches',
+  shutdown: 'Dienst wurde beendet',
+};
+/** Where the points on screen come from. */
+const SCORE_SOURCE_LABEL = {
+  tdf: 'von der Anlage gemeldet',
+  internal: 'von der Bridge mitgezählt',
+};
+/** Where a player's counters come from. */
+const STATS_SOURCE_LABEL = {
+  live: 'laufend mitgezählt (Untergrenze)',
+  tdf7: 'amtliche Endabrechnung der Anlage',
+};
+/** The unit a `format` implies. `null` means "a bare number, no unit". */
+const FORMAT_UNIT = { percent: '%', int: null, text: null };
+
+/**
+ * A display needs at least three teams, each with exactly one player, before
+ * "everybody against everybody" is a fair description. Two one-player teams are
+ * a duel, and one team with many players is a co-op game.
+ */
+const FFA_MIN_TEAMS = 3;
+
+/** How often the same disallowed Origin produces a log line. */
+const ORIGIN_LOG_MS = 60000;
 
 // File-backed event-log endpoints (docs/LOGGING.md). Only files whose name looks
 // like an event-log file are ever listed or streamed.
@@ -99,6 +195,230 @@ function listEventLogFiles(dir) {
   }
 }
 
+// ---------------------------------------------------------------------------
+// The display payload
+// ---------------------------------------------------------------------------
+
+/** `undefined` and `NaN` both mean "not reported" and become `null`, never 0. */
+function orNull(v) {
+  if (v === undefined || v === null) return null;
+  if (typeof v === 'number' && !Number.isFinite(v)) return null;
+  return v;
+}
+/** A number, or 0 — for things that are honestly counted from zero. */
+function num0(v) {
+  return typeof v === 'number' && Number.isFinite(v) ? v : 0;
+}
+
+/**
+ * Rank a list that is already sorted best-first: equal keys share a rank, and
+ * the next rank skips (1, 2, 2, 4) — what a scoreboard shows.
+ */
+function withRanks(list, keyOf) {
+  let lastKey = null;
+  let lastRank = 0;
+  return list.map((item, i) => {
+    const k = JSON.stringify(keyOf(item));
+    if (k !== lastKey) { lastRank = i + 1; lastKey = k; }
+    return { ...item, rank: lastRank };
+  });
+}
+
+/**
+ * Everything a scoreboard, a beamer overlay or a tournament system needs, and
+ * nothing else — built from ONE `engine.snapshot()` so it can never drift away
+ * from `/api/state`. See docs/API.md, "Der Anzeige-Datensatz".
+ *
+ * What it does that a consumer would otherwise have to do itself, wrongly:
+ *   - it decides the DIRECTION of the clock (`clock.direction`) and hands over
+ *     the single number to put on screen (`clock.displayMs`). Nobody may ever
+ *     compute `durationMs - elapsedMs`: without a duration from the rig,
+ *     `durationMs` is a default that has nothing to do with the running game.
+ *   - it turns the team MAP into an ordered ARRAY with the id inside, so one
+ *     team, seven teams and "everyone against everyone" all render the same way.
+ *   - it picks the columns that matter for THIS game mode and gives each one its
+ *     written-out label, its unit and its display format.
+ *   - it never turns "not reported yet" into 0 — an unreported value is `null`.
+ *   - it carries the provenance flags along: estimated accuracy, live counters
+ *     vs. the rig's official end block, and where the points come from.
+ */
+function buildDisplay(s, { withPlayers = true, now = Date.now() } = {}) {
+  const mode = s.mode || {};
+  const profile = resolveProfile(mode.profile || mode.family || DEFAULT_PROFILE);
+
+  // --- columns for exactly this mode -----------------------------------------
+  // Deliberately WITHOUT `help`, `group` and `groupLabel`: they are static per
+  // mode and would be re-sent five times a second for nothing. They come from
+  // the very same scoreboardColumns() call in `GET /api/modes`, which a display
+  // fetches once — see docs/API.md.
+  const columns = scoreboardColumns(profile).map((c) => {
+    const col = {
+      key: c.key,
+      label: c.label,
+      short: c.short,
+      format: c.format,
+      // ADDITIVE over scoreboardColumns(): the unit that `format` implies, so a
+      // renderer does not need a format->unit table of its own.
+      unit: Object.prototype.hasOwnProperty.call(FORMAT_UNIT, c.format) ? FORMAT_UNIT[c.format] : null,
+    };
+    if (c.received) {
+      col.received = c.received;
+      col.receivedLabel = (metricInfo(c.received) || {}).label || c.received;
+    }
+    return col;
+  });
+  const sortKeys = profileSort(profile);
+
+  // --- teams -----------------------------------------------------------------
+  // The map is keyed by the raw team token. Sorted numerically where possible so
+  // "left/right" stays the same for the whole match, then ranked by score.
+  const teamIds = Object.keys(s.teams || {}).sort((a, b) => {
+    const na = Number(a); const nb = Number(b);
+    if (Number.isFinite(na) && Number.isFinite(nb)) return na - nb;
+    return String(a).localeCompare(String(b));
+  });
+  const headcount = new Map();
+  for (const p of Object.values(s.players || {})) {
+    const t = String(p.teamId);
+    headcount.set(t, (headcount.get(t) || 0) + 1);
+  }
+  const teamsPlain = teamIds.map((id) => ({
+    id,
+    name: (s.teams[id] && s.teams[id].name) || `Team ${id}`,
+    color: (s.teams[id] && s.teams[id].color) || null,
+    score: num0((s.scores || {})[id]),
+    players: headcount.get(id) || 0,
+  }));
+  // Rank is by score; the ARRAY ORDER stays by id, so a display that just walks
+  // the array keeps its left/right assignment stable across the whole match.
+  const byScore = teamsPlain.slice().sort((a, b) => b.score - a.score);
+  const rankOf = new Map(withRanks(byScore, (t) => t.score).map((t) => [t.id, t.rank]));
+  const teams = teamsPlain.map((t) => ({ ...t, rank: rankOf.get(t.id) }));
+
+  const manned = teams.filter((t) => t.players > 0);
+  const freeForAll = manned.length >= FFA_MIN_TEAMS && manned.every((t) => t.players === 1);
+
+  // --- players ---------------------------------------------------------------
+  let players = null;
+  if (withPlayers) {
+    const teamById = new Map(teams.map((t) => [t.id, t]));
+    const rows = Object.values(s.players || {}).map((p) => {
+      const t = teamById.get(String(p.teamId)) || null;
+      const stats = {};
+      for (const c of columns) {
+        stats[c.key] = orNull(p[c.key]);
+        if (c.received) stats[c.received] = orNull(p[c.received]);
+      }
+      return {
+        id: p.id,
+        name: p.name,
+        teamId: p.teamId == null ? null : String(p.teamId),
+        teamName: t ? t.name : null,
+        teamColor: t ? t.color : null,
+        score: num0(p.score),
+        status: orNull(p.status),
+        roleLabel: orNull(p.roleLabel),
+        stats,
+        // Provenance — a display that shows a number should be able to say where
+        // it came from without a second request.
+        statsSource: p.statsSource || 'live',
+        statsSourceLabel: STATS_SOURCE_LABEL[p.statsSource || 'live'] || null,
+        accuracy: orNull(p.accuracy),
+        accuracyIsEstimate: p.accuracyIsEstimate === undefined ? null : !!p.accuracyIsEstimate,
+        accuracySource: p.accuracySource || null,
+        /** true once the rig delivered this player's official end block (type 7). */
+        officialStats: !!p.official,
+      };
+    });
+    // Best first, by the mode's own ranking metric, then score, then name.
+    // `null` (not reported) always sorts LAST, never as a zero — the same rule
+    // the rendering side follows. One helper, so the order and the rank that is
+    // handed out afterwards can never disagree.
+    const sortVals = (p) => sortKeys
+      .map((k) => (p.stats[k] == null ? (k === 'score' ? p.score : null) : p.stats[k]))
+      .concat(p.score);
+    rows.sort((a, b) => {
+      const av = sortVals(a);
+      const bv = sortVals(b);
+      for (let i = 0; i < av.length; i++) {
+        if (av[i] === bv[i]) continue;
+        if (av[i] == null) return 1;         // a has no value -> a goes last
+        if (bv[i] == null) return -1;
+        return bv[i] - av[i];                // bigger is better
+      }
+      return String(a.name).localeCompare(String(b.name));
+    });
+    players = withRanks(rows, sortVals);
+  }
+
+  // --- the clock -------------------------------------------------------------
+  // `remainingMs === null` <=> `durationKnown === false` <=> count UP.
+  const durationKnown = s.durationKnown === true;
+  const elapsedMs = num0(s.elapsedTime);
+  const remainingMs = s.remainingMs == null ? null : s.remainingMs;
+  const direction = remainingMs == null ? 'up' : 'down';
+
+  return {
+    v: DISPLAY_VERSION,
+    service: 'lf-live',
+    ts: now,
+    /** when the engine last changed anything; `ageMs` = how stale that is */
+    updatedAt: orNull(s.updatedAt),
+    ageMs: s.updatedAt == null ? null : Math.max(0, now - s.updatedAt),
+    match: {
+      active: s.missionActive === true,
+      matchId: orNull(s.matchId),
+      mode: {
+        number: orNull(mode.number),
+        key: mode.key || 'unknown',
+        /** written-out name of the running mode; may come FROM THE STREAM — text only, never HTML */
+        label: mode.label || 'Unbekannter Modus',
+        family: mode.family || DEFAULT_FAMILY,
+        profile,
+        /** written-out name of the DISPLAY profile the columns below belong to */
+        profileLabel: profileLabel(profile),
+        known: mode.known === true,
+        source: mode.source || 'default',
+        /** the rig's own description from the type-1 line, or null */
+        description: orNull(s.missionDesc),
+      },
+      clock: {
+        /** 'down' = show `remainingMs`, 'up' = show `elapsedMs`. Never compute it yourself. */
+        direction,
+        /** the one number to put on screen, already chosen by direction */
+        displayMs: direction === 'down' ? remainingMs : elapsedMs,
+        elapsedMs,
+        remainingMs,
+        durationMs: num0(s.duration),
+        durationKnown,
+        /** false => the clock must STAND STILL, whatever arrives afterwards */
+        running: s.missionActive === true,
+      },
+      scoreSource: s.scoreSource || 'internal',
+      scoreSourceLabel: SCORE_SOURCE_LABEL[s.scoreSource || 'internal'] || null,
+      end: {
+        reason: orNull(s.endReason),
+        reasonLabel: s.endReason ? (END_REASON_LABEL[s.endReason] || s.endReason) : null,
+        /** through WHAT the end was noticed — the only way to tell the two watchdog cases apart */
+        source: orNull(s.endSource),
+        sourceLabel: s.endSource ? (END_SOURCE_LABEL[s.endSource] || s.endSource) : null,
+        at: orNull(s.endedAt),
+      },
+    },
+    teams,
+    teamCount: teams.length,
+    /** teams that actually have a player in them right now */
+    teamsWithPlayers: manned.length,
+    /** every manned team holds exactly one player, and there are at least three */
+    freeForAll,
+    playerCount: Object.keys(s.players || {}).length,
+    ballHolderId: orNull(s.ballHolderId),
+    columns,
+    /** `null` only when the caller asked for `?players=none` */
+    players,
+  };
+}
+
 /**
  * The one thing the hall LAN talks to: JSON API + WebSocket + the web console,
  * all on a single HTTP port (config.http). Endpoints — docs/API.md.
@@ -113,7 +433,13 @@ function listEventLogFiles(dir) {
  *     a valid Bearer token is accepted everywhere instead of a session
  *     (constant-time compare)
  *   - CORS: only origins in config.cors get Access-Control-Allow-Origin (default:
- *     none), and cross-origin requests can only ever be GET (Allow-Methods: GET, OPTIONS)
+ *     none), and cross-origin requests can only ever be GET (Allow-Methods: GET, OPTIONS).
+ *     A rejected origin is never SILENT: the answer carries X-LF-Origin-Allowed: 0,
+ *     the service logs it (throttled), and /api/access says so to the caller.
+ *     The allow LIST itself is never handed out. Note that browsers do not apply
+ *     CORS to WebSockets at all — for /ws the token is the only gate.
+ *   - a refused WebSocket handshake carries a reason (X-LF-Reason + JSON body)
+ *     and a log line, instead of closing without a word
  *   - mutating requests without a valid bearer token need Sec-Fetch-Site: same-origin
  *     or the X-LF-Console: 1 header — blocks drive-by CSRF from a page the operator visits
  *   - per-IP rate limit (config.rateLimitPerMin); the client IP comes from the
@@ -145,6 +471,9 @@ class ApiServer {
     this._rawQueue = [];       // live raw lines waiting for the next bundle
     this._rawDropped = 0;      // lines thrown away because the queue was full
     this._rawTimer = null;     // runs only while somebody watches
+    this._evTimer = null;      // event-bundle timer; runs only while somebody asked for bundles
+    this._evTimerMs = 0;       // the window it currently runs at (shortest anybody asked for)
+    this._originLogged = new Map(); // throttle for the "Origin not allowed" warning
     this.sessions = new SessionStore({ ttlMs: (config.data.admin?.sessionHours || 12) * 3600000 });
     this.guard = new LoginGuard({
       maxFails: config.data.admin?.maxFailedLogins || 8,
@@ -183,11 +512,13 @@ class ApiServer {
       server.on('upgrade', (req, socket, head) => {
         let url;
         try { url = new URL(req.url, 'http://localhost'); } catch { return socket.destroy(); }
-        if (url.pathname !== '/ws' || !this._allowed(req, url)) {
-          socket.write('HTTP/1.1 401 Unauthorized\r\n\r\n');
-          return socket.destroy();
+        if (url.pathname !== '/ws') return this._rejectUpgrade(req, socket, 404, 'not_found', 'nur /ws ist ein WebSocket-Endpunkt');
+        if (!this._allowed(req, url)) {
+          return this._rejectUpgrade(req, socket, 401, 'unauthorized', this._loginRequired()
+            ? 'gültiges ?token=<token> anhängen oder im selben Browser angemeldet sein (/login)'
+            : 'gültiges ?token=<token> anhängen');
         }
-        wss.handleUpgrade(req, socket, head, (ws) => this._onWs(ws));
+        wss.handleUpgrade(req, socket, head, (ws) => this._onWs(ws, req, url));
       });
 
       server.on('error', (err) => { this.log.error('http', `server error: ${err.message}`); reject(err); });
@@ -207,10 +538,45 @@ class ApiServer {
   stop() {
     this._stopReaper();
     this._stopRawTap();
+    this._stopEventBatch();
     for (const ws of this.clients) { try { ws.close(1001); } catch {} }
     this.clients.clear();
     if (this.wss) { try { this.wss.close(); } catch {} this.wss = null; }
     if (this.server) { try { this.server.close(); } catch {} this.server = null; }
+  }
+
+  /**
+   * Turn a refused WebSocket handshake into something a human can debug.
+   *
+   * It used to be a bare `HTTP/1.1 401 Unauthorized` with no body and no log
+   * line: from the outside indistinguishable from a wrong port, a firewall or a
+   * crashed service, and that is the worst thing to hit at a tournament. Now the
+   * handshake carries a reason header and a short JSON body, and the service
+   * writes one warn line naming the client.
+   *
+   * It says nothing an attacker does not already know: WHETHER they are let in
+   * is the one bit they can always measure, and the hint only repeats what
+   * docs/API.md says in public. It never says whether a token is set, whether
+   * the one they sent was close, or what the allowed origins are.
+   */
+  _rejectUpgrade(req, socket, status, reason, hint) {
+    const ip = this._clientIp(req);
+    const origin = req.headers.origin || '';
+    const body = JSON.stringify({ error: reason, hint });
+    const text = status === 404 ? 'Not Found' : 'Unauthorized';
+    try {
+      socket.write(
+        `HTTP/1.1 ${status} ${text}\r\n`
+        + 'Content-Type: application/json; charset=utf-8\r\n'
+        + `Content-Length: ${Buffer.byteLength(body)}\r\n`
+        + `X-LF-Reason: ${reason}\r\n`
+        + 'Cache-Control: no-store\r\n'
+        + 'Connection: close\r\n'
+        + '\r\n' + body,
+      );
+    } catch {}
+    this.log.warn('ws', `Upgrade abgelehnt (${reason}) von ${ip}${origin ? ` Origin ${origin}` : ''} — ${hint}`);
+    return socket.destroy();
   }
 
   /** Drop WebSocket clients whose peer vanished without a FIN (dead NAT, sleeping laptop). */
@@ -557,14 +923,48 @@ class ApiServer {
   }
 
   // ---- helpers ----
-  _cors(req, res) {
+  /** Is this Origin on the allow list? (`*` lets everything through.) */
+  _originAllowed(origin) {
+    if (!origin) return true;               // not a browser request at all
+    const allowed = this.cfg.cors || [];
+    return allowed.includes('*') || allowed.includes(origin);
+  }
+  /**
+   * Say out loud that a browser request came from an Origin nobody allowed.
+   *
+   * This is THE failure that costs an hour on tournament day: the service
+   * answers 200, the browser throws the answer away without a word, and the
+   * display stays empty. One log line per origin per minute names it. Nothing
+   * secret is said — the caller sent us that origin, and the *missing*
+   * `Access-Control-Allow-Origin` header already tells them the answer.
+   */
+  _noteBlockedOrigin(origin, what) {
+    const now = Date.now();
+    const last = this._originLogged.get(origin) || 0;
+    if (now - last < ORIGIN_LOG_MS) return;
+    if (this._originLogged.size > 200) this._originLogged.clear();
+    this._originLogged.set(origin, now);
+    this.log.warn('http', `CORS: Origin ${origin} steht nicht in cors[] (${what}) — der Browser wird die Antwort STILL verwerfen. Origin in LF_CORS_ORIGINS eintragen (docs/SECURITY.md).`);
+  }
+  _cors(req, res, path = '') {
     const origin = req.headers.origin;
     if (!origin) return;
     const allowed = this.cfg.cors || [];
+    const ok = this._originAllowed(origin);
     if (allowed.includes('*')) res.setHeader('Access-Control-Allow-Origin', '*');
-    else if (allowed.includes(origin)) { res.setHeader('Access-Control-Allow-Origin', origin); res.setHeader('Vary', 'Origin'); }
+    else if (ok) res.setHeader('Access-Control-Allow-Origin', origin);
+    else this._noteBlockedOrigin(origin, path || req.url || '?');
+    // Always vary on Origin: the answer really does differ per origin, with or
+    // without an allow header, so a cache must not serve one origin's answer to
+    // another.
+    res.setHeader('Vary', 'Origin');
+    // ADDITIVE, purely diagnostic: visible in the browser's network tab even
+    // when the CORS check then hides the body from the page's JavaScript, so
+    // "why is my display empty" has an answer without reading the server log.
+    res.setHeader('X-LF-Origin-Allowed', ok ? '1' : '0');
     res.setHeader('Access-Control-Allow-Methods', 'GET, OPTIONS');
     res.setHeader('Access-Control-Allow-Headers', 'Authorization, Content-Type');
+    res.setHeader('Access-Control-Expose-Headers', 'X-LF-Origin-Allowed');
     res.setHeader('Access-Control-Max-Age', '600');
   }
   _json(res, status, obj) {
@@ -592,7 +992,7 @@ class ApiServer {
     const p = url.pathname;
     const ip = this._clientIp(req);
 
-    this._cors(req, res);
+    this._cors(req, res, p);
     if (req.method === 'OPTIONS') { res.writeHead(204); return res.end(); }
 
     // static console — login/setup pages are public, everything else needs a session
@@ -616,6 +1016,61 @@ class ApiServer {
     }
 
     if (!this._rateOk(ip)) { res.setHeader('Retry-After', '30'); return this._json(res, 429, { error: 'rate_limited' }); }
+
+    // "Warum komme ich nicht rein?" — the one endpoint that answers that from
+    // the OUTSIDE, for a display on a second machine. Deliberately reachable
+    // without credentials, exactly like /api/auth/session, because a caller who
+    // cannot get in is precisely the one who needs the answer.
+    //
+    // It tells the caller nothing they cannot already measure themselves:
+    // their own Origin (they sent it), whether it is on the allow list (the
+    // presence of `Access-Control-Allow-Origin` already says so), whether the
+    // credential they sent was accepted (they can try), and whether a token or
+    // a login is demanded at all (/api/auth/session already says that). It
+    // never lists the allowed origins and never says anything about the token
+    // itself. Rate-limited like every other route.
+    if (p === '/api/access') {
+      if (req.method !== 'GET' && req.method !== 'HEAD') return this._json(res, 405, { error: 'method_not_allowed' });
+      // Echoed straight back to the caller who sent it, and to nobody else —
+      // but capped all the same, so no answer of ours is ever bulkier than it
+      // needs to be.
+      const origin = req.headers.origin ? String(req.headers.origin).slice(0, 256) : null;
+      const originAllowed = this._originAllowed(req.headers.origin || null);
+      const tokenRequired = !!this.cfg.apiToken;
+      const tokenSent = !!this._token(req, url);
+      const authenticated = this._allowed(req, url);
+      const problems = [];
+      if (!authenticated) {
+        if (tokenRequired && !tokenSent) problems.push('kein Token mitgeschickt: Authorization: Bearer <token> bzw. ?token=<token>');
+        else if (tokenRequired && tokenSent) problems.push('das mitgeschickte Token passt nicht');
+        else if (this._setupPending()) problems.push('die Ersteinrichtung ist noch offen — erst /setup im Browser aufrufen');
+        else if (this._loginRequired()) problems.push('Anmeldung nötig: entweder am Browser über /login oder ein Zugriffs-Token setzen');
+      }
+      if (origin && !originAllowed) {
+        problems.push(`die Herkunft ${origin} steht nicht in cors[] — der Browser verwirft die Antwort still; Origin in LF_CORS_ORIGINS eintragen`);
+      }
+      return this._json(res, 200, {
+        data: {
+          service: 'lf-live',
+          origin,
+          /** false => a browser at this origin throws every answer away, whatever the status code was */
+          originAllowed,
+          /** true => this very request would be let through */
+          authenticated,
+          tokenRequired,
+          tokenSent,
+          tokenAccepted: tokenRequired ? this._hasToken(req, url) : null,
+          loginRequired: this._loginRequired(),
+          viaSession: this._sessionOk(req),
+          setupPending: this._setupPending(),
+          /** the WebSocket is NOT subject to cors[] — browsers do not apply CORS to it */
+          websocket: { path: '/ws', corsApplies: false, tokenRequired },
+          /** in plain words, what to fix; empty when nothing is wrong */
+          problems,
+          ts: Date.now(),
+        },
+      });
+    }
 
     // Auth endpoints run before the gate — they are how you get through it.
     if (p.startsWith('/api/auth/')) {
@@ -641,6 +1096,13 @@ class ApiServer {
         error: 'unauthorized',
         loginRequired: this._loginRequired(),
         hint: this._loginRequired() ? 'am Bildschirm anmelden (/login) oder Authorization: Bearer <token> senden' : 'send Authorization: Bearer <token>',
+        // ADDITIVE, all of it already knowable from the outside: whether a token
+        // is demanded (/api/auth/session says so), whether this caller sent one,
+        // and whether their Origin is allowed (the missing allow header says so).
+        tokenRequired: !!this.cfg.apiToken,
+        tokenSent: !!this._token(req, url),
+        originAllowed: this._originAllowed(req.headers.origin || null),
+        see: '/api/access',
       });
     }
 
@@ -690,11 +1152,19 @@ class ApiServer {
       return this._json(res, 200, { data: this.engine.gameState.events.filter((e) => e.id > since).slice(-limit) });
     }
     if (p === '/api/status') return this._json(res, 200, { data: this.getStatus() });
+    // The display payload (docs/API.md "Der Anzeige-Datensatz"). Same auth,
+    // CORS, token and rate-limit chain as every other GET. `?players=none`
+    // leaves the player list out for a pure scoreboard.
+    if (p === '/api/display') {
+      const withPlayers = (url.searchParams.get('players') || '') !== 'none';
+      return this._json(res, 200, { data: buildDisplay(this.engine.snapshot(), { withPlayers }) });
+    }
     // Game-mode registry + the mode detected right now (contract E). Read-only,
     // rides the same auth/CORS/rate-limit chain as every other GET above, and
     // carries nothing but the registry — no paths, no files, no config.
     if (p === '/api/modes') {
       const s = this.engine.snapshot();
+      const cfgStatus = modeConfigStatus() || {};
       // `scoreboard` is keyed by BOTH axes: the two FAMILY keys it always had
       // (nothing is removed — consumers may hang off them) and one key per
       // display PROFILE. `sm5`/`laserball` exist in both name spaces and mean
@@ -710,7 +1180,7 @@ class ApiServer {
           defaultFamily: DEFAULT_FAMILY,
           // display profiles — which columns are SHOWN, independent of the
           // family, which only decides what can be counted at all
-          profiles: PROFILE_INFO.map((x) => ({
+          profiles: profileInfo().map((x) => ({
             profile: x.profile, label: profileLabel(x.profile), family: x.family, sort: x.sort,
           })),
           defaultProfile: DEFAULT_PROFILE,
@@ -726,9 +1196,19 @@ class ApiServer {
           // Section order for that legend: the metric groups in display order.
           // Additive; nothing above changed shape.
           metricGroups: metricGroups(),
+          // ADDITIVE: a one-glance verdict on the hand-edited files under
+          // modes/. Without this, a typo in a mode file (broken JSON, unknown
+          // family, a mission number claimed twice) only ever appears in the
+          // log — and nobody reads the log on tournament day. The full detail,
+          // including which file and what is wrong, is GET /api/modes/status.
+          config: { ok: cfgStatus.ok !== false, problems: (cfgStatus.problems || []).length, loadedAt: cfgStatus.loadedAt || null },
         },
       });
     }
+    // The hand-editable mode files under modes/: which were read, what they
+    // define, and everything that is wrong with them. Read-only, behind the
+    // same gate as every other GET.
+    if (p === '/api/modes/status') return this._json(res, 200, { data: modeConfigStatus() });
     if (p === '/api/network') {
       return this._json(res, 200, {
         data: {
@@ -1035,31 +1515,79 @@ class ApiServer {
   }
 
   // ---- websocket ----
-  _onWs(ws) {
+  /**
+   * What a client is subscribed to. The DEFAULTS are exactly what this service
+   * has always sent — a full `state` frame per tick and one `event` frame per
+   * event — so a consumer written before any of this keeps working untouched.
+   * Everything else has to be asked for, either in the connect URL or with a
+   * `subscribe` control frame.
+   */
+  _defaultSub() {
+    return { feed: 'state', batch: false, batchMs: EV_BATCH_MS_DEFAULT, players: true };
+  }
+  /**
+   * Read a subscription out of the connect URL (`/ws?feed=display&events=batch`)
+   * or out of a `subscribe` control frame. Anything unknown is ignored and the
+   * previous value stays — a typo must never silently turn a feed off.
+   */
+  _applySub(sub, get) {
+    const feed = get('feed');
+    if (feed === 'state' || feed === 'display' || feed === 'both') sub.feed = feed;
+    const events = get('events');
+    if (events === 'batch') sub.batch = true;
+    else if (events === 'single') sub.batch = false;
+    const ms = parseInt(get('batchMs'), 10);
+    if (Number.isFinite(ms)) sub.batchMs = Math.min(EV_BATCH_MS_MAX, Math.max(EV_BATCH_MS_MIN, ms));
+    const players = get('players');
+    if (players === 'none' || players === 'false' || players === false) sub.players = false;
+    else if (players === 'full' || players === 'true' || players === true) sub.players = true;
+    return sub;
+  }
+
+  _onWs(ws, req, url) {
     this.clients.add(ws);
-    this.log.info('ws', `client connected (${this.clientCount})`);
     ws.isAlive = true;
     ws.on('pong', () => { ws.isAlive = true; });
     ws.rawTap = false;
+    ws.sub = this._defaultSub();
+    ws.evQueue = [];
+    ws.evDropped = 0;
+    if (url) this._applySub(ws.sub, (k) => url.searchParams.get(k));
     ws.on('message', (data, isBinary) => this._onWsMessage(ws, data, isBinary));
     ws.on('error', () => {});
     ws.on('close', () => {
       this.clients.delete(ws);
       if (ws.rawTap) { ws.rawTap = false; this._syncRawTap(); }
+      this._syncEventBatch();
       this.log.info('ws', `client disconnected (${this.clientCount})`);
     });
+    this._syncEventBatch();
+    this.log.info('ws', `client connected (${this.clientCount}) — feed=${ws.sub.feed}, events=${ws.sub.batch ? `batch/${ws.sub.batchMs}ms` : 'single'}`);
 
     // Immediate opener so a fresh client has state before the next shared tick.
+    // `ready` is additive and tells the client what it actually got subscribed
+    // to — a typo in the query string is then visible instead of silent.
     this._safe(ws, { type: 'hello', service: 'lf-live', ts: Date.now() });
-    this._safe(ws, { type: 'state', data: this.engine.snapshot() });
+    this._safe(ws, { type: 'ready', ...ws.sub, ts: Date.now() });
+    this._openerFor(ws);
+  }
+  /** The first payload a fresh (or newly re-subscribed) client gets. */
+  _openerFor(ws) {
+    const sub = ws.sub || this._defaultSub();
+    if (sub.feed === 'state' || sub.feed === 'both') this._safe(ws, { type: 'state', data: this.engine.snapshot() });
+    if (sub.feed === 'display' || sub.feed === 'both') {
+      this._safe(ws, { type: 'display', data: buildDisplay(this.engine.snapshot(), { withPlayers: sub.players }) });
+    }
   }
   _safe(ws, obj) { if (ws.readyState === ws.OPEN) { try { ws.send(JSON.stringify(obj)); } catch {} } }
 
   // ---- live raw lines (console section "Rohdaten") ----
   /**
-   * The only thing a console ever sends us: `{"type":"rawtap","on":true|false}`
-   * — "I have the raw section open" / "I closed it". Everything else is ignored,
-   * and a frame over WS_MSG_MAX bytes is dropped without even being parsed.
+   * The two things a client may send us:
+   *   {"type":"rawtap","on":true|false}   — "I have the raw section open"
+   *   {"type":"subscribe","feed":…,"events":…} — pick feed / bundling
+   * Everything else is ignored, and a frame over WS_MSG_MAX bytes is dropped
+   * without even being parsed.
    */
   _onWsMessage(ws, data, isBinary) {
     if (isBinary) return;
@@ -1068,11 +1596,64 @@ class ApiServer {
     if (!s || s.length > WS_MSG_MAX) return;
     let m;
     try { m = JSON.parse(s); } catch { return; }
-    if (!m || m.type !== 'rawtap') return;
-    const on = m.on === true;
-    if (!!ws.rawTap === on) return;
-    ws.rawTap = on;
-    this._syncRawTap();
+    if (!m) return;
+    if (m.type === 'rawtap') {
+      const on = m.on === true;
+      if (!!ws.rawTap === on) return;
+      ws.rawTap = on;
+      this._syncRawTap();
+      return;
+    }
+    if (m.type === 'subscribe') {
+      const before = JSON.stringify(ws.sub);
+      this._applySub(ws.sub, (k) => (Object.prototype.hasOwnProperty.call(m, k) ? m[k] : null));
+      if (!ws.sub.batch) { ws.evQueue.length = 0; ws.evDropped = 0; }
+      this._syncEventBatch();
+      this._safe(ws, { type: 'ready', ...ws.sub, ts: Date.now() });
+      // Only re-open the feed when it actually changed — a client that merely
+      // switches event bundling on does not need another full state frame.
+      if (JSON.stringify(ws.sub) !== before) this._openerFor(ws);
+    }
+  }
+
+  // ---- bundled event frames ----
+  /**
+   * Run the bundle timer only while at least one client asked for bundles, and
+   * run it at the SHORTEST window anybody asked for — a client that wants 20 ms
+   * must not be served at another client's 500 ms. Re-created when that minimum
+   * changes, so a later, more impatient client is honoured too.
+   */
+  _syncEventBatch() {
+    let want = 0;
+    let ms = EV_BATCH_MS_MAX;
+    for (const ws of this.clients) {
+      if (ws.sub && ws.sub.batch && ws.readyState === ws.OPEN) { want++; ms = Math.min(ms, ws.sub.batchMs); }
+    }
+    if (want === 0) return this._stopEventBatch();
+    ms = Math.max(EV_BATCH_MS_MIN, ms);
+    if (this._evTimer && this._evTimerMs === ms) return;
+    if (this._evTimer) clearInterval(this._evTimer);
+    this._evTimerMs = ms;
+    this._evTimer = setInterval(() => this._flushEvents(), ms);
+    this._evTimer.unref?.();
+  }
+  _stopEventBatch() {
+    if (this._evTimer) { clearInterval(this._evTimer); this._evTimer = null; }
+    this._evTimerMs = 0;
+    for (const ws of this.clients) { if (ws.evQueue) { ws.evQueue.length = 0; ws.evDropped = 0; } }
+  }
+  /** One `events` frame per bundling client with whatever piled up since the last one. */
+  _flushEvents() {
+    const now = Date.now();
+    for (const ws of this.clients) {
+      if (!ws.sub || !ws.sub.batch || ws.readyState !== ws.OPEN) continue;
+      if (!ws.evQueue.length && !ws.evDropped) continue;
+      const data = ws.evQueue;
+      const dropped = ws.evDropped;
+      ws.evQueue = [];
+      ws.evDropped = 0;
+      try { ws.send(JSON.stringify({ type: 'events', data, dropped, ts: now })); } catch {}
+    }
   }
 
   /**
@@ -1131,18 +1712,52 @@ class ApiServer {
    * match state five times a second.
    */
   get wantsState() { return this.stateDirty && this.clients.size > 0; }
+  /**
+   * One frame per event for everybody who did not ask for anything else (the
+   * unchanged, default behaviour), and a queue entry for everybody who did.
+   * The single-event payload is serialized lazily: with only bundling consumers
+   * connected, it is never built at all.
+   */
   broadcastEvent(evt) {
     if (this.clients.size === 0) return;      // nobody to serialize for
-    const payload = JSON.stringify({ type: 'event', data: evt });
-    for (const ws of this.clients) if (ws.readyState === ws.OPEN) { try { ws.send(payload); } catch {} }
+    let payload = null;
+    for (const ws of this.clients) {
+      if (ws.readyState !== ws.OPEN) continue;
+      if (ws.sub && ws.sub.batch) {
+        if (ws.evQueue.length >= EV_QUEUE_MAX) { ws.evQueue.shift(); ws.evDropped++; }
+        ws.evQueue.push(evt);
+        if (ws.evQueue.length >= EV_BATCH_MAX) this._flushEvents();
+        continue;
+      }
+      if (payload === null) payload = JSON.stringify({ type: 'event', data: evt });
+      try { ws.send(payload); } catch {}
+    }
   }
-  /** Fan a pre-serialized {type:'state',...} string out to every WS client. */
+  /**
+   * Fan the pre-serialized {type:'state',…} string out to every WS client that
+   * still wants the full snapshot, and a `display` frame to everybody who asked
+   * for the lean one. The display payload is built at most ONCE per tick, from
+   * the same `engine.snapshot()` the string was made of, so the two can never
+   * describe different moments.
+   */
   pushState(str) {
     if (!this.stateDirty) return;
     this.stateDirty = false;
     if (this.clients.size === 0) return;
-    for (const ws of this.clients) if (ws.readyState === ws.OPEN) { try { ws.send(str); } catch {} }
+    let full = null;      // display payload with players
+    let lean = null;      // display payload without players
+    for (const ws of this.clients) {
+      if (ws.readyState !== ws.OPEN) continue;
+      const feed = (ws.sub && ws.sub.feed) || 'state';
+      if (feed === 'state' || feed === 'both') { try { ws.send(str); } catch {} }
+      if (feed === 'display' || feed === 'both') {
+        const wantPlayers = !ws.sub || ws.sub.players !== false;
+        if (wantPlayers && full === null) full = JSON.stringify({ type: 'display', data: buildDisplay(this.engine.snapshot(), { withPlayers: true }) });
+        if (!wantPlayers && lean === null) lean = JSON.stringify({ type: 'display', data: buildDisplay(this.engine.snapshot(), { withPlayers: false }) });
+        try { ws.send(wantPlayers ? full : lean); } catch {}
+      }
+    }
   }
 }
 
-module.exports = { ApiServer, listEventLogFiles, eventLogNameOk };
+module.exports = { ApiServer, listEventLogFiles, eventLogNameOk, buildDisplay };
