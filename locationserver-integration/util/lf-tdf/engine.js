@@ -433,6 +433,7 @@ class Engine extends EventEmitter {
     this.livePassesStream = [];
     this.playerStatusMap = {};
     this._eventSeq = 0;
+    this._dirty = false;
     this._teamNamesDirty = false;
     this._teamNamesScheduled = false;
     this._familyInferred = false;
@@ -770,6 +771,7 @@ class Engine extends EventEmitter {
   _touch() {
     this._syncDerived();
     this.gameState.updatedAt = Date.now();
+    this._dirty = true;
     this.emit('change', this.gameState);
   }
 

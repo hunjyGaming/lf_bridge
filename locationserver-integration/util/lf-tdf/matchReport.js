@@ -158,9 +158,12 @@ function jsonReviver(key, value) {
 }
 
 /** Where the mode files live. Mirrors gameModes.modesDir(). */
+// ANGEPASST FÜR DEN LOCATIONSERVER: siehe gameModes.modesDir() — `util/lf-tdf/`
+// liegt zwei Ebenen unter dem Wurzelordner mit `modes/`. Einzige Änderung an
+// dieser Datei.
 function profileDir() {
   const env = process.env.LF_MODES_DIR;
-  const base = env && String(env).trim() ? path.resolve(String(env).trim()) : path.join(__dirname, '..', 'modes');
+  const base = env && String(env).trim() ? path.resolve(String(env).trim()) : path.join(__dirname, '..', '..', 'modes');
   return path.join(base, 'profile');
 }
 

@@ -10,7 +10,7 @@
 Basis: `http://<hallen-pc>:8080` (Port aus der Konfiguration).
 
 Solange die Ersteinrichtung offen ist (kein Admin-Passwort gesetzt), antwortet
-**alles außer** `/api/health`, `/api/auth/session` und `/api/auth/setup` mit
+**alles außer** `/api/health`, `/api/access`, `/api/auth/session` und `/api/auth/setup` mit
 `401` — siehe [SECURITY.md](SECURITY.md).
 
 Danach braucht jede Route außer `/api/health` und `/api/auth/*` **eine** von zwei
@@ -118,7 +118,7 @@ aufrufende bekommt einen frischen Cookie.
 | `401 { "error": "bad_password" }` | `current` stimmt nicht |
 | `409 { "error": "pinned" }` | `LF_ADMIN_PASSWORD` steht in der `.env` |
 
-### `GET /api/access`  — immer offen
+### `GET /api/access` — immer offen
 
 **„Warum komme ich nicht rein?"** — der Endpunkt für eine Anzeige auf einem
 zweiten Rechner. Er beantwortet genau die zwei Fragen, an denen am Turniertag
@@ -257,8 +257,8 @@ Rein additiv, und ebenso in `/api/state` (`gameState.endReason`,
 |---|---|---|
 | `mission_end` | die Anlage hat das Ende selbst gemeldet (Code `0101`) | „regulär beendet" |
 | `watchdog` | kein Ende im Stream — Zeit abgelaufen bzw. anhaltende Stille | „vom Spielleiter beendet bzw. Zeitüberschreitung" |
-| `stream_lost` | die Verbindung zur Anlage brach während des Matches ab | „Verbindung verloren" |
-| `next_match` | die Anlage startete ein neues Match, ohne das alte zu beenden | „durch neues Match abgelöst" |
+| `stream_lost` | die Verbindung zur Anlage brach während des Matches ab | „Verbindung zur Anlage verloren" |
+| `next_match` | die Anlage startete ein neues Match, ohne das alte zu beenden | „durch ein neues Match abgelöst" |
 | `shutdown` | der Dienst wurde beendet, während das Match lief | „Dienst beendet" |
 
 **Eine Uhr darf nie über das Matchende hinaus weiterlaufen.** Ist

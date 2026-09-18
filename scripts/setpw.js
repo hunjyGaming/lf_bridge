@@ -83,7 +83,7 @@ function ask(prompt) {
     const rl = readline.createInterface({ input: process.stdin, output: process.stdout, terminal: true });
     const onKeypress = (chunk) => {
       const s = String(chunk);
-      if (s === '\r' || s === '\n' || s === '') return;
+      if (s === '\r' || s === '\n' || s === '\u0004') return;
       readline.moveCursor(process.stdout, -1, 0);
       readline.clearLine(process.stdout, 1);
     };

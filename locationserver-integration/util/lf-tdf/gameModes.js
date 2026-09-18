@@ -153,6 +153,12 @@ const SM5_OFFICIAL_FIELDS = [
   'nukesCancelled', 'ownNukeCancels', 'shot3Hit',
 ];
 
+/**
+ * Derived values the engine computes; not counters, never summed.
+ * `accuracy` = shotsHit / shotsFired, `accuracySource` = where it came from.
+ */
+const DERIVED_FIELDS = ['accuracy', 'accuracySource'];
+
 /** SM5 role from the type-3 `category` column (docs/LASERFORCE.md). */
 const ROLES = {
   0: 'N/A',
@@ -446,18 +452,14 @@ function toModeNumber(v) {
 function cleanDesc(v) {
   if (typeof v !== 'string') return '';
   // eslint-disable-next-line no-control-regex
-  const s = v.replace(/[\u0000-\u001f\u007f-\u009f]+/g, ' ').replace(/\s+/g, ' ').trim();
+  const s = v.replace(/[\u0000-\u001f\u007f]+/g, ' ').replace(/\s+/g, ' ').trim();
   return s.slice(0, 64);
 }
 
-/**
- * Normalize a family string; anything unknown becomes the default family.
- * Exported because src/statsWriter.js needs exactly this rule — it used to keep
- * a second, character-for-character equivalent copy of it.
- */
+/** Normalize a family string; anything unknown becomes the default family. */
 function normFamily(family) {
   const f = String(family == null ? '' : family).trim().toLowerCase();
-  return f === FAMILIES.LASERBALL ? FAMILIES.LASERBALL : DEFAULT_FAMILY;
+  return f === FAMILIES.LASERBALL ? FAMILIES.LASERBALL : FAMILIES.SM5;
 }
 
 /** Normalize a profile string; anything unknown becomes the default profile. */
@@ -812,10 +814,14 @@ const TEXT_FIELDS = ['beschreibung', 'hinweis', 'kommentar'];
 let MODE_STATUS = { dir: '', files: [], modes: [], profiles: [], problems: [], ok: true, loadedAt: null };
 
 /** Where the mode files live. `LF_MODES_DIR` overrides it (tests, packaging). */
+// ANGEPASST FÜR DEN LOCATIONSERVER: diese Datei liegt dort unter
+// `util/lf-tdf/`, die Modus-Dateien gehören neben `app.js` in den Wurzelordner
+// `modes/` — also zwei Ebenen hoch statt einer. Einzige Änderung an dieser
+// Datei; `LF_MODES_DIR` sticht sie weiterhin.
 function modesDir() {
   const env = process.env.LF_MODES_DIR;
   if (env && String(env).trim()) return path.resolve(String(env).trim());
-  return path.join(__dirname, '..', 'modes');
+  return path.join(__dirname, '..', '..', 'modes');
 }
 
 /** No prototype pollution through an object key, whatever a file contains. */
@@ -833,7 +839,7 @@ function problem(level, file, message) {
 function cleanFileText(v, max) {
   if (typeof v !== 'string') return '';
   // eslint-disable-next-line no-control-regex
-  return v.replace(/[\u0000-\u001f\u007f-\u009f]+/g, ' ').replace(/\s+/g, ' ').trim().slice(0, max);
+  return v.replace(/[\u0000-\u001f\u007f]+/g, ' ').replace(/\s+/g, ' ').trim().slice(0, max);
 }
 
 /** Untrusted key/name -> a safe lowercase identifier, or '' when unusable. */
@@ -1194,6 +1200,7 @@ module.exports = {
   METRIC_GROUPS,
   PROFILE_LABELS,
   SM5_OFFICIAL_FIELDS,
+  DERIVED_FIELDS,
   resolveMode,
   resolveModeWithProfile,
   familyOf,
@@ -1208,7 +1215,6 @@ module.exports = {
   listProfiles,
   profileOf,
   withProfile,
-  normFamily,
   normProfile,
   resolveProfile,
   metricInfo,

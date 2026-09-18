@@ -867,7 +867,7 @@ function renderLegend(s, scols, sm5) {
   const body = $('legend-body');
   if (!body) return;
   const modeLabel = (s.mode && typeof s.mode.label === 'string' && s.mode.label) ? s.mode.label : '';
-  const sig = `${modeLabel} ${sm5} ${scols.map((c) => c.key + '/' + (c.received || '')).join(',')}`;
+  const sig = `${modeLabel}\u0000${sm5}\u0000${scols.map((c) => c.key + '/' + (c.received || '')).join(',')}`;
   if (sig === legendSig) return;
   legendSig = sig;
 
@@ -1098,15 +1098,17 @@ const events = (() => {
     }
   }
 
+  // `/api/logs/events` ist der EINZIGE Endpunkt dafuer (src/apiServer.js). Hier
+  // stand frueher zusaetzlich `/api/events/file` aus einer aelteren Fassung —
+  // den Pfad gibt es serverseitig nicht, der zweite Versuch lief immer ins 404.
   async function probeFile() {
     const link = $('ev-file');
     if (!link) return;
-    for (const path of ['/api/logs/events', '/api/events/file']) {
-      try {
-        const res = await fetch(path, { method: 'HEAD', headers: token ? { Authorization: 'Bearer ' + token } : {} });
-        if (res.ok) { link.href = path + (token ? `?token=${encodeURIComponent(token)}` : ''); link.hidden = false; return; }
-      } catch {}
-    }
+    const path = '/api/logs/events';
+    try {
+      const res = await fetch(path, { method: 'HEAD', headers: token ? { Authorization: 'Bearer ' + token } : {} });
+      if (res.ok) { link.href = path + (token ? `?token=${encodeURIComponent(token)}` : ''); link.hidden = false; }
+    } catch {}
   }
 
   async function onShow() {

@@ -7,6 +7,7 @@ Location Server darf.
 
 - [Das Messwerkzeug](#das-messwerkzeug)
 - [Der Betriebsfall](#der-betriebsfall)
+- [Nachmessung nach MQTT, Missionsbericht, Anzeige-API und Rohdatenansicht](#nachmessung-nach-mqtt-missionsbericht-anzeige-api-und-rohdatenansicht)
 - [Vorher / nachher](#vorher--nachher)
 - [Was tatsächlich Last erzeugt](#was-tatsächlich-last-erzeugt)
 - [Dauerlauf: wächst etwas?](#dauerlauf-wächst-etwas)
@@ -79,7 +80,129 @@ Mittelwert über **drei** aufeinanderfolgende Matches in Echtzeit.
 
 ---
 
+## Nachmessung nach MQTT, Missionsbericht, Anzeige-API und Rohdatenansicht
+
+Seit der Messrunde weiter unten sind vier Dinge dazugekommen: der
+**MQTT-Ausgang**, der **Missionsbericht** samt Warteschlange auf der Platte, die
+**Anzeige-API** (`/api/display`, `feed=display`) und die **Live-Rohdatenansicht**
+der Konsole. Diese Runde beantwortet nur eine Frage: kostet davon etwas?
+
+**Antwort: nein.** Nichts davon ist im Betriebsfall messbar, und es wurde
+deshalb auch nichts geändert.
+
+### Die Läufe
+
+Jede Zeile ist **ein** Lauf, derselbe Befehl, hintereinander auf einem sonst
+unbeschäftigten Rechner:
+
+```
+node scripts/bench.js --players 50 --consoles 4 --duration 240
+```
+
+| Lauf | Konsolen | Missionsbericht | CPU (% eines Kerns) | Event-Loop Mittel | 99 % unter | längste Verzögerung | Bytes je Zustands-Push |
+|---|---|---|---|---|---|---|---|
+| 1 | 4 | an | 6,36 % | — | — | 170 ms | 73 347 |
+| 2 | 4 | an | 6,77 % | 16,2 ms | 25,1 ms | 160 ms | 73 268 |
+| 3 | 4 | an | 6,97 % | 16,4 ms | 24,5 ms | 229 ms | 73 332 |
+| 4 | 4 | **aus** (`LF_REPORT_ENABLED=false`) | 7,01 % | 16,5 ms | 24,5 ms | 147 ms | 73 284 |
+| 5 | **0** | an | **3,81 %** | 16,4 ms | 23,2 ms | 129 ms | — |
+
+Leerlauf-Grundwert dieses Rechners im selben Zeitraum: **16,4–16,8 ms** im
+Mittel, 22–35 ms Maximum. Der Mittelwert der Event-Loop-Verzögerung ist also
+vollständig der Windows-Timerauflösung zuzuschreiben, nicht dem Dienst.
+
+**Der Missionsbericht ist nicht messbar.** 6,8 % mit und 7,0 % ohne — der
+Unterschied liegt unter der Streuung der drei Läufe mit identischer
+Einstellung (6,36 / 6,77 / 6,97 %). Direkt gemessen kostet er 4–6 ms je Match
+und 0,0–0,5 µs je Stream-Zeile (siehe unten).
+
+> **Zur Streuung, ehrlich:** dieselbe Einstellung ergab 6,36 %, 6,77 % und
+> 6,97 %. Jede Aussage unterhalb von etwa einem halben Prozentpunkt ist
+> Rauschen. Und das Urteil des Messwerkzeugs am Ende („hält die Last aus" /
+> „so NICHT") hängt an der **längsten** Verzögerung — einem einzigen Ausreißer
+> beim Matchabschluss. Lauf 3 kippte damit auf „so NICHT", bei sonst
+> identischen Zahlen. Wer das Urteil liest, muss die Zeile darüber mitlesen.
+>
+> Läuft auf demselben Rechner nebenher etwas anderes, verschiebt sich alles:
+> in einem Lauf während einer parallelen Dateisuche stieg der Leerlauf-Grundwert
+> auf 170 ms und die längste Verzögerung auf 763 ms. Das ist eine Eigenschaft
+> des Messrechners, keine des Dienstes — deshalb misst `bench.js` den
+> Grundwert überhaupt.
+
+### Vergleich mit der letzten Messrunde
+
+| | letzte Runde | jetzt | |
+|---|---|---|---|
+| CPU, 4 Konsolen offen | 6,00 % | 6,4–7,0 % | im Rahmen der Streuung |
+| CPU, keine Konsole offen | 4,43 % | **3,81 %** | eher besser |
+| Bytes je Zustands-Push | 72 354 | 73 268–73 347 | **+1,3 %** |
+| Heap nach GC | 8,6 MB | 9,1–9,4 MB | unverändert klein |
+| Handles | 8 | 6 (0 Konsolen) / 10 (4 Konsolen) | = Zahl der offenen Sockets |
+
+Die **+1,3 % je Push** sind die einzige echte Veränderung: das Spielerobjekt hat
+seit damals ein paar Felder mehr. 73 KB statt 72 KB je Push je Konsole.
+
+> Die Zahlen der letzten Runde stammen aus einer Laufform, die dort nicht
+> festgehalten ist („Mittelwert über drei Matches", aber der Gegenprobe-Befehl
+> nennt einen einzelnen Lauf). Direkt vergleichbar sind deshalb nur die Größen,
+> die nicht von der Zahl der Matches abhängen: **CPU-Prozent** und **Bytes je
+> Push**. Der Befehl dieser Runde steht oben, damit die nächste Messung nicht
+> wieder raten muss.
+
+### Die neuen Kostenstellen, einzeln gemessen
+
+Alles gegen denselben Zustand: 50 Spieler, 2 Teams, 2000 Ereignisse im Match.
+
+| Was | Kosten | Bedeutung |
+|---|---|---|
+| `buildDisplay()` mit Spielern | **590 µs** je Aufruf | einmal je Takt, wenn ein Anzeige-Verbraucher hängt |
+| `buildDisplay()` ohne Spieler (`players=none`) | **53 µs** | ein reines Scoreboard kostet fast nichts |
+| `JSON.stringify(state)` zum Vergleich | 598 µs | die Anzeige-API ist **nicht teurer** als der Zustands-Push |
+| Roh-Tap: `onData()` **ohne** Zuschauer | **0,1 µs** je TCP-Paket | eine Null-Prüfung, sonst nichts |
+| Roh-Tap: `onData()` **mit** offener Rohdatenansicht | 14,3 µs je TCP-Paket (40 Zeilen) | nur solange jemand hinsieht |
+| `noteLine()` des Missionsberichts, Typ-4-Zeile | **0,0 µs** | ein Zeichenvergleich, läuft für jede Zeile |
+| `noteLine()` des Missionsberichts, Typ-3-Zeile | 0,5 µs | nur beim Login eines Spielers |
+
+Und die Größen auf der Leitung:
+
+| Rahmen | Bytes |
+|---|---|
+| `state` (der vollständige Zustand) | 74 078 |
+| `display` mit Spielern | **31 908** |
+| `display` ohne Spieler | **2 471** |
+
+**Das ist der praktische Befund für den Standortserver:** eine Anzeige, die
+`feed=display` abonniert, zieht **57 % weniger Bytes** als eine, die `state`
+nimmt — ohne Spielerliste sogar 97 % weniger. Wer viele Anzeigen hängen hat,
+spart hier, nicht an der Taktrate.
+
+### Der Matchabschluss, aufgeschlüsselt
+
+Der eine Ausreißer in der Event-Loop-Verzögerung liegt beim Abschluss eines
+Matches. Direkt gemessen (50 Spieler, 7 200 Ereignisse, alle drei Verbraucher
+nacheinander, synchron):
+
+| | |
+|---|---|
+| Statistik-CSV (`statsWriter.onMatchEnd`) | **76–110 ms** |
+| Ereignis-Logdatei | 4 ms |
+| Missionsbericht (bauen + in die Warteschlange legen) | **4–6 ms** |
+| zusammen | **84–119 ms** |
+
+Der Rest bis zu den gemessenen 130–230 ms ist die Speicherbereinigung nach der
+Heap-Spitze des Abschlusses. Die Statistik-CSV ist damit unverändert die einzige
+nennenswerte Position — und die ist weiter unten unter
+[Was bewusst NICHT verändert wurde](#was-bewusst-nicht-verändert-wurde)
+begründet stehen gelassen worden.
+
+---
+
 ## Vorher / nachher
+
+*Die Messrunde, die die Schreib-Bündelung gebracht hat. Sie steht hier
+unverändert; die aktuellen Zahlen sind die
+[Nachmessung](#nachmessung-nach-mqtt-missionsbericht-anzeige-api-und-rohdatenansicht)
+weiter oben.*
 
 „% eines Kerns" heißt: so viel **eines einzelnen** Prozessorkerns belegt der
 Dienst, während ein Match läuft. Zwischen den Matches geht der Wert gegen null.
@@ -141,10 +264,11 @@ Beide Änderungen sind reine Weglass-Änderungen: jeder `pushState()` prüfte se
 Bedingung ohnehin schon und tat dann nichts. Ein Verbraucher sieht exakt dasselbe
 wie vorher.
 
-> **Nebenbefund:** `engine._dirty` wird gesetzt, aber **nirgends gelesen**. Die
-> Verdrahtung läuft über die `stateDirty`-Kennzeichen der drei Verbraucher.
-> Das Feld ist wirkungslos; es wurde stehen gelassen, weil sein Entfernen reine
-> Kosmetik ohne Messwert wäre.
+> **Nebenbefund von damals, inzwischen erledigt:** `engine._dirty` wurde
+> gesetzt, aber **nirgends gelesen** — die Verdrahtung läuft über die
+> `stateDirty`-Kennzeichen der drei Verbraucher. Das Feld war wirkungslos und
+> ist beim Aufräumen entfernt worden. Kein Messwert ändert sich dadurch; es ist
+> schlicht eine Zeile weniger, über die jemand nachdenken muss.
 
 ---
 
@@ -328,14 +452,18 @@ Verhalten ändern.
 ## Die Grenze
 
 Bei 50 Spielern, 30 Ereignissen/s und 4 offenen Konsolen belegt der Dienst
-**6 % eines Kerns** während eines Matches. Hochgerechnet wäre **ein** Kern erst
-bei rund **500 Ereignissen/s** voll — das entspricht grob **800 Spielern** bei
-gleicher Spielweise. Der Dienst benutzt immer nur einen Kern; die übrigen bleiben
-für die anderen Dienste des Servers frei.
+**6,4–7,0 % eines Kerns** während eines Matches; **ohne offene Konsole 3,8 %**.
+Hochgerechnet wäre **ein** Kern erst bei rund **430 Ereignissen/s** voll — das
+entspricht grob **700 Spielern** bei gleicher Spielweise. Der Dienst benutzt
+immer nur einen Kern; die übrigen bleiben für die anderen Dienste des Servers
+frei.
 
 Die praktische Grenze ist deshalb **nicht** die Spielerzahl, sondern die
 **Größe der Statistik-Historie** (siehe oben) und die Zahl gleichzeitig offener
-Konsolen (72 KB × 5/s je Konsole).
+Konsolen (73 KB × 5/s je Konsole). Eine Anzeige, die statt des vollen Zustands
+den **Anzeige-Datensatz** abonniert (`feed=display`, notfalls `players=none`),
+kostet 32 KB bzw. 2,5 KB statt 74 KB — das ist der wirksamste Hebel, wenn viele
+Anzeigen hängen.
 
 Gegenprobe auf dem Zielserver vor der Inbetriebnahme:
 

@@ -10,7 +10,8 @@
     "setpw": "node scripts/setpw.js",
     "check": "node scripts/check.js",
     "itest": "node scripts/itest.js",
-    "inspect": "node scripts/inspect.js"
+    "inspect": "node scripts/inspect.js",
+    "bench": "node scripts/bench.js"
   },
   "dependencies": {
     "mqtt": "^5.16.0",

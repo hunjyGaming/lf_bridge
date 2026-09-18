@@ -133,6 +133,18 @@ Statistik-Schreibers, nicht nur die Dateien — siehe [STATS.md](STATS.md).
   **immer verworfen** — Passwörter laufen nur über `/api/auth/*`. Beim Speichern gilt: leerer `apiToken` = **unverändert** (löschen nur
   mit `apiTokenClear: true`), zurückgeschickte Maske = **gespeichertes Secret
   behalten**. Die Konsole kann die Konfiguration also gefahrlos zurückschreiben.
+- **Broker-URL mit Zugangsdaten**: trägt `mqtt.url` ein `benutzer:passwort@`,
+  wird es **überall** zu `mqtt://***@host` — im Log, in `GET /api/status` und
+  in `GET /api/config`. Schickt die Konsole die maskierte Form zurück, bleibt
+  der gespeicherte Wert unverändert. Besser ist trotzdem `LF_MQTT_USERNAME` /
+  `LF_MQTT_PASSWORD`: die stehen nur in der Umgebung, haben kein Gegenstück in
+  `config.json` und werden erst im Moment des Verbindungsaufbaus gelesen
+  ([CONFIG.md](CONFIG.md#was-es-nur-in-der-umgebung-gibt)).
+- **Zugangsdaten in Fehlermeldungen**: eine abgelehnte SMTP-Anmeldung meldet den
+  **Schritt**, der scheiterte (`AUTH LOGIN (Passwort) -> 535 …`), niemals die
+  gesendete Zeile. Bei `AUTH LOGIN` ist diese Zeile das base64-kodierte
+  Passwort, und die Fehlermeldung landet über `notify.last` im Log, in
+  `GET /api/status` und in `GET /api/network`.
 - **Audit-Log**: jede angenommene Änderung an `/api/config`, jeder
   `/api/outputs/test`, jeder `/api/notify/test`, jeder **erfolgreiche und
   fehlgeschlagene Login**, die Ersteinrichtung, jede angeforderte
@@ -167,11 +179,18 @@ Statistik-Schreibers, nicht nur die Dateien — siehe [STATS.md](STATS.md).
   jede mutierende Anfrage ohne Token `Sec-Fetch-Site: same-origin` oder
   `X-LF-Console: 1` (siehe unten). Auch der Login selbst geht durch diese Prüfung.
 - **Konsole**: feste Datei-Allowlist (`/`, `/index.html`, `/styles.css`,
-  `/app.js`, `/login`, `/login.js`, `/setup`, `/setup.js` — alles andere 404),
+  `/app.js`, `/login`, `/login.html`, `/login.js`, `/setup`, `/setup.html`,
+  `/setup.js` — alles andere 404),
   strikte CSP, `X-Frame-Options: DENY`, `nosniff`, kein Framing, keine externen
   Ressourcen. Ohne Anmeldung liefern `/` und `/app.js` nur eine Umleitung auf
   `/login` bzw. `/setup`; öffentlich sind ausschließlich diese beiden Seiten,
   ihre Skripte und das Stylesheet.
+- **Herkunft der eigenen Konsole**: eine Anfrage, deren `Origin` genau die
+  Adresse ist, unter der sie hier ankam, gilt immer als erlaubt. Ein Browser
+  schickt `Origin` auch bei einer same-origin-POST — ohne diese Regel meldete
+  jeder Login und jedes Speichern eine CORS-Warnung, die sachlich falsch ist.
+  Gefälscht werden kann damit nichts: den `Host`-Kopf setzt der Browser selbst,
+  und wer kein Browser ist, unterliegt CORS ohnehin nicht.
 - **Timeouts**: `requestTimeout` 15 s, `headersTimeout` 10 s, `keepAliveTimeout`
   5 s — hängende Verbindungen binden keine Ressourcen. Tote WebSocket-Clients
   werden per Ping/Pong alle 30 s erkannt und getrennt.
@@ -187,6 +206,20 @@ Statistik-Schreibers, nicht nur die Dateien — siehe [STATS.md](STATS.md).
   ist ein leerer Knoten, dessen Zeichen aus dem Stylesheet kommt. Zeilen über
   4096 Bytes werden für die Live-Ansicht mit einem sichtbaren Vermerk gekürzt;
   die aufgezeichnete Datei bleibt davon unberührt byteweise vollständig.
+- **Namen aus dem Strom sind Fremdeingabe**: ein Spieler wählt seinen Codenamen
+  selbst, und nichts am TCP-Feed ist beglaubigt. Spieler- und Teamnamen werden
+  deshalb beim Einlesen von Steuerzeichen (C0 **und** C1) befreit und auf 64
+  Zeichen gekürzt, bevor sie irgendwo landen — sonst stünde ein NUL oder eine
+  ANSI-Fluchtsequenz in der lesbaren Ereignis-Logdatei und auf der Standardausgabe
+  des Dienstes. Eine Entität, die sich `__proto__` nennt, wird abgewiesen, statt
+  den Prototyp der Spielerliste zu ersetzen.
+- **CSV-Formeln**: eine Zelle, die mit `=`, `+`, `-`, `@`, Tabulator oder CR
+  beginnt, führt Excel, LibreOffice und Google Sheets als **Formel** aus — auch
+  `=cmd|'…'!A0`, das nach einem externen Programm fragt. Da ein Spielername in
+  jeder Statistikdatei landet und die Dateien für deutsches Excel geschrieben
+  werden (`;`, BOM), markiert `csvCell()` solche Zellen mit einem
+  vorangestellten Apostroph als Text. Eine echte Zahl — auch eine negative —
+  bleibt unangetastet.
 - **WebSocket**: Clients dürfen genau **zwei** Nachrichten senden —
   `{"type":"rawtap","on":…}` und `{"type":"subscribe",…}` (Auswahl des Feeds und
   der Ereignis-Bündelung, [API.md](API.md#die-nachrichten-die-ein-client-senden-darf)).

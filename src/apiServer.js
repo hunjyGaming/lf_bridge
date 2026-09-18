@@ -10,6 +10,7 @@ const {
   SessionStore, LoginGuard, RecoveryCode, parseCookies,
 } = require('./auth');
 const { reachability } = require('./netinfo');
+const { redactUrl } = require('./mqtt');
 const {
   FAMILIES, DEFAULT_FAMILY, DEFAULT_PROFILE, PROFILE_LIST, FAMILY_DEFAULT_PROFILE,
   listModes, listProfiles, scoreboardColumns, metricLabels, metricGroups, profileLabel,
@@ -96,6 +97,8 @@ const RAW_BATCH_LINES = 400;
 const RAW_QUEUE_MAX = 4000;
 /** Longest control frame a client may send us; anything larger is dropped unparsed. */
 const WS_MSG_MAX = 256;
+/** Hard ceiling for a request body, in BYTES. */
+const BODY_MAX_BYTES = 512 * 1024;
 
 // ---------------------------------------------------------------------------
 // Bundled event frames (docs/API.md "Gebündelte Ereignisse")
@@ -924,8 +927,30 @@ class ApiServer {
 
   // ---- helpers ----
   /** Is this Origin on the allow list? (`*` lets everything through.) */
-  _originAllowed(origin) {
+  /**
+   * The origin THIS request was addressed to — `scheme://host[:port]`, built
+   * from the `Host` header the browser itself filled in.
+   */
+  _selfOrigin(req) {
+    const host = req.headers?.host;
+    if (!host) return '';
+    const fwd = this.cfg.http?.trustProxy
+      ? String(req.headers['x-forwarded-proto'] || '').split(',')[0].trim()
+      : '';
+    const proto = req.socket?.encrypted ? 'https' : (fwd || 'http');
+    return `${proto}://${host}`;
+  }
+  _originAllowed(origin, req) {
     if (!origin) return true;               // not a browser request at all
+    // OUR OWN console. A browser sends `Origin` on every same-origin POST too,
+    // so without this the console's own login and every save produced a "this
+    // origin is not in cors[] — the browser will silently discard the answer"
+    // warning. For a same-origin request that sentence is simply false: CORS
+    // does not apply to it at all. The warning is the one thing an operator
+    // chases on tournament day, so it must not cry wolf. A forged Origin gains
+    // nothing here: a browser fills in `Host` itself, and a non-browser client
+    // is not subject to CORS in the first place.
+    if (req && origin === this._selfOrigin(req)) return true;
     const allowed = this.cfg.cors || [];
     return allowed.includes('*') || allowed.includes(origin);
   }
@@ -950,7 +975,7 @@ class ApiServer {
     const origin = req.headers.origin;
     if (!origin) return;
     const allowed = this.cfg.cors || [];
-    const ok = this._originAllowed(origin);
+    const ok = this._originAllowed(origin, req);
     if (allowed.includes('*')) res.setHeader('Access-Control-Allow-Origin', '*');
     else if (ok) res.setHeader('Access-Control-Allow-Origin', origin);
     else this._noteBlockedOrigin(origin, path || req.url || '?');
@@ -978,11 +1003,30 @@ class ApiServer {
     });
     res.end(body);
   }
+  /**
+   * The request body, parsed, or `null` for anything unusable.
+   *
+   * Collected as BYTES and decoded once at the end. Appending each chunk to a
+   * string instead decoded every chunk on its own, so a multi-byte character
+   * (every umlaut in a German output name) split across a chunk boundary came
+   * out as two replacement characters and the whole save failed with
+   * `bad_json`. Counting bytes also makes the 512 KiB cap mean 512 KiB rather
+   * than "512 Ki characters", which for UTF-8 was up to three times as much.
+   */
   _readBody(req) {
     return new Promise((resolve) => {
-      let d = '', big = false;
-      req.on('data', (c) => { d += c; if (d.length > 512 * 1024) { big = true; req.destroy(); } });
-      req.on('end', () => { if (big) return resolve(null); try { resolve(JSON.parse(d || '{}')); } catch { resolve(null); } });
+      const parts = [];
+      let bytes = 0;
+      let big = false;
+      req.on('data', (c) => {
+        bytes += c.length;
+        if (bytes > BODY_MAX_BYTES) { big = true; req.destroy(); return; }
+        parts.push(c);
+      });
+      req.on('end', () => {
+        if (big) return resolve(null);
+        try { resolve(JSON.parse(Buffer.concat(parts, bytes).toString('utf8') || '{}')); } catch { resolve(null); }
+      });
       req.on('error', () => resolve(null));
     });
   }
@@ -1011,8 +1055,13 @@ class ApiServer {
       return this._static(p, res);
     }
 
+    // Deliberately BEFORE the rate limit: a monitoring probe must never be
+    // locked out. That is also why it reads the one flag it needs straight off
+    // `gameState` instead of going through `snapshot()` — the same answer, but
+    // without the derived-field pass over every player, so an unauthenticated
+    // caller cannot make the service do work by polling it.
     if (p === '/api/health') {
-      return this._json(res, 200, { ok: true, service: 'lf-live', matchActive: !!this.engine.snapshot().missionActive, ts: Date.now() });
+      return this._json(res, 200, { ok: true, service: 'lf-live', matchActive: !!this.engine.gameState.missionActive, ts: Date.now() });
     }
 
     if (!this._rateOk(ip)) { res.setHeader('Retry-After', '30'); return this._json(res, 429, { error: 'rate_limited' }); }
@@ -1035,7 +1084,7 @@ class ApiServer {
       // but capped all the same, so no answer of ours is ever bulkier than it
       // needs to be.
       const origin = req.headers.origin ? String(req.headers.origin).slice(0, 256) : null;
-      const originAllowed = this._originAllowed(req.headers.origin || null);
+      const originAllowed = this._originAllowed(req.headers.origin || null, req);
       const tokenRequired = !!this.cfg.apiToken;
       const tokenSent = !!this._token(req, url);
       const authenticated = this._allowed(req, url);
@@ -1101,7 +1150,7 @@ class ApiServer {
         // and whether their Origin is allowed (the missing allow header says so).
         tokenRequired: !!this.cfg.apiToken,
         tokenSent: !!this._token(req, url),
-        originAllowed: this._originAllowed(req.headers.origin || null),
+        originAllowed: this._originAllowed(req.headers.origin || null, req),
         see: '/api/access',
       });
     }
@@ -1347,6 +1396,17 @@ class ApiServer {
     c.adminPasswordSet = !!c.admin?.passwordHash;
     if (c.admin) c.admin.passwordHash = '';
 
+    // The broker URL may carry `user:passwort@` — docs/MQTT.md says so itself.
+    // The log and /api/status have always redacted it (mqtt.status()); this
+    // endpoint did not, so the one place that was meant to hold NO broker
+    // credential handed the whole URL to every console. Same masking here, and
+    // _unredactPatch() puts the stored value back when the mask comes home.
+    if (c.mqtt && typeof c.mqtt.url === 'string') {
+      const shown = redactUrl(c.mqtt.url);
+      c.mqttUrlHasCredentials = shown !== c.mqtt.url;
+      c.mqtt.url = shown;
+    }
+
     // notification channels: keep the shape, drop everything secret-ish
     if (c.notify) {
       const mask = (v) => (v ? SECRET_MASK : '');
@@ -1372,6 +1432,14 @@ class ApiServer {
     delete patch.adminPasswordSet;
     delete patch.notifyChannels;
     delete patch.notifyLast;
+    delete patch.mqttUrlHasCredentials;
+    // The console was handed `mqtt://***@host` — posting that back means "keep
+    // the URL as it is", never "the broker user is literally ***".
+    if (patch.mqtt && typeof patch.mqtt.url === 'string'
+      && /:\/\/\*\*\*@/.test(patch.mqtt.url)
+      && redactUrl(this.cfg.mqtt?.url || '') === patch.mqtt.url) {
+      patch.mqtt.url = this.cfg.mqtt.url;
+    }
     const clear = patch.apiTokenClear === true;
     delete patch.apiTokenClear;
     if ('apiToken' in patch && patch.apiToken === '' && !clear) delete patch.apiToken;

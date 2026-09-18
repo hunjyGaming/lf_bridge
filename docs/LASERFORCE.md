@@ -99,7 +99,7 @@ Zeilentyp**.
 
 **Spielernamen** kommen aus der Typ-3-Zeile (Feld nach `player`). Optional
 überschreibt eine selbst gepflegte Namensliste (`data/roster.csv`, siehe
-[CONFIG.md](CONFIG.md#namensliste-optional)) einzelne Namen/Teams. lf_live
+[CONFIG.md](CONFIG.md#namensliste)) einzelne Namen/Teams. lf_live
 kontaktiert **keine externen Dienste**.
 
 Das Format ist **versioniert** — Zeile 0 nennt die Version (z. B. `2.006`).

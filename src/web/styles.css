@@ -187,7 +187,6 @@ a:hover { text-decoration: underline; text-underline-offset: 2px; }
 .mt-xs { margin-top: var(--s-1); }
 .mt-sm { margin-top: var(--s-4); }
 .mt-md { margin-top: var(--s-5); }
-.mt-lg { margin-top: var(--s-6); }
 .w-sm  { max-width: 300px; }
 .w-md  { max-width: 320px; }
 .ml-auto { margin-left: auto; }
@@ -450,7 +449,6 @@ main { flex: 1; overflow: auto; padding: var(--s-7) var(--s-6) var(--s-8); }
   text-transform: uppercase; color: var(--ink-2);
 }
 .tc-score { flex: none; color: var(--ink); letter-spacing: -.03em; }
-.tc-sub { font: 400 10.5px var(--mono); color: var(--ink-3); }
 
 /* two teams — the classic face-off, the strongest reading of the common case */
 .scorebar.duel .team-card { flex-direction: row; align-items: center; gap: var(--s-5); }
@@ -458,7 +456,6 @@ main { flex: 1; overflow: auto; padding: var(--s-7) var(--s-6) var(--s-8); }
 .scorebar.duel .tc-bar { width: 4px; height: 30px; box-shadow: 0 0 12px var(--team, var(--edge)); }
 .scorebar.duel .tc-name { flex: 1 1 auto; font: 600 clamp(13px, 1.1vw, 17px) var(--sans); letter-spacing: .03em; }
 .scorebar.duel .tc-score { font: 700 clamp(38px, 4.6vw, 62px)/1 var(--mono); min-width: 1.7em; text-align: center; }
-.scorebar.duel .tc-sub { display: none; }
 
 /* one, or three to seven teams — a grid that carries any count */
 .scorebar.multi .team-card {
@@ -861,7 +858,6 @@ table.stat.big tbody tr:hover td, .tablewrap table.stat tbody tr:hover td.pl { b
 .rawrow .tabc::before { content: "\2192"; }
 .no-tabs .rawrow .tabc::before { content: ""; }
 .rawrow.is-schema .tx { color: var(--ink-3); font-style: italic; }
-.rawrow.is-note .tx { color: var(--warn); }
 
 /* Leseansicht: nur der sichtbare Ausschnitt haengt im DOM */
 .rawview-wrap { margin-top: var(--s-7); }

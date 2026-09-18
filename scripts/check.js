@@ -5,10 +5,15 @@ const fs = require('fs');
 const os = require('os');
 const path = require('path');
 
+// Jedes Modul unter src/ muss sich laden lassen. Die Liste war unvollständig —
+// gameModes, matchReport, mqtt, eventLog, eventCatalog und tdfSchema fehlten,
+// obwohl sie zum Teil beim Laden Dateien lesen und Tabellen aufbauen.
 const mods = [
   '../src/config', '../src/logger', '../src/engine', '../src/localRoster', '../src/statsWriter',
   '../src/tcpIngest', '../src/capture', '../src/outputs', '../src/streamServer', '../src/apiServer',
   '../src/auth', '../src/netinfo', '../src/notify', '../src/smtp',
+  '../src/gameModes', '../src/matchReport', '../src/mqtt', '../src/eventLog',
+  '../src/eventCatalog', '../src/tdfSchema',
 ];
 let failed = 0;
 for (const m of mods) {
@@ -84,6 +89,19 @@ try {
   assert.strictEqual(csvCell('say "hi"', ','), '"say ""hi"""', 'quotes doubled');
   assert.strictEqual(csvCell('plain', ','), 'plain', 'plain value untouched');
   assert.deepStrictEqual(splitCsv('a;"b;c";d', ';'), ['a', 'b;c', 'd'], 'round-trips quoted field');
+  // Formel-Einschleusung: ein Spielername kommt aus dem TDF-Strom und der
+  // Spieler wählt ihn selbst. Eine Zelle, die mit = + - @ Tab oder CR beginnt,
+  // führt Excel/LibreOffice/Sheets als FORMEL aus (`=cmd|…!A0` öffnet einen
+  // Dialog „externes Programm starten?"). Sie muss als Text markiert ankommen.
+  assert.strictEqual(csvCell("=cmd|'/C calc'!A0", ';'), "'=cmd|'/C calc'!A0", 'formula cell marked as text');
+  assert.strictEqual(csvCell('@SUM(A1)', ','), "'@SUM(A1)", 'leading @ neutralised');
+  assert.strictEqual(csvCell('+49 170', ','), "'+49 170", 'leading + neutralised');
+  // … aber eine echte Zahl bleibt eine Zahl, sonst wäre jede negative
+  // Statistik-Zelle plötzlich Text.
+  assert.strictEqual(csvCell(-5, ','), '-5', 'negative number untouched');
+  assert.strictEqual(csvCell('-12.5', ','), '-12.5', 'negative decimal untouched');
+  // und zweimal durch csvCell() darf nicht zweimal markieren
+  assert.strictEqual(csvCell(csvCell('=x', ','), ','), "'=x", 'marking is idempotent');
 
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'lfstats-'));
   const cwd = process.cwd(); process.chdir(dir);
@@ -104,7 +122,7 @@ try {
   // player objects — no SM5 counters present, so: laserball.
   const players = fs.readFileSync(path.join(dir, 'stats', 'all_players_laserball.csv'), 'utf8');
   assert.ok(players.includes('Mara') && players.includes('win'), 'all_players_laserball.csv has the winner row');
-  const totals = fs.readFileSync(path.join(dir, 'stats', 'totals_laserball.csv'), 'utf8').replace(/^﻿/, '');
+  const totals = fs.readFileSync(path.join(dir, 'stats', 'totals_laserball.csv'), 'utf8').replace(/^\uFEFF/, '');
   assert.ok(totals.split(/\r?\n/).filter(Boolean).length === 3, 'totals_laserball.csv: header + 2 players');
   assert.ok(totals.includes('Mara;1;1;0;0;2;1'), 'Mara totals: 1 match, 1 win, 2 goals, 1 assist');
   assert.ok(fs.existsSync(path.join(dir, 'stats', 'matches')), 'per-match folder written');
@@ -117,7 +135,7 @@ try {
   sw.onChange(st2); sw.onMatchStart(st2); sw.onMatchEnd(st2);
   const totals2 = fs.readFileSync(path.join(dir, 'stats', 'totals_laserball.csv'), 'utf8');
   assert.ok(totals2.includes('Mara;2;1;1;0;3;'), 'Mara after 2 matches: 2 played, 1 win, 1 loss, 3 goals total');
-  const pm2 = fs.readFileSync(path.join(dir, 'stats', 'player_modes.csv'), 'utf8').replace(/^﻿/, '');
+  const pm2 = fs.readFileSync(path.join(dir, 'stats', 'player_modes.csv'), 'utf8').replace(/^\uFEFF/, '');
   assert.ok(pm2.split(/\r?\n/).filter(Boolean).length === 3, 'player_modes.csv: header + 2 players, one mode each');
   assert.ok(/1001;Mara;unknown;[^;]*;laserball;2;/.test(pm2), 'Mara played the same mode twice');
   process.chdir(cwd);
@@ -1035,7 +1053,7 @@ try {
   const pause = () => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 3);
   const feedMatch = (lines) => { pause(); for (const l of lines) eng.processLogLine(l); };
   const rowsOf = (name) => {
-    const text = fs.readFileSync(path.join(dir, name), 'utf8').replace(/^﻿/, '');
+    const text = fs.readFileSync(path.join(dir, name), 'utf8').replace(/^\uFEFF/, '');
     const lines = text.split(/\r?\n/).filter(Boolean);
     const head = splitCsv(lines[0], DELIM);
     return lines.slice(1).map((l) => {
@@ -1046,7 +1064,7 @@ try {
     });
   };
   const headOf = (name) => splitCsv(
-    fs.readFileSync(path.join(dir, name), 'utf8').replace(/^﻿/, '').split(/\r?\n/)[0], DELIM,
+    fs.readFileSync(path.join(dir, name), 'utf8').replace(/^\uFEFF/, '').split(/\r?\n/)[0], DELIM,
   );
 
   // (a) Laserball: Anna + Ben
@@ -1485,7 +1503,7 @@ try {
       .forEach((l) => eng.processLogLine(l));
   };
   const matches = () => {
-    const text = fs.readFileSync(path.join(dir, 'matches.csv'), 'utf8').replace(/^﻿/, '');
+    const text = fs.readFileSync(path.join(dir, 'matches.csv'), 'utf8').replace(/^\uFEFF/, '');
     const lines = text.split(/\r?\n/).filter(Boolean);
     const head = splitCsv(lines[0], DELIM);
     return lines.slice(1).map((l) => {
@@ -1518,13 +1536,13 @@ try {
   assert.strictEqual(rows.length, 4, 'shutdown: nothing is lost when the service stops');
 
   // all four matches carry a real result, not an empty shell
-  const players = fs.readFileSync(path.join(dir, 'all_players_laserball.csv'), 'utf8').replace(/^﻿/, '');
+  const players = fs.readFileSync(path.join(dir, 'all_players_laserball.csv'), 'utf8').replace(/^\uFEFF/, '');
   const playerLines = players.split(/\r?\n/).filter(Boolean);
   assert.strictEqual(playerLines.length, 1 + 4 * 2, 'header + two players per match, four matches');
   assert.ok(playerLines.slice(1).every((l) => /;(Anna|Ben);/.test(l)), 'every row names a player');
   assert.deepStrictEqual(rows.map((r) => r.winner_score), ['1', '2', '3', '1'], 'each match kept its own result');
   assert.ok(rows.every((r) => r.match_id && r.ended_at && r.players === '2'), 'every match row is complete');
-  const totals = fs.readFileSync(path.join(dir, 'totals_laserball.csv'), 'utf8').replace(/^﻿/, '');
+  const totals = fs.readFileSync(path.join(dir, 'totals_laserball.csv'), 'utf8').replace(/^\uFEFF/, '');
   assert.ok(/;Anna;4;/.test(totals), 'Anna is credited with all four matches');
   fs.rmSync(dir, { recursive: true, force: true });
   console.log('  ok    engine.matchEnd.stats');
@@ -1671,6 +1689,292 @@ try {
     assert.ok(/\r\nSubject: a b\r\n/.test(inject), 'newline in the subject is folded to a space');
     console.log('  ok    smtp.message');
   } catch (err) { failed++; console.error(`  FAIL  smtp.message\n        ${err.stack}`); }
+
+  // Ein abgelehntes AUTH LOGIN darf das Passwort nicht in die Fehlermeldung
+  // schreiben: die landet über notifier.last im Log, in /api/status und in
+  // /api/network. Ein winziger SMTP-Server, der jeden AUTH-Schritt ablehnt.
+  try {
+    const net = require('net');
+    const { sendMail } = require('../src/smtp');
+    const PASS = 'streng-geheim-42';
+    const srv = net.createServer((sock) => {
+      sock.setEncoding('utf8');
+      sock.write('220 pruefserver\r\n');
+      sock.on('data', (d) => {
+        for (const line of String(d).split('\r\n').filter(Boolean)) {
+          if (/^EHLO/i.test(line)) sock.write('250-pruefserver\r\n250 AUTH LOGIN\r\n');
+          else if (/^AUTH LOGIN$/i.test(line)) sock.write('334 VXNlcm5hbWU6\r\n');
+          else sock.write('535 Zugangsdaten abgelehnt\r\n');
+        }
+      });
+      sock.on('error', () => {});
+    });
+    await new Promise((r) => srv.listen(0, '127.0.0.1', r));
+    let caught = null;
+    try {
+      await sendMail({
+        host: '127.0.0.1', port: srv.address().port, secure: false,
+        user: 'kasse@halle.de', pass: PASS, to: 'technik@halle.de',
+        subject: 'x', text: 'x', timeoutMs: 3000,
+      });
+    } catch (err) { caught = err; }
+    srv.close();
+    assert.ok(caught, 'a rejected login throws');
+    const b64 = Buffer.from(PASS, 'utf8').toString('base64');
+    assert.ok(!caught.message.includes(b64), 'the base64 password is NOT in the error message');
+    assert.ok(!caught.message.includes(PASS), 'the plaintext password is NOT in the error message');
+    assert.ok(caught.message.includes('AUTH LOGIN'), 'the error still names the step that failed');
+    console.log('  ok    smtp.authSecret');
+  } catch (err) { failed++; console.error(`  FAIL  smtp.authSecret\n        ${err.stack}`); }
+
+  // Der Broker-URL darf `benutzer:passwort@` tragen (docs/MQTT.md sagt das
+  // selbst). GET /api/config ist die eine Stelle, an der KEIN Zugangsdatum
+  // stehen darf — sie lieferte den URL bis hierher ungeschwärzt aus.
+  try {
+    const { redactUrl } = require('../src/mqtt');
+    assert.strictEqual(redactUrl('mqtt://kasse:geheim@broker:1883'), 'mqtt://***@broker:1883', 'userinfo redacted');
+    assert.strictEqual(redactUrl('mqtt://broker:1883'), 'mqtt://broker:1883', 'a url without credentials is untouched');
+
+    const { ApiServer } = require('../src/apiServer');
+    const api = Object.create(ApiServer.prototype);
+    const cfg = require('../src/config').normalize({
+      mqtt: { url: 'mqtts://kasse:geheim@broker:8883' },
+      apiToken: 'apitok-XYZ-987', outputs: [{ kind: 'webhook', url: 'https://a.example/x', secret: 's3cr3t' }],
+      notify: { email: { host: 'mail.example', to: 'a@b.c', pass: 'mailpw' }, webhook: { url: 'https://w.example/h', secret: 'hooksec' } },
+    });
+    api.config = { data: cfg, envPins: [] };
+    api.notifier = null;
+    const shown = api._redactedConfig();
+    const asText = JSON.stringify(shown);
+    for (const secret of ['geheim', 's3cr3t', 'mailpw', 'hooksec', 'apitok-XYZ-987']) {
+      assert.ok(!asText.includes(secret), `GET /api/config leaks nothing: "${secret}" is gone`);
+    }
+    assert.strictEqual(shown.mqtt.url, 'mqtts://***@broker:8883', 'broker url masked');
+    assert.strictEqual(shown.mqttUrlHasCredentials, true, 'and the console is told that it is masked');
+    // die Maske zurückgeschickt = „unverändert lassen"
+    const back = api._unredactPatch({ mqtt: { url: 'mqtts://***@broker:8883' } });
+    assert.strictEqual(back.mqtt.url, 'mqtts://kasse:geheim@broker:8883', 'posting the mask back keeps the stored url');
+    const changed = api._unredactPatch({ mqtt: { url: 'mqtt://anderer:1883' } });
+    assert.strictEqual(changed.mqtt.url, 'mqtt://anderer:1883', 'a really edited url still gets through');
+    console.log('  ok    apiServer.configSecrets');
+  } catch (err) { failed++; console.error(`  FAIL  apiServer.configSecrets\n        ${err.stack}`); }
+
+  // Namen kommen aus dem TDF-Strom und sind Fremdeingabe: der Spieler wählt
+  // seinen Codenamen selbst. Steuerzeichen daraus landen sonst in der lesbaren
+  // Ereignis-Logdatei und auf stdout, und die Länge ist unbegrenzt.
+  try {
+    const { Engine } = require('../src/engine');
+    const eng = new Engine({ logger: null });
+    // Die Steuerzeichen werden zur LAUFZEIT gebaut — in dieser Datei darf
+    // keines wörtlich stehen, das prüft source.noControlChars weiter unten.
+    const BEL = String.fromCharCode(7);
+    const ESC = String.fromCharCode(27);
+    const CTL_RE = new RegExp("[\\u0000-\\u001f\\u007f-\\u009f]");
+    const lang = 'A'.repeat(300);
+    [
+      '1 28 Laserball 0 300000 0',
+      '2 0 Ro' + BEL + 't 5 solid #ef4444',
+      '4 0 0100',
+      '3 10 event @1 player An' + ESC + 'na 0 3 1',
+      '3 11 event @2 player ' + lang + ' 0 3 1',
+      '3 12 event @__proto__ player Boes 0 3 1',
+    ].forEach((l) => eng.processLogLine(l));
+    const s = eng.snapshot();
+    const namen = Object.values(s.players).map((p) => p.name);
+    assert.ok(namen.length >= 2, 'both well-formed logins landed');
+    assert.ok(namen.every((n) => !CTL_RE.test(n)), 'no control character survives in a player name');
+    assert.ok(namen.every((n) => n.length <= 64), 'a player name is bounded to 64 characters');
+    assert.ok(!CTL_RE.test(s.teams['0'].name), 'no control character survives in a team name');
+    assert.ok(!Object.prototype.hasOwnProperty.call(s.players, '__proto__'), 'an entity called __proto__ is refused');
+    assert.strictEqual(Object.getPrototypeOf(s.players), Object.prototype, 'and the player map keeps its prototype');
+    console.log('  ok    engine.foreignNames');
+  } catch (err) { failed++; console.error(`  FAIL  engine.foreignNames\n        ${err.stack}`); }
+
+  // Ein Umlaut, der beim Lesen des Request-Bodys genau auf eine Chunk-Grenze
+  // fällt, darf den Body nicht zerstören. Das ist kein Randfall: jeder deutsche
+  // Ausgangsname enthält welche, und die Konsole schickt die ganze
+  // Konfiguration in EINEM POST zurück.
+  try {
+    const { ApiServer } = require('../src/apiServer');
+    const { EventEmitter } = require('events');
+    const api = Object.create(ApiServer.prototype);
+    const body = Buffer.from(JSON.stringify({ name: 'Ausgang Süd — Tür Ost', note: 'grün' }), 'utf8');
+    // Genau zwischen den beiden Bytes eines „ü" trennen.
+    const cut = body.indexOf(Buffer.from('ü', 'utf8')) + 1;
+    const req = new EventEmitter();
+    req.destroy = () => {};
+    const p = api._readBody(req);
+    req.emit('data', body.subarray(0, cut));
+    req.emit('data', body.subarray(cut));
+    req.emit('end');
+    const parsed = await p;
+    assert.ok(parsed, 'a body split inside a multi-byte character still parses');
+    assert.strictEqual(parsed.name, 'Ausgang Süd — Tür Ost', 'and it parses to the very same text');
+
+    // und die Grenze greift weiterhin
+    const req2 = new EventEmitter();
+    let destroyed = false;
+    req2.destroy = () => { destroyed = true; };
+    const p2 = api._readBody(req2);
+    req2.emit('data', Buffer.alloc(513 * 1024));
+    req2.emit('end');
+    assert.strictEqual(await p2, null, 'an oversized body is refused');
+    assert.ok(destroyed, 'and the connection is dropped instead of read to the end');
+    console.log('  ok    apiServer.readBody');
+  } catch (err) { failed++; console.error(`  FAIL  apiServer.readBody\n        ${err.stack}`); }
+
+  // Die CORS-Warnung darf nicht auf die eigene Konsole losgehen: ein Browser
+  // schickt `Origin` auch bei einer SAME-ORIGIN-POST, und ohne Sonderfall
+  // erzeugte jeder Login und jedes Speichern eine Warnung, die sachlich falsch
+  // ist („der Browser wird die Antwort STILL verwerfen").
+  try {
+    const { ApiServer } = require('../src/apiServer');
+    const api = Object.create(ApiServer.prototype);
+    api.config = { data: require('../src/config').normalize({ cors: ['https://anzeige.example'] }), envPins: [] };
+    const req = (headers) => ({ headers, socket: {} });
+
+    assert.strictEqual(api._originAllowed(null, req({ host: 'hallen-pc:8080' })), true, 'no Origin at all = not a browser request');
+    assert.strictEqual(
+      api._originAllowed('http://hallen-pc:8080', req({ host: 'hallen-pc:8080', origin: 'http://hallen-pc:8080' })),
+      true, 'the console itself is never "a blocked origin"',
+    );
+    assert.strictEqual(
+      api._originAllowed('https://anzeige.example', req({ host: 'hallen-pc:8080' })),
+      true, 'an origin from cors[] is allowed',
+    );
+    assert.strictEqual(
+      api._originAllowed('http://fremd.example', req({ host: 'hallen-pc:8080' })),
+      false, 'a foreign origin is still refused',
+    );
+    // ein anderer PORT auf demselben Rechner ist eine ANDERE Herkunft
+    assert.strictEqual(
+      api._originAllowed('http://hallen-pc:9999', req({ host: 'hallen-pc:8080' })),
+      false, 'another port on the same host is a different origin',
+    );
+    console.log('  ok    apiServer.sameOriginNotBlocked');
+  } catch (err) { failed++; console.error(`  FAIL  apiServer.sameOriginNotBlocked\n        ${err.stack}`); }
+
+  // Missionsbericht — bis hierher von keiner Testsuite berührt, obwohl er der
+  // Weg ist, auf dem ein beendetes Match den Rechner verlässt. Geprüft wird,
+  // was ein Betreiber bemerken würde: Inhalt, Datenschutzschalter und die
+  // Warteschlange auf der Platte (ein totes Ziel darf keine Mission kosten).
+  try {
+    const { MatchReporter, REPORT_SCHEMA } = require('../src/matchReport');
+    const { Engine } = require('../src/engine');
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'lfrep-'));
+    const qdir = path.join(dir, 'reports');
+    const quiet = { debug() {}, info() {}, warn() {}, error() {} };
+
+    const spielen = () => {
+      const eng = new Engine({ logger: null });
+      const rep = new MatchReporter({ logger: quiet, getConfig: () => ({}), dir: qdir });
+      eng.on('match_start', () => rep.onMatchStart(eng.snapshot()));
+      [
+        '1\t28\tLaserball\t0\t300000\t0',
+        '2\t0\tRot\t5\tsolid\t#ef4444',
+        '2\t1\tBlau\t5\tsolid\t#38bdf8',
+        '4\t0\t0100',
+        '3\t10\tevent\t#4711\tplayer\tMara\t0\t3\t1',
+        '3\t11\tevent\t@91\tplayer\tGast 1\t1\t3\t1',
+        '4\t9000\t0301\t#4711',
+        '4\t9500\t0101',
+      ].forEach((l) => { rep.noteLine(l); eng.processLogLine(l); });
+      return { rep, snap: eng.snapshot() };
+    };
+
+    const { rep, snap } = spielen();
+    const report = rep.onMatchEnd(snap);
+    assert.ok(report, 'a finished match produces a report');
+    assert.strictEqual(report.schema, REPORT_SCHEMA, 'the report names its schema');
+    assert.strictEqual(report.players.length, 2, 'every player is in the report');
+    assert.ok(report.players.some((p) => p.name === 'Mara'), 'names are included by default');
+    // Mitglied (#) und Gast (@) müssen unterscheidbar bleiben — das ist der
+    // einzige Grund, warum noteLine() überhaupt in den heißen Pfad hängt.
+    assert.ok(report.players.some((p) => p.idKind === 'member') && report.players.some((p) => p.idKind === 'guest'),
+      'member and guest are told apart');
+
+    // Datenschutzschalter
+    const save = process.env.LF_REPORT_NAMES;
+    process.env.LF_REPORT_NAMES = 'false';
+    const anon = spielen();
+    const ohne = anon.rep.onMatchEnd(anon.snap);
+    assert.ok(ohne.players.every((p) => p.name === undefined || p.name === null), 'LF_REPORT_NAMES=false leaves every name out');
+    assert.ok(ohne.players.every((p) => p.playerId), 'but the players stay distinguishable by id');
+    if (save === undefined) delete process.env.LF_REPORT_NAMES; else process.env.LF_REPORT_NAMES = save;
+
+    // Warteschlange: ein totes Ziel darf die Mission nicht kosten
+    const wartend = () => fs.readdirSync(qdir).filter((n) => n.endsWith('.json'));
+    assert.ok(wartend().length >= 1, 'an undelivered report waits on disk');
+    rep.queue.addSink('kaputt', () => { throw new Error('Ziel tot'); });
+    await rep.queue.drain();
+    assert.ok(wartend().length >= 1, 'a failing sink leaves the report in the queue');
+    rep.queue.sinks.length = 0;
+    rep.queue.addSink('ok', () => true);
+    await rep.queue.drain();
+    assert.deepStrictEqual(wartend(), [], 'a successful delivery clears the queue');
+    rep.queue.stop?.();
+
+    process.chdir(path.dirname(dir));
+    fs.rmSync(dir, { recursive: true, force: true });
+    console.log('  ok    matchReport');
+  } catch (err) { failed++; console.error(`  FAIL  matchReport\n        ${err.stack}`); }
+
+  // MQTT ohne Broker: es darf nichts krachen, nichts blockieren und vor allem
+  // nichts von den Zugangsdaten in status() auftauchen.
+  try {
+    const { MqttOut } = require('../src/mqtt');
+    const save = { u: process.env.LF_MQTT_USERNAME, p: process.env.LF_MQTT_PASSWORD };
+    process.env.LF_MQTT_USERNAME = 'kasse';
+    process.env.LF_MQTT_PASSWORD = 'streng-geheim-42';
+    const out = new MqttOut({
+      logger: { debug() {}, info() {}, warn() {}, error() {} },
+      getConfig: () => ({ mqtt: { enabled: false, url: 'mqtt://kasse:geheim@broker:1883', topic: '/decs/lfpassthrough' } }),
+    });
+    const st = out.status();
+    const asText = JSON.stringify(st);
+    assert.ok(!asText.includes('streng-geheim-42') && !asText.includes('geheim@'), 'status() carries no credentials');
+    assert.strictEqual(st.broker, 'mqtt://***@broker:1883', 'a url with userinfo is redacted in status()');
+    assert.strictEqual(st.authConfigured, true, 'but it does say that credentials exist');
+    assert.strictEqual(st.enabled, false, 'switched off stays switched off');
+    // Mit abgeschaltetem MQTT darf ein publish() nichts tun und nichts werfen.
+    assert.strictEqual(out.publish({ event: 'match_report' }, 'report'), false, 'publish() with mqtt off reports "not sent"');
+    out.stop();
+    if (save.u === undefined) delete process.env.LF_MQTT_USERNAME; else process.env.LF_MQTT_USERNAME = save.u;
+    if (save.p === undefined) delete process.env.LF_MQTT_PASSWORD; else process.env.LF_MQTT_PASSWORD = save.p;
+    console.log('  ok    mqtt.statusNoSecrets');
+  } catch (err) { failed++; console.error(`  FAIL  mqtt.statusNoSecrets\n        ${err.stack}`); }
+
+  // Quellhygiene: rohe Steuerzeichen in einer Quelldatei lassen git sie als
+  // BINÄR einstufen (so geschehen in src/web/app.js) und machen jeden Diff
+  // wertlos. Diese Prüfung hält das dauerhaft draußen.
+  try {
+    const SKIP = new Set(['node_modules', '.git', 'graphify-out', 'data', 'locationserver-integration']);
+    const EXT = new Set(['.js', '.json', '.md', '.html', '.css']);
+    const root = path.join(__dirname, '..');
+    const hits = [];
+    (function walk(d) {
+      for (const e of fs.readdirSync(d, { withFileTypes: true })) {
+        if (SKIP.has(e.name)) continue;
+        const p = path.join(d, e.name);
+        if (e.isDirectory()) { walk(p); continue; }
+        if (!EXT.has(path.extname(e.name)) && e.name !== '.env.example') continue;
+        const text = fs.readFileSync(p, 'utf8');
+        let line = 1;
+        for (let i = 0; i < text.length; i++) {
+          const c = text.codePointAt(i);
+          if (c === 10) { line++; continue; }
+          // erlaubt: Tab (9) und CR (13). Verboten: der Rest von C0, DEL, C1,
+          // die unsichtbaren Formatierungszeichen und ein BOM mitten im Text.
+          const bad = (c < 0x20 && c !== 9 && c !== 13) || c === 0x7f
+            || (c >= 0x80 && c <= 0x9f) || (c >= 0x200b && c <= 0x200f)
+            || c === 0x2028 || c === 0x2029 || (c === 0xfeff && i !== 0);
+          if (bad) hits.push(`${path.relative(root, p)}:${line} U+${c.toString(16).toUpperCase().padStart(4, '0')}`);
+        }
+      }
+    })(root);
+    assert.deepStrictEqual(hits, [], `rohe Steuerzeichen in Quelldateien — bitte als \\uXXXX schreiben:\n        ${hits.join('\n        ')}`);
+    console.log('  ok    source.noControlChars');
+  } catch (err) { failed++; console.error(`  FAIL  source.noControlChars\n        ${err.stack}`); }
 
   try {
     // The ticker itself: everything above drives checkMatchEnd() by hand, this

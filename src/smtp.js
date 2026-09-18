@@ -95,12 +95,22 @@ class Conn {
     });
   }
 
-  async cmd(line, { expect } = {}) {
+  /**
+   * Ein Kommando senden und genau eine Antwort abwarten.
+   *
+   * `label` ist das, was im Fehlertext steht. Ohne Angabe ist es das erste Wort
+   * der Zeile — das reicht für `EHLO`, `MAIL FROM`, `DATA`. Bei `AUTH LOGIN`
+   * IST die ganze Zeile aber der base64-kodierte Benutzername bzw. das
+   * base64-kodierte Passwort; dort MUSS ein Label mitgegeben werden, sonst
+   * stünde das Passwort im Klartext-Äquivalent in der Fehlermeldung — und die
+   * landet über notify.last im Log, in /api/status und in /api/network.
+   */
+  async cmd(line, { expect, label } = {}) {
     if (this.closed) throw new SmtpError('Verbindung geschlossen');
     this.socket.write(line + CRLF);
     const res = await this.read();
     if (expect && !expect.includes(res.code)) {
-      throw new SmtpError(`${line.split(' ')[0]} -> ${res.code} ${res.text.split('\n')[0]}`, res.code);
+      throw new SmtpError(`${label || line.split(' ')[0]} -> ${res.code} ${res.text.split('\n')[0]}`, res.code);
     }
     return res;
   }
@@ -196,11 +206,11 @@ async function sendMail({
     if (user) {
       const b64 = (s) => Buffer.from(s, 'utf8').toString('base64');
       if (/AUTH[^\n]*\bPLAIN\b/i.test(ehlo.text)) {
-        await conn.cmd(`AUTH PLAIN ${b64(`\0${user}\0${pass}`)}`, { expect: [235] });
+        await conn.cmd(`AUTH PLAIN ${b64(`\0${user}\0${pass}`)}`, { expect: [235], label: 'AUTH PLAIN' });
       } else if (/AUTH[^\n]*\bLOGIN\b/i.test(ehlo.text)) {
         await conn.cmd('AUTH LOGIN', { expect: [334] });
-        await conn.cmd(b64(user), { expect: [334] });
-        await conn.cmd(b64(pass), { expect: [235] });
+        await conn.cmd(b64(user), { expect: [334], label: 'AUTH LOGIN (Benutzer)' });
+        await conn.cmd(b64(pass), { expect: [235], label: 'AUTH LOGIN (Passwort)' });
       } else {
         throw new SmtpError('Server bietet weder AUTH PLAIN noch AUTH LOGIN an');
       }

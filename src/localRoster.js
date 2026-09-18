@@ -56,7 +56,7 @@ class LocalRoster {
 }
 
 function parse(text) {
-  const clean = text.replace(/^﻿/, '');
+  const clean = text.replace(/^\uFEFF/, '');
   const map = {};
   for (const raw of clean.split(/\r?\n/)) {
     const line = raw.trim();

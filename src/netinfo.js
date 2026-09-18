@@ -34,12 +34,6 @@ function rank(a) {
   return 20;
 }
 
-/** Die eine Adresse, die man jemandem nennen würde. Kann null sein. */
-function primaryAddress() {
-  const list = ipv4Addresses();
-  return list.length ? list[0].address : null;
-}
-
 /**
  * Vollständiges Erreichbarkeits-Bild.
  * @param {object} cfg  die laufende Konfiguration (config.data)
@@ -77,4 +71,4 @@ function addressSummary(addresses) {
   return addresses.map((a) => `${a.address} (${a.iface})`).join(', ');
 }
 
-module.exports = { ipv4Addresses, primaryAddress, reachability, addressSummary };
+module.exports = { ipv4Addresses, reachability, addressSummary };

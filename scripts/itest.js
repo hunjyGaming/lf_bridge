@@ -323,24 +323,24 @@ function done(code) { for (const p of procs) try { p.kill('SIGKILL'); } catch {}
 
     // the SM5 match lands in its OWN files, the Laserball ones are untouched
     await waitFor(() => fs.existsSync(path.join(dir, 'data', 'stats', 'all_players_sm5.csv')));
-    const sm5csv = fs.readFileSync(path.join(dir, 'data', 'stats', 'all_players_sm5.csv'), 'utf8').replace(/^﻿/, '');
+    const sm5csv = fs.readFileSync(path.join(dir, 'data', 'stats', 'all_players_sm5.csv'), 'utf8').replace(/^\uFEFF/, '');
     const sm5head = sm5csv.split(/\r?\n/)[0].split(';');
     assert.ok(sm5head.includes('shots_fired') && !sm5head.includes('goals'), 'sm5 file carries SM5 columns only');
     assert.ok(/;tdf7;/.test(sm5csv) && /;sm5;/.test(sm5csv), 'sm5 rows marked tdf7 + family sm5');
     const lbHead = fs.readFileSync(path.join(dir, 'data', 'stats', 'all_players_laserball.csv'), 'utf8')
-      .replace(/^﻿/, '').split(/\r?\n/)[0].split(';');
+      .replace(/^\uFEFF/, '').split(/\r?\n/)[0].split(';');
     assert.ok(lbHead.includes('goals') && !lbHead.includes('shots_fired'), 'laserball file still carries Laserball columns only');
     assert.ok(fs.existsSync(path.join(dir, 'data', 'stats', 'totals_sm5.csv')), 'totals_sm5.csv written');
 
     // Mara played BOTH families -> exactly two rows in player_modes.csv
     const modeRows = fs.readFileSync(path.join(dir, 'data', 'stats', 'player_modes.csv'), 'utf8')
-      .replace(/^﻿/, '').split(/\r?\n/).filter(Boolean).slice(1)
+      .replace(/^\uFEFF/, '').split(/\r?\n/).filter(Boolean).slice(1)
       .map((l) => l.split(';'))
       .filter((c) => c[0] === '1001');
     assert.strictEqual(modeRows.length, 2, 'player_modes.csv: two rows for the player who played both modes');
     assert.deepStrictEqual(modeRows.map((c) => c[2]).sort(), ['mode_0', 'sm5'], 'one row per mode key');
     assert.deepStrictEqual(modeRows.map((c) => c[4]).sort(), ['laserball', 'sm5'], 'each row carries its own family');
-    const matchIdx2 = fs.readFileSync(path.join(dir, 'data', 'stats', 'matches.csv'), 'utf8').replace(/^﻿/, '')
+    const matchIdx2 = fs.readFileSync(path.join(dir, 'data', 'stats', 'matches.csv'), 'utf8').replace(/^\uFEFF/, '')
       .split(/\r?\n/).filter(Boolean);
     assert.strictEqual(matchIdx2.length, 3, 'matches.csv: header + 2 matches');
     console.log('csv families OK     laserball + sm5 filed apart, Mara has a row per mode');

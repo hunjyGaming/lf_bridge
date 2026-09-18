@@ -362,7 +362,7 @@ Voller Variablenverzeichnis: [CONFIG.md](CONFIG.md). Kurzfassung:
 | Variable | Standard | Bedeutung |
 |---|---|---|
 | `LF_MQTT_ENABLED` | `false` | MQTT-Ausgang an/aus |
-| `LF_MQTT_URL` | `mqtt://127.0.0.1:1883` | Broker. `mqtt` · `mqtts` · `ws` · `wss` · `tcp` · `tls` |
+| `LF_MQTT_URL` | `mqtt://127.0.0.1:1883` | Broker. `mqtt` · `mqtts` · `tcp` · `ssl` · `tls` · `ws` · `wss` |
 | `LF_MQTT_TOPIC` | `/decs/lfpassthrough` | Datentopic. **Ändern trennt die Verbindung zum Locationserver.** |
 | `LF_MQTT_TOPIC_SUFFIXES` | `false` | `true` = `<topic>/<event>`. **Für den Locationserver aus lassen.** |
 | `LF_MQTT_STATUS_TOPIC` | *(leer)* | eigenes Topic für `bridge_online`/Last Will; leer = das Datentopic |

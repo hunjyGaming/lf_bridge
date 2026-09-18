@@ -634,11 +634,14 @@ gestört — es endet normal und schreibt seine eigenen, neuen Zeilen.
 
 ## API
 
-- `GET /api/stats/totals` — Gesamtwertung als JSON. Liefert **eine** Familie:
-  die des zuletzt aufgezeichneten Matches, sonst die zuletzt geschriebene
-  Gesamtwertung, sonst die alte `totals.csv`. Einen Parameter zur Auswahl gibt es
-  derzeit nicht — wer gezielt eine Familie braucht, lädt sie über
-  `/api/stats/file?name=totals_sm5.csv`.
+- `GET /api/stats/totals` — Gesamtwertung als JSON. Liefert **eine** Familie.
+  Ohne Parameter ist das die des zuletzt aufgezeichneten Matches, sonst die
+  zuletzt geschriebene Gesamtwertung, sonst die alte `totals.csv`.
+  Gezielt wählen lässt sie sich mit `?family=laserball|sm5` oder mit
+  `?profile=<anzeigeprofil>` (das Profil wird auf seine Familie aufgelöst).
+  Beides wird gegen die Registry geprüft; etwas Unbekanntes wird ignoriert
+  statt durchgereicht. Die Antwort nennt in `families` und `profiles`, wozu
+  überhaupt Daten vorliegen — siehe [API.md](API.md).
 - `GET /api/stats/files` — Liste aller CSV-Dateien, auch der neuen
 - `GET /api/stats/file?name=<pfad>` — eine Datei herunterladen
 - `GET /api/stats/reset/plan` — was ein Zurücksetzen löschen würde, nach Gruppen
@@ -648,8 +651,8 @@ gestört — es endet normal und schreibt seine eigenen, neuen Zeilen.
 
 Details und Auth: [API.md](API.md).
 
-> **Bekannte Einschränkung der Web-Konsole.** Die Tabelle „Gesamtwertung" im
-> Statistik-Tab zeigt fest die **Laserball**-Spalten (Tore, Vorlagen, Steals …).
-> Liefert `/api/stats/totals` eine SM5-Gesamtwertung, bleiben diese Spalten leer.
-> Die SM5-Zahlen sind vollständig vorhanden — nur eben in
-> `totals_sm5.csv`, die im selben Tab unter „Dateien" zum Download steht.
+> **Die Web-Konsole zeigt jede Familie richtig an.** Die Tabelle
+> „Gesamtwertung" im Statistik-Tab baut ihre Kopfzeile aus den Schlüsseln, die
+> `/api/stats/totals` tatsächlich liefert, und beschriftet sie aus derselben
+> Kennzahlen-Tabelle wie überall sonst. Sobald mehr als eine Familie Daten hat,
+> erscheint darüber ein Umschalter zwischen den Anzeigeprofilen.
