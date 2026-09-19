@@ -12,7 +12,8 @@ Die Protokollgrundlage (Zeilentypen, Event-Codes, Modus-Nummern) steht in
 - [Wie der Modus erkannt wird](#wie-der-modus-erkannt-wird)
 - [Das `mode`-Objekt](#das-mode-objekt)
 - [Die Registry](#die-registry)
-- [„Standard" eintragen — die eine Zeile](#standard-eintragen--die-eine-zeile)
+- [**Spielmodi in JSON-Dateien — die Anleitung ohne Programmierkenntnisse**](#spielmodi-in-json-dateien)
+- [„Standard" eintragen — die eine Zahl](#standard-eintragen--die-eine-zahl)
 - [Unbekannter Modus — warum das trotzdem funktioniert](#unbekannter-modus--warum-das-trotzdem-funktioniert)
 - [Laufzeit-Selbstkorrektur (`inferred`)](#laufzeit-selbstkorrektur-inferred)
 - [Zählerfelder: Familie `laserball`](#zählerfelder-familie-laserball)
@@ -33,8 +34,10 @@ Die Protokollgrundlage (Zeilentypen, Event-Codes, Modus-Nummern) steht in
 
 1. Die Anlage schickt ganz am Anfang einer Mission eine **Typ-1-Zeile**. Deren
    zweite Spalte ist die **Modus-Nummer**.
-2. lf_live schlägt diese Nummer in einer kleinen **Registry** nach
-   ([`src/gameModes.js`](../src/gameModes.js)). Belegt sind bisher nur `5`
+2. lf_live schlägt diese Nummer in einer kleinen **Registry** nach. Die steht
+   seit dieser Version in **JSON-Dateien im Ordner [`modes/`](../modes)** — je
+   Spielmodus eine Datei, die man ohne Programmierkenntnisse bearbeitet
+   ([Anleitung](#spielmodi-in-json-dateien)). Belegt sind bisher nur `5`
    (Space Marines 5) und `28` (Laserball Ranked).
 3. Jeder Modus gehört zu einer von **zwei Familien** — `sm5` oder `laserball`.
    Die Familie entscheidet, welche Zähler ein Spieler hat.
@@ -124,11 +127,14 @@ stehen könnte.
 
 Die CSV-Spaltensätze je Profil stehen in [STATS.md](STATS.md#spalten-spieler-zeilen).
 
-### Wo das im Code steht
+### Wo das steht
 
-Alles in [`src/gameModes.js`](../src/gameModes.js), Konstante `PROFILE_DEFS` —
-Scoreboard-Spalten, CSV-Block und Sortierkennzahl eines Profils stehen dort
-nebeneinander in **einem** Objekt.
+Je Profil **eine JSON-Datei** unter [`modes/profile/`](../modes/profile) —
+Scoreboard-Spalten, CSV-Block und Sortierkennzahl stehen dort nebeneinander in
+**einer** Datei ([Anleitung](#spielmodi-in-json-dateien)). Dieselben drei Profile
+stehen zusätzlich als **Rückfallebene** fest in
+[`src/gameModes.js`](../src/gameModes.js), Konstante `BUILTIN_PROFILE_DEFS`:
+fehlt oder klemmt eine Datei, gilt der eingebaute Satz.
 
 | Funktion | Liefert |
 |---|---|
@@ -216,46 +222,399 @@ Steht im Zustands-Snapshot unter `gameState.mode` und wird über
 
 ## Die Registry
 
-[`src/gameModes.js`](../src/gameModes.js), Konstante `REGISTRY`. Stand heute:
+Die Registry ist die Zuordnung **Modus-Nummer → Modus**. Sie steht in den
+JSON-Dateien unter [`modes/`](../modes) ([Anleitung](#spielmodi-in-json-dateien)).
+Stand heute:
 
-| Nummer | `key` | `label` | Familie | Profil | Status |
-|---|---|---|---|---|---|
-| `5` | `sm5` | Space Marines 5 | `sm5` | `sm5` | verified |
-| `28` | `laserball_ranked` | Laserball Ranked | `laserball` | `laserball` | verified |
+| Nummer | `key` | `label` | Familie | Profil | Datei | Status |
+|---|---|---|---|---|---|---|
+| `5` | `sm5` | Space Marines 5 | `sm5` | `sm5` | `modes/sm5.json` | verified |
+| `28` | `laserball_ranked` | Laserball Ranked | `laserball` | `laserball` | `modes/laserball-ranked.json` | verified |
+| `7` | `standard` | Standard | `sm5` | `standard` | `modes/standard.json` | **gemessen** (eigene Anlage, 19.09.2026) |
 
-Das ist die **gesamte** öffentlich belegte Modus-Nummerierung. Alles andere —
-„Standard", 7SM/Nexus, Junior, Zombies, VIP, Attack & Defend, Zone Control,
+`5` und `28` sind die **gesamte** öffentlich belegte Modus-Nummerierung. Die `7`
+steht hier aus einer anderen Quelle: **vier vollständige Roh-Mitschnitte der
+eigenen Anlage** vom 19.09.2026, die alle die Missionszeile
+`1 ⇥ 7 ⇥ | Standard LZ - 2 Teams |` tragen. Sie gilt damit für **diese** Halle und
+ist kein allgemeiner Standard — eine andere Anlage kann unter `7` etwas völlig
+anderes fahren.
+
+> **Warum der Registry-Name „Standard" heißt und nicht „| Standard LZ - 2 Teams |".**
+> Die Anlage schickt ihren eigenen Namen in der Typ-1-Zeile mit, und der
+> **gewinnt zur Laufzeit immer** (`label` kommt aus dem Stream, siehe
+> [Das `mode`-Objekt](#das-mode-objekt)). Im Betrieb steht also ohnehin
+> „| Standard LZ - 2 Teams |" auf dem Bildschirm. Der Registry-Name ist nur der
+> Rückfall für den Fall, dass die Anlage nichts mitschickt — und dafür ist der
+> Zierrahmen aus senkrechten Strichen Ballast. `schluessel` bleibt `standard`
+> und damit stabil für CSV-Dateien und API.
+
+Alles andere — 7SM/Nexus, Junior, Zombies, VIP, Attack & Defend, Zone Control,
 sämtliche Laserball-Varianten — hat Nummern, die nirgends dokumentiert sind. Sie
 zu ermitteln ist Sache des Hallenbetreibers, siehe
 [unten](#eigene-modus-nummern-ermitteln-und-eintragen).
 
+Dieselben zwei Nummern stehen **zusätzlich** fest in
+[`src/gameModes.js`](../src/gameModes.js) (`BUILTIN_REGISTRY`). Das ist die
+Rückfallebene: sind die JSON-Dateien weg oder kaputt, läuft lf_live damit weiter.
+
 ---
 
-## „Standard" eintragen — die eine Zeile
+## Spielmodi in JSON-Dateien
 
-Der Modus **„Standard"** hat ein fertiges Anzeigeprofil (`standard`), aber
-**seine Modus-Nummer ist unbekannt.** Sie wird an der Anlage gemessen; hier wird
-sie **nicht geraten**, weil ein falscher Registry-Eintrag schlechter ist als gar
-keiner (ein unbekannter Modus läuft ohnehin sauber als Familie `sm5`).
+**Für wen dieser Abschnitt ist:** für den Hallenbetreiber. Es wird **kein**
+Programmieren verlangt. Gebraucht werden ein Texteditor (Notepad, Notepad++,
+VS Code — irgendeiner) und die Modus-Nummer, die
+[`scripts/inspect.js`](../scripts/inspect.js) gemessen hat.
 
-**Die Stelle:** [`src/gameModes.js`](../src/gameModes.js), Konstante `REGISTRY`.
-Direkt darüber steht ein Kommentarkasten mit genau dieser Zeile. Sobald die
-Nummer per [`scripts/inspect.js`](../scripts/inspect.js) gemessen ist
-([Anleitung unten](#eigene-modus-nummern-ermitteln-und-eintragen)), wird `<NR>`
-ersetzt und die Zeile in `REGISTRY` eingefügt:
+### Wo die Dateien liegen
 
-```js
-const REGISTRY = {
-  5:  { number: 5,  key: 'sm5',              label: 'Space Marines 5',  family: FAMILIES.SM5,       profile: PROFILES.SM5 },
-  28: { number: 28, key: 'laserball_ranked', label: 'Laserball Ranked', family: FAMILIES.LASERBALL, profile: PROFILES.LASERBALL },
+Im Ordner **`modes/`** direkt im Programmverzeichnis von lf_live:
 
-  // ▼ hier, sobald die Nummer gemessen ist — <NR> ersetzen, sonst nichts ändern:
-  <NR>: { number: <NR>, key: 'standard', label: 'Standard', family: FAMILIES.SM5, profile: PROFILES.STANDARD },
-};
+```
+lf_bridge/
+├── modes/
+│   ├── _vorlage.json            ← Vorlage zum Kopieren. Wird NIE geladen.
+│   ├── standard.json            ← "Standard", Nummer 7 (gemessen)
+│   ├── sm5.json                 ← Space Marines 5, Nummer 5
+│   ├── laserball-ranked.json    ← Laserball Ranked, Nummer 28
+│   └── profile/
+│       ├── _vorlage.json        ← Vorlage für einen eigenen Spaltensatz
+│       ├── standard.json        ← Spaltensatz "Standard"
+│       ├── sm5.json             ← Spaltensatz "SM5"
+│       └── laserball.json       ← Spaltensatz "Laserball"
+├── src/
+└── docs/
 ```
 
-Mehr ist nicht zu tun: Familie `sm5` (dasselbe Protokoll wie SM5), Profil
-`standard` (die schlanke Spaltenauswahl). Danach lf_live neu starten.
+Zwei Sorten Dateien, und das ist der ganze Trick:
+
+| Ordner | Beantwortet | Wie oft angefasst |
+|---|---|---|
+| `modes/` | **Welche Nummer ist welcher Modus?** | ständig — hier kommen die gemessenen Nummern rein |
+| `modes/profile/` | **Welche Spalten zeigt so ein Modus?** | so gut wie nie — die drei mitgelieferten reichen |
+
+**Deshalb sind es zwei Sorten:** Ein Spaltensatz hat über vierzig Einträge.
+Müsste man ihn für jede neue Modus-Nummer mitkopieren, wäre jede Ergänzung eine
+Fleißarbeit mit vierzig Gelegenheiten für einen Tippfehler. So verweist eine
+Modus-Datei mit **einem Wort** (`"profil": "sm5"`) auf einen fertigen
+Spaltensatz, und beliebig viele Modi teilen sich denselben.
+
+> **Dateien, die mit `_` anfangen, werden nie geladen.** Genau deshalb sind die
+> Vorlagen `_vorlage.json` gefahrlos: sie liegen sichtbar daneben, wirken aber
+> nicht mit.
+>
+> **JSON kennt keine Kommentarzeilen.** Ein `//` oder `#` macht die Datei
+> ungültig. Was erklärt werden muss, steht deshalb in den Textfeldern
+> `"beschreibung"` und `"hinweis"` — die liest lf_live mit, wertet sie aber nicht
+> aus. Zusätzlich darf jedes Feld, dessen Name mit `_` beginnt, frei benutzt
+> werden (`"_notiz": "gemessen am 12.03."`).
+
+### So sieht eine Modus-Datei aus — vollständiges Beispiel
+
+`modes/sm5.json`, ungekürzt:
+
+```json
+{
+  "beschreibung": "Space Marines 5 — der klassische SM5-Modus.",
+  "schluessel": "sm5",
+  "anzeigename": "Space Marines 5",
+  "missionsnummern": [
+    5
+  ],
+  "familie": "sm5",
+  "profil": "sm5",
+  "hinweis": "Weitere SM5-Varianten brauchen keine eigene Datei: einfach ihre Nummer zusätzlich in \"missionsnummern\" schreiben."
+}
+```
+
+| Feld | Pflicht | Was hineingehört |
+|---|---|---|
+| `schluessel` | ja | Gleichbleibender Kurzname für CSV und API. Kleinbuchstaben, Ziffern, Unterstriche. **Einmal vergeben nicht mehr ändern** — sonst passen alte und neue Auswertungen nicht zusammen. |
+| `anzeigename` | ja | Der Name, den ein Mensch liest. Schickt die Anlage selbst eine Beschreibung mit, gewinnt die. |
+| `missionsnummern` | ja | **Die Liste der Nummern dieses Modus.** Ganze Zahlen 0–65535, ohne Anführungszeichen. `[]` ist erlaubt (Modus dann wirkungslos). Eine Nummer darf nur in **einer** Datei stehen. |
+| `familie` | ja | `"sm5"` oder `"laserball"` — mehr gibt es nicht. Im Zweifel `"sm5"`. |
+| `profil` | nein | Welcher Spaltensatz. Weglassen = Standardprofil der Familie (`sm5` → `sm5`, `laserball` → `laserball`). |
+| `beschreibung`, `hinweis` | nein | Freier Text. Ihr Notizzettel. |
+
+### Aufgabe 1 — eine gemessene Modus-Nummer eintragen
+
+Angenommen, der Inspektor hat gezeigt: **Modus 17** ist Ihre SM5-Variante
+„Zombies", Codes `0xxx`, und sie soll wie SM5 aussehen.
+
+1. `modes/sm5.json` im Texteditor öffnen.
+2. Die Zeile mit `"missionsnummern"` suchen. Da steht:
+
+   ```json
+     "missionsnummern": [
+       5
+     ],
+   ```
+
+3. Die neue Zahl **mit Komma davor** ergänzen:
+
+   ```json
+     "missionsnummern": [
+       5,
+       17
+     ],
+   ```
+
+   Kürzer geht es auch, das ist dasselbe: `"missionsnummern": [5, 17],`
+4. Speichern. **Fertig — das war alles.** Es wurde eine Zahl geschrieben, kein
+   Spaltensatz kopiert.
+5. In der Web-Konsole einmal **Einstellungen → Speichern** drücken; damit liest
+   lf_live die Modus-Dateien sofort neu. Wer lieber neu startet: geht genauso.
+
+> **Komma-Regel, die einzige echte Stolperfalle:** zwischen zwei Zahlen gehört
+> ein Komma, **nach der letzten Zahl nicht**. `[5, 17]` ist richtig,
+> `[5, 17,]` ist kaputt.
+
+### Aufgabe 2 — einen ganz neuen Modus anlegen
+
+Wenn der neue Modus **einen eigenen Namen in den Statistiken** bekommen soll
+(eigene `key`-Spalte, eigene Zeile in `player_modes.csv`), bekommt er eine eigene
+Datei. Beispiel: „Zombies", Nummer 17, SM5-Protokoll, Spalten wie SM5.
+
+1. `modes/_vorlage.json` kopieren.
+2. Die Kopie umbenennen, zum Beispiel in **`zombies.json`** — **ohne**
+   führenden Unterstrich, sonst wird sie nicht geladen.
+3. Die Kopie öffnen und die fünf Felder füllen. Die `_zu_...`-Zeilen der Vorlage
+   dürfen stehen bleiben oder gelöscht werden — sie sind nur Erklärung:
+
+   ```json
+   {
+     "beschreibung": "Zombies — Hausvariante, gemessen am 12.03.",
+     "schluessel": "zombies",
+     "anzeigename": "Zombies",
+     "missionsnummern": [17],
+     "familie": "sm5",
+     "profil": "sm5"
+   }
+   ```
+
+4. Speichern, in der Konsole **Einstellungen → Speichern**. Der Modus ist da.
+
+**Welche Familie?** Im Inspektorbericht nachsehen, welche Event-Codes in diesem
+Modus vorkamen: `11xx` ⇒ `"laserball"`, `0xxx` ⇒ `"sm5"`. Unsicher? **`"sm5"`
+eintragen.** lf_live stellt beim ersten `11xx`-Code selbständig um; ein falsches
+`"laserball"` wird dagegen nicht zurückkorrigiert.
+
+**Welches Profil?** `"sm5"` (alle SM5-Spalten), `"standard"` (nur Punkte, Level,
+Schüsse, Quote) oder `"laserball"`. Ein **eigener** Spaltensatz braucht eine
+neue Datei unter `modes/profile/` — Vorlage liegt dort, die gültigen
+Kennzahlnamen stehen unter [Spaltenbeschriftungen](#spaltenbeschriftungen).
+
+### Was passiert, wenn ich mich vertippe?
+
+**Nichts Schlimmes. Die Bridge läuft weiter.** Das ist fest zugesichert: eine
+kaputte Modus-Datei darf einen Spielbetrieb nie anhalten.
+
+| Fehler | Was lf_live tut |
+|---|---|
+| Datei ist kein gültiges JSON (Komma zu viel, Anführungszeichen fehlt, Kommentar drin) | Datei wird **ganz übersprungen**, es gilt die eingebaute Vorgabe |
+| Pflichtfeld fehlt oder ist leer | Datei wird **ganz übersprungen** |
+| Unbekannte Familie oder unbekanntes Profil | Datei wird **ganz übersprungen** |
+| Dieselbe Missionsnummer in zwei Dateien | **nur diese Nummer** wird übersprungen, der Rest der Datei gilt |
+| Unbekannter Kennzahlname in einem Spaltensatz | **nur diese Spalte** wird übersprungen |
+| Unbekannter Kennzahlname in `_bericht` | **nur dieses Feld** wird übersprungen — der Missionsbericht geht trotzdem raus |
+| Datei leer, unlesbar oder größer als 256 KB | Datei wird **ganz übersprungen** |
+| Ordner `modes/` ganz gelöscht | lf_live läuft mit den **eingebauten** Modi `5` und `28` |
+
+Die eingebauten Vorgaben verschwinden also nie. Eine JSON-Datei **überschreibt**
+sie — sie ersetzt sie nicht als letzte Instanz.
+
+### Wie finde ich den Fehler?
+
+Jede Beanstandung wird **auf Deutsch, mit Dateinamen**, ins Log geschrieben —
+dorthin, wo auch die übrigen Meldungen von lf_live landen (Konsolenfenster des
+Dienstes bzw. Fehlerausgabe). Sie sieht so aus:
+
+```
+[2026-09-18T08:40:05.326Z] ERROR gamemodes: modes/zombies.json: Die Datei ist kein
+gültiges JSON: Expected double-quoted property name in JSON at position 84 (line 5
+column 1). Häufigste Ursachen: ein Komma zu viel vor der schließenden Klammer, ein
+fehlendes Anführungszeichen, oder ein Kommentar — JSON kennt keine Kommentare,
+benutzen Sie dafür das Feld "beschreibung". Die Datei wird übersprungen; es gelten
+die eingebauten Vorgaben.
+```
+
+Die Meldung nennt immer drei Dinge: **welche Datei**, **was nicht stimmt**, und
+**was lf_live stattdessen tut**. Bei kaputtem JSON steht sogar die Zeilennummer
+dabei.
+
+Dasselbe noch einmal zum Nachsehen, ohne Log-Suche — ein Befehl im
+Programmverzeichnis:
+
+```bash
+node -e "console.log(JSON.stringify(require('./src/gameModes').modeConfigStatus(), null, 2))"
+```
+
+Ausgegeben wird, welcher Ordner gelesen wurde, welche Dateien gefunden wurden,
+welche Modi und Profile daraus geworden sind (`modes`, `profiles`) und die Liste
+`problems` — leer, wenn alles in Ordnung ist. `ok: true` heißt: keine einzige
+Beanstandung.
+
+### Wann greift eine Änderung?
+
+| Was geändert wurde | Wirkt |
+|---|---|
+| Eine **Modus-Nummer** in `modes/*.json` (der Normalfall) | **sofort**, sobald in der Web-Konsole einmal Einstellungen gespeichert wurde — kein Neustart nötig |
+| Eine ganz neue Modus-Datei | ebenso sofort |
+| Die **Spalten** eines Profils in `modes/profile/*.json` | erst nach einem **Neustart** von lf_live — die Web-Konsole merkt sich die Spaltenliste beim Start |
+| Der Abschnitt **`_bericht`** eines Profils | **ab dem nächsten Match** — er wird bei jedem Missionsende frisch gelesen, ganz ohne Neustart |
+
+Im Zweifel: lf_live neu starten, dann stimmt in jedem Fall alles.
+
+### Der Abschnitt `_bericht` — was ans Backend geht
+
+Ein Anzeigeprofil bestimmt nicht nur die Spalten der Konsole und der
+CSV-Dateien, sondern auch den **Missionsbericht**: die Kurzfassung, die nach
+jedem beendeten Match an ein angeschlossenes System geschickt wird. Was der
+Bericht enthält und wie er aussieht, steht in
+[INTEGRATION.md → Missionsbericht](INTEGRATION.md#missionsbericht-die-kurzfassung-eines-matches).
+Eingestellt wird er hier:
+
+```json
+"_bericht": {
+  "spieler": ["score", "level", "shotsFired", "shotsHit", "accuracy"],
+  "uebersicht": ["teams", "sieger", "ende", "punktequelle", "dauer", "spielerzahl"],
+  "namen": true
+}
+```
+
+| Eintrag | Was es tut |
+|---|---|
+| `spieler` | Welche Kennzahlen in **jedem Spielerblock** stehen, in dieser Reihenfolge. Namen aus [Spaltenbeschriftungen](#spaltenbeschriftungen). Höchstens **64**. |
+| `uebersicht` | Welche Blöcke der Missionsübersicht mitgehen. Erlaubt sind genau sechs: `teams`, `sieger`, `ende`, `punktequelle`, `dauer`, `spielerzahl`. |
+| `namen` | `false` lässt die **Spielernamen** weg; dann verlässt nur noch die Kennung den Rechner. Vorgabe `true`. |
+
+**Ein Feld aufnehmen heißt: seinen Namen dazuschreiben.** Mehr ist nicht zu tun.
+Soll der Bericht zusätzlich die Fehlschüsse führen, wird aus
+
+```json
+  "spieler": ["score", "level", "shotsFired", "shotsHit", "accuracy"],
+```
+
+einfach
+
+```json
+  "spieler": ["score", "level", "shotsFired", "shotsHit", "accuracy", "misses"],
+```
+
+**Immer dabei und deshalb nicht aufzuführen:** Spieler-Kennung, ob Mitglied oder
+Gast, Mitglieds-ID, Team, Spielausgang und die Herkunft der Zahlen — sowie in
+der Übersicht Match-Kennung, Start, Ende und Modus. Ohne die könnte die
+Gegenseite den Bericht nicht einordnen, also sind sie nicht abwählbar.
+
+**`accuracy` reist nie allein.** Wird die Trefferquote genannt, gehen
+`accuracySource` und `accuracyIsEstimate` automatisch mit — sie ist während des
+Spiels [systematisch zu hoch](#die-trefferquote--und-warum-sie-live-zu-hoch-ist),
+und ohne diese Kennzeichnung würde ein Backend eine Schätzung wie eine Messung
+verrechnen.
+
+**Warum der Unterstrich im Namen.** Der Modus-Lader kennt nur die Anzeigefelder
+(`scoreboard`, `csv`, `sortierung`) und meldete ein `bericht` sonst bei jedem
+Start als unbekanntes Feld. Felder, die mit `_` beginnen, sind ausdrücklich für
+andere Leser frei — der Missionsbericht ist so einer.
+
+**Fehlt der Abschnitt ganz**, gilt die eingebaute Vorgabe des Profils:
+
+| Profil | Vorgabe `spieler` |
+|---|---|
+| `standard` | `score`, `level`, `shotsFired`, `shotsHit`, `accuracy` |
+| `sm5` | dazu `roleLabel`, `livesLeft`, `shotsLeft`, `deactivations`, `timesDeactivated` |
+| `laserball` | `score`, `level`, `goals`, `assists`, `blocksDone`, `clearsDone`, `stealsDone`, `passesDone` |
+
+Ein Tippfehler kostet keine Mission. Der falsche Name wird auf Deutsch gemeldet,
+das Feld übersprungen — und der Bericht geht **trotzdem** raus:
+
+```
+[2026-09-18T09:11:59.014Z] WARN bericht: modes/profile/sm5.json: Unbekannte Kennzahl
+"schuesse_gesamt" in "_bericht.spieler" — dieses Feld wird übersprungen, der Bericht
+geht trotzdem raus. Die gültigen Kennzahlnamen stehen in docs/GAMEMODES.md,
+Abschnitt "Spaltenbeschriftungen".
+```
+
+### Die Dateien gehören ins Repository
+
+`modes/` ist **versioniert** und wird mitgeliefert — anders als `data/` und
+`config.json`, die beide `.gitignore`-t sind. Eine eingetragene Modus-Nummer ist
+damit Teil des Projektstands und geht bei einem Update nicht verloren.
+
+---
+
+## „Standard" eintragen — die eine Zahl
+
+**Erledigt: die Zahl ist `7`.** Vier vollständige Roh-Mitschnitte der eigenen
+Anlage vom 19.09.2026 tragen alle dieselbe Missionszeile:
+
+```
+1 ⇥ 7 ⇥ | Standard LZ - 2 Teams | ⇥ 20260919104649 ⇥ 480000 ⇥ -1000
+```
+
+[`modes/standard.json`](../modes/standard.json) steht deshalb jetzt so da:
+
+```json
+  "missionsnummern": [7],
+```
+
+Damit meldet sich ein Standardspiel als `known: true`, `key: "standard"`,
+`family: "sm5"`, `profile: "standard"` und zeigt den schlanken Spaltensatz —
+nachgeprüft, indem alle vier Mitschnitte durch die Engine gespielt wurden.
+
+**Das gilt für DIESE Halle.** Die Nummer ist keine Laserforce-Konstante; eine
+andere Anlage kann unter `7` etwas anderes fahren. Wer lf_live woanders
+aufsetzt, misst neu.
+
+**Weitere Standard-Varianten** brauchen keine eigene Datei — ihre gemessene
+Nummer kommt einfach zusätzlich in die Liste:
+
+```json
+  "missionsnummern": [7, 9],
+```
+
+Gemessen wird mit [`scripts/inspect.js`](../scripts/inspect.js)
+([Anleitung unten](#eigene-modus-nummern-ermitteln-und-eintragen)). Danach in
+der Konsole Einstellungen speichern (oder lf_live neu starten). Eine **leere**
+Liste ist übrigens kein Fehler: die Datei ist dann nur wirkungslos und ein
+Standardspiel läuft als unbekannter `sm5`-Modus — völlig in Ordnung.
+
+### Warum im Standardmodus Leben, Munition und Trefferquote leer bleiben
+
+**Das ist kein Fehler.** Die amtlichen Endzahlen einer Laserforce-Anlage kommen
+in einem eigenen Zeilentyp am Matchende, **Typ 7**. In vier vollständigen
+Mitschnitten echter Standardspiele — zusammen 42 870 Zeilen, 141 Spieler, jedes
+Spiel regulär beendet — steht **keine einzige Typ-7-Zeile**. Im Standardmodus
+schickt die Anlage diesen Block schlicht nicht.
+
+Dauerhaft leer bleiben deshalb:
+
+| Spalte | warum |
+|---|---|
+| **Leben übrig** (`livesLeft`) | gibt es nur im Typ-7-Block |
+| **Munition übrig** (`shotsLeft`) | gibt es nur im Typ-7-Block |
+| **amtliche Trefferquote** | die Anlage rechnet sie nur im Typ-7-Block |
+
+Was **stattdessen** angezeigt und in die CSV geschrieben wird, sind die
+**Live-Zähler**, die lf_live selbst aus dem Ereignisstrom zählt. Sie sind
+gekennzeichnet: `statsSource: "live"`, bei der Quote zusätzlich
+`accuracySource: "live"` und `accuracyIsEstimate: true`. Eine Korrektur am
+Matchende findet nicht statt — es gibt nichts, womit korrigiert werden könnte.
+
+Und weil Laserforce keinen eigenen Schuss-Event meldet, bleibt die Zahl der
+abgegebenen Schüsse eine **Untergrenze** (gezählt werden nur Schüsse, die als
+Treffer oder Fehlschuss sichtbar werden). Die Live-Quote fällt dadurch
+systematisch **zu hoch** aus — in SM5 räumt der Typ-7-Block das am Ende auf, im
+Standardmodus nicht. Ausführlich:
+[Die Trefferquote](#die-trefferquote--und-warum-sie-live-zu-hoch-ist).
+
+**Wer diese Spalten nicht sehen will**, nimmt sie aus dem Anzeigeprofil
+`modes/profile/standard.json` heraus — das Profil `standard` führt sie ohnehin
+nicht (es zeigt Punkte, Level, Schüsse, Treffer, Quote). Sie tauchen nur auf,
+wenn ein Standardspiel mangels eingetragener Nummer als Profil `sm5` läuft.
+
+Protokollseitig belegt in
+[LASERFORCE.md → Typ-7 im Detail](LASERFORCE.md#typ-7-sm5-endblock-im-detail).
 
 ---
 
@@ -877,35 +1236,42 @@ nennt er für jeden unbekannten Modus genau die Zeile, die zu melden ist:
 
 ### Schritt 7 — Den Modus eintragen
 
-In [`src/gameModes.js`](../src/gameModes.js), Konstante `REGISTRY`, eine Zeile
-ergänzen:
+Das geschieht in einer **JSON-Datei**, nicht mehr im Programmcode. Die
+Schritt-für-Schritt-Anleitung samt vollständigem Beispiel steht oben:
+[Spielmodi in JSON-Dateien](#spielmodi-in-json-dateien). In Kurzform, für einen
+neuen Modus „7SM Nexus" mit der gemessenen Nummer 14 — Datei `modes/nexus.json`:
 
-```js
-const REGISTRY = {
-  5:  { number: 5,  key: 'sm5',              label: 'Space Marines 5',  family: FAMILIES.SM5,       profile: PROFILES.SM5 },
-  28: { number: 28, key: 'laserball_ranked', label: 'Laserball Ranked', family: FAMILIES.LASERBALL, profile: PROFILES.LASERBALL },
-  14: { number: 14, key: 'sm7_nexus',        label: '7SM Nexus',        family: FAMILIES.SM5 },
-};
+```json
+{
+  "beschreibung": "7SM Nexus, Nummer am 16.09. gemessen.",
+  "schluessel": "sm7_nexus",
+  "anzeigename": "7SM Nexus",
+  "missionsnummern": [14],
+  "familie": "sm5"
+}
 ```
 
 Regeln für den Eintrag:
 
-- **`number`** — die Nummer aus der Typ-1-Zeile, als Zahl.
-- **`key`** — stabiler Kurzname in Kleinbuchstaben mit Unterstrichen. Er landet
-  in CSV-Dateien und in der API; einmal vergeben, sollte er sich nicht mehr
-  ändern, sonst passen alte und neue Auswertungen nicht zusammen.
-- **`label`** — Anzeigename. Wird von der Beschreibung aus dem Stream
+- **`missionsnummern`** — die Nummer(n) aus der Typ-1-Zeile, als Zahlen in einer
+  Liste. Gehören mehrere Nummern zum selben Modus, kommen sie alle in dieselbe
+  Liste: `[14, 15]`. Eine Nummer darf nur in **einer** Datei stehen.
+- **`schluessel`** — stabiler Kurzname in Kleinbuchstaben mit Unterstrichen. Er
+  landet in CSV-Dateien und in der API; einmal vergeben, sollte er sich nicht
+  mehr ändern, sonst passen alte und neue Auswertungen nicht zusammen.
+- **`anzeigename`** — Anzeigename. Wird von der Beschreibung aus dem Stream
   überschrieben, sofern die Anlage eine schickt.
-- **`family`** — `FAMILIES.LASERBALL` **nur**, wenn im Inspektor `11xx`-Codes
-  aufgetaucht sind. In allen anderen Fällen `FAMILIES.SM5`.
-- **`profile`** — **optional.** Weglassen heißt: Standardprofil der Familie
+- **`familie`** — `"laserball"` **nur**, wenn im Inspektor `11xx`-Codes
+  aufgetaucht sind. In allen anderen Fällen `"sm5"`.
+- **`profil`** — **optional.** Weglassen heißt: Standardprofil der Familie
   (`sm5` → `sm5`, `laserball` → `laserball`). Nur angeben, wenn der Modus
   bewusst einen **anderen** Spaltensatz zeigen soll als seine Familie —
-  `PROFILES.STANDARD` ist genau dafür da (siehe
-  [„Standard" eintragen](#standard-eintragen--die-eine-zeile)).
+  `"standard"` ist genau dafür da (siehe
+  [„Standard" eintragen](#standard-eintragen--die-eine-zahl)).
 
-Danach lf_live neu starten. Ohne Eintrag funktioniert der Modus trotzdem — er
-heißt dann nur `mode_14` statt `sm7_nexus` und ist als unbekannt markiert.
+Danach in der Web-Konsole einmal Einstellungen speichern (oder lf_live neu
+starten). Ohne Eintrag funktioniert der Modus trotzdem — er heißt dann nur
+`mode_14` statt `sm7_nexus` und ist als unbekannt markiert.
 
 > Wer sich bei der Familie unsicher ist, trägt sie **nicht** ein: ein fehlender
 > Eintrag landet bei `sm5` und wird bei `11xx`-Codes zur Laufzeit automatisch
@@ -914,6 +1280,200 @@ heißt dann nur `mode_14` statt `sm7_nexus` und ist als unbekannt markiert.
 > schlechter als gar keiner.
 
 ---
+
+## Verdacht „Hinterherlaufen"
+
+In vielen Hallen gilt es als unsportlich, wenn ein Spieler einer bestimmten
+Person durch die Arena folgt und sie immer wieder abschießt („Camping",
+„Spawn-Killing"). lf_live kann das **vermuten** — mehr nicht. Es wird nichts
+bestraft, nichts am Spiel verändert und kein Wert einer Statistik angefasst.
+
+### Die Regel
+
+Betrachtet wird je Spieler die Folge seiner **erfolgreichen Treffer auf Gegner**,
+in zeitlicher Reihenfolge. Gelten die letzten **drei** demselben Ziel, taucht das
+Paar in der Liste auf.
+
+- **Fehlschüsse zählen nicht mit und unterbrechen die Serie nicht.** Sie sind
+  gar kein Teil der Folge.
+- **Ein Treffer auf jemand anderen unterbricht sie** und setzt sie auf 1 zurück.
+- Die Liste ist **kumulativ fürs Match**: wer die Schwelle einmal erreicht hat,
+  bleibt bis zum nächsten Missionsstart darin. Genannt wird seine **längste**
+  Serie, das Ziel dieser Serie, und wie oft überhaupt eine Serie zustande kam.
+- Beim **Missionsstart** wird alles zurückgesetzt.
+
+Warum kumulativ und nicht nur die gerade laufende Serie: eine Serie endet in dem
+Moment, in dem der Spieler jemand anderen trifft. An den vier echten
+Mitschnitten gemessen waren **nie mehr als fünf Spieler gleichzeitig** auf einer
+Serie und am Schlusspfiff meist gar keiner — eine rein momentane Liste wäre
+fast immer leer gewesen und hätte auch ein fast leeres Tagesprotokoll ergeben.
+
+### Was als „Taggen einer Person" zählt
+
+Entschieden an vier echten Mitschnitten von Modus 7 („Standard LZ - 2 Teams",
+je 480 s, 30–41 Spieler, 9 000–14 000 Zeilen).
+
+| Code | Häufigkeit je Match | zählt? | warum |
+|---|---|---|---|
+| `0206` Player Deactivate | 1085–1573 | **ja** | Der Normalfall im Standardmodus. Ohne ihn sähe die Erkennung praktisch nichts. |
+| `0205` Player Hit | 30–46 | **ja** | Seltener, aber dieselbe Zeilenform, dasselbe Verb, derselbe Vorgang. |
+| `0208` Eigenbeschuss | 5–20 | **nein** | Belegt: **6 von 6** Vorkommen zwischen Spielern **desselben Teams**, während `0205`/`0206` in **1120 von 1120** Fällen gegnerische Teams betrafen. Auf die eigene Mannschaft zu schießen ist kein Nachstellen. |
+| `0D06` „blastet" | ~14 | **nein** | Ein Actor, **mehrere Ziele im selben Zeitstempel** — eine Flächenwirkung. Drei davon hintereinander sind ein Knopfdruck, keine drei Verfolgungen. |
+| `0300` / `0306` Raketen | 1 bzw. 0 | **nein** | Eine Rakete braucht ein Aufschalten und wirkt über die ganze Arena — das Gegenteil von Hinterherlaufen. Im Standardmodus ohnehin gegenstandslos. |
+| `0201` `0202` Fehlschüsse | 4269 | **nein** | Ausdrücklich: sie sind kein Teil der Folge und unterbrechen sie auch nicht. |
+| `0203` `0204` Ziele | 49 / 18 | **nein** | Ein Ziel ist keine Person. |
+| `0209` Warbot | — | **nein** | Hat gar keinen Actor. |
+| Treffer im **eigenen Team** | — | **nein** | Zweiter Riegel neben `0208`: `_noteTag()` vergleicht die Team-Kennung von Actor und Ziel. |
+| Actor **ist** das Ziel | — | **nein** | Nie eine Verfolgung. |
+
+**Laserball wird nicht unterstützt.** Der Betreiber will die Ansicht
+ausdrücklich nur für Standardspiele, deshalb sind `1104` (Block) und `1103`
+(Ballabnahme) gar nicht erst aufgenommen — und die Familie `laserball` ist
+zusätzlich hart ausgeschlossen, selbst wenn jemand `laserball` in die
+Profilliste schreibt. Fachlich passt es auch nicht: eine Ballabnahme richtet
+sich immer gegen den, der gerade den Ball hat, und würde vor allem gute
+Ballträger anschwärzen.
+
+### Gesteuert wird über das **Anzeigeprofil**
+
+Nicht über die Missionsnummer und nicht über die Familie:
+
+```jsonc
+"engine": { "chase": { "threshold": 3, "profiles": ["standard"] } }
+```
+
+Sobald eine Modus-Nummer auf das Profil `standard` zeigt (siehe
+[„Standard" eintragen](#standard-eintragen--die-eine-zahl)), läuft die Erkennung
+dort von selbst — ohne Codeänderung. Das ist der ganze Sinn der Profile.
+
+> **Wenn Ihre Standard-Nummer noch nicht eingetragen ist:** Ein unbekannter
+> Modus fällt auf Familie `sm5` und damit auf Profil `sm5` zurück. Die
+> Erkennung bleibt dann **stumm**, und das ist kein Fehler. Entweder Sie tragen
+> die gemessene Nummer in `modes/standard.json` ein — der bessere Weg — oder
+> Sie nehmen übergangsweise `sm5` mit in die Profilliste auf
+> (`LF_CHASE_PROFILES=standard,sm5`). Dann schlägt die Erkennung allerdings auch
+> in echten SM5-Spielen an.
+
+`threshold` ist die Schwelle; **0 und 1 schalten die Erkennung ab** (eine Serie
+aus einem Treffer wäre keine Serie). Obergrenze 50.
+
+### Ehrlich: was die Zahl 3 an echten Daten bedeutet
+
+Gemessen an den vier Mitschnitten, je Match der Anteil der Spieler, die
+mindestens einmal gelistet wurden:
+
+| Schwelle | Match 1 (30 Sp.) | Match 2 (40 Sp.) | Match 3 (41 Sp.) | Match 4 (30 Sp.) |
+|---|---|---|---|---|
+| **3** (Vorgabe) | 19 (63 %) | 14 (35 %) | 13 (32 %) | 17 (57 %) |
+| 4 | 3 (10 %) | 1 (3 %) | 3 (7 %) | 6 (20 %) |
+| 5 | 1 (3 %) | 0 | 2 (5 %) | 1 (3 %) |
+| 6 | 0 | 0 | 1 (2 %) | 1 (3 %) |
+
+**Bei Schwelle 3 landet also ein Drittel bis fast zwei Drittel aller Spieler
+irgendwann in der Liste.** Ein einzelner Eintrag ist damit Alltag und kein
+Hinweis auf irgendetwas. Wer die Liste als Auffälligkeitsliste lesen will,
+sollte **4 oder 5** einstellen. Die Vorgabe bleibt bei 3, weil der Betreiber
+sie so bestellt hat und weil eine zu empfindliche Einstellung, die man sieht,
+besser ist als eine zu stumpfe, die man für kaputt hält.
+
+### Grenzen der Erkennung — was sie nicht sieht, und wann sie danebenliegt
+
+**Sie sieht nicht:**
+
+- **Verfolgen ohne zu treffen.** Wer jemandem hinterherrennt und nicht trifft,
+  taucht nirgends auf. Fehlschüsse sind für die Regel gar nicht vorhanden.
+- **Entfernung und Position.** Laserforce meldet keine Koordinaten. Drei Treffer
+  quer durch die Halle sehen genauso aus wie drei aus zwei Metern.
+- **Absicht.** Ob jemand jagt, sich verteidigt oder zufällig dreimal
+  hintereinander denselben vor die Nase bekommt, ist aus dem Datenstrom nicht
+  zu entscheiden.
+- **Raketen- und Flächentreffer** (`0306`, `0D06`) — bewusst ausgenommen.
+- **Eigenbeschuss** (`0208`, Treffer im eigenen Team) — bewusst ausgenommen.
+
+**Sie schlägt fälschlich an:**
+
+- **Bei wenigen Spielern.** Mit zwei Spielern gibt es genau einen Gegner, jede
+  Serie ist zwangsläufig auf dieselbe Person, und die Erkennung kann gar nichts
+  anderes sagen. Unter **sechs** Spielern markieren Konsole, API (`lowSignal`)
+  und Tagesdatei den Hinweis deshalb ausdrücklich als wenig aussagekräftig.
+- **Bei einem Duell.** Zwei Spieler, die sich gegenseitig jagen, stehen beide
+  drin. In den Mitschnitten ist das gut zu sehen: in einem Spiel standen gleich
+  zwei solche Paare gegenseitig auf der Liste — das ist ein Zweikampf und kein
+  Nachstellen. (Namen stehen hier bewusst nicht: die Mitschnitte enthalten echte
+  Spielernamen und weltweit eindeutige Mitglieds-IDs und gehören nicht ins
+  Repository.)
+- **Bei guten Spielern.** Wer viel trifft, erzeugt rein rechnerisch mehr Serien.
+- **In engen Arenen und bei Respawn-Punkten**, an denen sich Spieler ohnehin
+  ständig begegnen.
+
+Die Erkennung ist damit ein **Anlass hinzuschauen**, nicht mehr. Die Anzeige,
+die API und die Tagesdatei sind in Wortwahl und Gestaltung entsprechend
+zurückhaltend gehalten: keine Warnfarbe, kein Urteil, kein Begriff, der jemanden
+zum Betrüger erklärt.
+
+### Wo es zu sehen ist
+
+| Ort | Was |
+|---|---|
+| **Web-Konsole, Reiter LIVE** | Eigener Bereich unter den Spielerwerten: Spieler-Kennung, Spieler, „blieb dran an", längste Serie, Serien, zuletzt. Ist niemand auffällig, steht dort „Derzeit niemand auffällig." — eine leere Tabelle ohne Erklärung gibt es nicht. Läuft die Erkennung im aktuellen Modus nicht, sagt sie das ebenfalls. |
+| **`GET /api/chase`** | Nur der Verdacht, für eine externe Anzeige. |
+| **`GET /api/display` → `chase`** | Derselbe Datensatz im Anzeige-Datensatz. |
+| **`GET /api/state` / `/ws?feed=state`** | `chasing`, `chaseThreshold`, `chaseProfiles`, `chaseWatched`. |
+| **`data/chase/verfolger-JJJJ-MM-TT.md`** | Tagesprotokoll, nur angehängt — siehe unten. |
+
+### Das Tagesprotokoll
+
+Einmal je **Matchende** — nie im Ereignispfad — schreibt lf_live den Befund in
+eine Markdown-Datei. Eine Datei **je Tag**, über alle Matches hinweg angehängt,
+damit der Betreiber abends den Tagesüberblick hat:
+
+| Datei | Verhalten |
+|---|---|
+| `data/chase/verfolger-JJJJ-MM-TT.md` | **Nur angehängt, nie neu geschrieben.** Ein Absturz oder Neustart mitten am Tag verliert nichts. |
+| `data/chase/verfolger-JJJJ-MM-TT-uebersicht.md` | Tagesübersicht, nach jedem Match **neu geschrieben**. |
+
+Je Match ein Abschnitt mit Uhrzeit, Spielmodus, Match-Kennung, Spielerzahl,
+Dauer und Schwelle — ohne diesen Zusammenhang ist ein Befund später nicht
+einzuordnen, besonders die Spielerzahl. **Matches ohne Befund bekommen ihre
+Zeile ebenfalls** („Niemand war auffällig."), und ein nicht beobachteter
+Spielmodus wieder eine andere: sonst ließe sich hinterher nicht unterscheiden,
+ob niemand auffiel oder ob das Mitschreiben gar nicht lief.
+
+Die **Tagesübersicht** beantwortet die Frage, die die Aneinanderreihung der
+Matches nicht beantwortet: welcher Spieler kam an dem Tag in **mehreren**
+Matches vor und gegen wen. Ein wiederkehrender Name ist ein anderes Signal als
+ein einmaliger Eintrag. Sie enthält **Zahlen und keine Bewertung** — keine
+Punkte, keine Rangfolge nach „Schwere", nur Zählungen.
+
+Dass sie neu geschrieben wird, widerspricht dem „nur anhängen" nicht: sie wird
+**vollständig aus der Tagesdatei abgeleitet**, indem diese zurückgelesen wird —
+nicht aus irgendetwas, das im Speicher steht. Deshalb ist sie auch nach einem
+Neustart mitten am Tag vollständig, und wenn jemand sie löscht, entsteht sie
+beim nächsten Matchende neu. Maßgeblich ist immer die Tagesdatei.
+
+Im **Kopf der Tagesdatei** stehen die Grenzen der Erkennung noch einmal
+ausgeschrieben. Das ist Absicht: die Datei soll sie mitnehmen, wenn der
+Betreiber sie jemandem schickt.
+
+**Vorgabe: an** (`chaseLog.enabled: true`) — anders als beim Roh-Mitschnitt.
+Begründung: die Datei ist der eigentliche Zweck der Funktion, sie wächst um
+wenige Kilobyte am Tag statt um Megabyte, und geschrieben wird einmal je
+Matchende statt laufend. Sie enthält **Spielernamen** und liegt deshalb unter
+`data/` (nicht im Repo). Mitglieds-IDs enthält sie nicht.
+
+Ein Schreibfehler wird einmal gemeldet und danach verschwiegen; der Betrieb
+läuft weiter. Siehe `src/chaseLog.js` und
+[CONFIG.md](CONFIG.md#verdacht-hinterherlaufen).
+
+### Was es kostet
+
+Im heißen Ereignisstrom steht genau ein Aufruf: für einen Code, der kein Tag
+ist, eine Set-Abfrage und ein `return`. Für ein Tag zwei Map-Zugriffe und ein
+paar Ganzzahl-Schreibvorgänge. Je Spieler wird **ein** Eintrag fester Größe
+geführt — letztes Ziel, Zähler, längste Serie, Zeitstempel. **Keine
+Trefferhistorie.** Der Pfad ist vollständig in `try/catch` gekapselt und kann
+nie werfen. Die veröffentlichte Liste wird nur neu gebaut, wenn sich an ihr
+etwas geändert hat.
 
 ## Bekannte Lücken / unbestätigt
 
@@ -931,13 +1491,21 @@ Im Stil der übrigen Doku: hier steht ehrlich, was **nicht** belegt ist.
 | **SM5-Live-Zähler ohne Typ-7-Pendant** | `misses`, `targetHits`, `targetDestroys`, `missileLocks`, `missileMisses`, `missileDestroys`, `rapidFires`, alle Resupply-Zähler, `beaconClaims`, `baseAwards`, `achievements`, `rewards`, `timesHit`, `timesHitByTeam` bleiben Untergrenzen — die Anlage liefert dafür keine offizielle Endzahl. | bekannte Grenze |
 | **`shotsFired` live** | Laserforce meldet keinen Schuss-Event. Die Live-Zahl ist systematisch zu niedrig. | bekannte Grenze |
 | **Trefferquote live** | Weil nur der Nenner unvollständig ist, fällt die Live-Quote systematisch **zu hoch** aus. Sie ist deshalb als Näherung gekennzeichnet (`accuracyIsEstimate`) und wird nach dem Typ-7-Block amtlich. Wie groß der Fehler an einer echten Anlage ist, ist **nicht** gemessen. | bekannte Grenze |
-| **Modus-Nummer „Standard"** | Nicht belegt. Wird an der Anlage gemessen; das Anzeigeprofil `standard` steht bereit, die Registry-Zeile fehlt bewusst. | offen |
+| **Modus-Nummer „Standard"** | **Geschlossen für diese Halle:** `7`, gemessen an vier Roh-Mitschnitten vom 19.09.2026 und in `modes/standard.json` eingetragen. Für jede andere Anlage bleibt sie offen — die Nummer ist keine Laserforce-Konstante. | geschlossen (lokal) |
+| **Kein Typ-7-Block im Standardmodus** | Gemessen: in vier vollständigen Standardspielen kommt der amtliche Endblock nie. Leben, Munition und die amtliche Trefferquote bleiben dort dauerhaft leer; gezeigt werden die Live-Zähler (`statsSource: "live"`). → [eigener Abschnitt](#warum-im-standardmodus-leben-munition-und-trefferquote-leer-bleiben) | **gemessen, dauerhafte Grenze** |
+| **Teamstand im Standardmodus** | Gemessen: die Anlage schickt in Modus 7 keine Punktezeile auf eine Team-Kennung, nur je Spieler. Der Teamstand bleibt deshalb 0:0 und der Missionsbericht meldet `draw`. Die Spielerpunkte stimmen exakt. Ob der Teamstand die Summe der Spielerpunkte ist, ist **nicht belegt** und wird nicht gerechnet. | **offen, mit Auswirkung** |
+| **Profil-Spalten ohne Neustart** | Eine neue **Modus-Nummer** greift nach einem Speichern in der Konsole sofort. Ändert jemand dagegen die **Spalten** eines Profils in `modes/profile/*.json`, zeigt die Web-Konsole sie erst nach einem Neustart: `GET /api/modes` löst die Profilliste beim Programmstart einmal auf. | bekannte Grenze |
+| **Modus-Fehler in der Web-Konsole** | Beanstandungen an den Modus-Dateien stehen im Log und in `modeConfigStatus()`, aber noch nicht im Status-Endpunkt und damit nicht in der Konsolenoberfläche. Dafür müsste `/api/status` das Feld mitliefern. | offen |
 | **Bedeutung der elf amtlichen Typ-7-Felder** | `livesLeft` und `shotsLeft` sind aus den Namen klar. Für `medicHits`, `ownMedicHits`, `medicNukes`, `scoutRapid`, `lifeBoost`, `ammoBoost`, `nukesCancelled`, `ownNukeCancels`, `shot3Hit` ist die Bedeutung aus der lfstats-Spezifikation erschlossen und nicht gegen eine Anlage geprüft. Die Zahlen werden roh durchgereicht. | unbestätigt |
 | **Anzeigeprofil in der Web-Konsole** | `GET /api/modes` liefert die Scoreboard-Spalten heute unter den beiden **Familien**-Schlüsseln. Für ein Profil `standard` müsste der Endpunkt zusätzlich nach Profil ausliefern; solange keine Modus-Nummer auf `standard` zeigt, fällt das nicht an. | offen |
 | **Gesamtwertung in der Web-Konsole** | Die Tabelle „Gesamtwertung" im Statistik-Tab zeigt fest die Laserball-Spalten. Bei einer SM5-Gesamtwertung bleiben sie leer; die Zahlen stehen vollständig in `totals_sm5.csv`, die im selben Tab zum Download bereitsteht. Auch `GET /api/stats/totals` hat keinen Familien-Parameter. | offen |
 | **Matchende in Laserball** | Laserball hat keine Typ-7-Zeilen; die Erkennung der Endabrechnung hängt dort allein daran, dass am Ende **jede** Entity eine Typ-6-Zeile meldet. Dass sie das tut, ist Spezifikation, nicht Messung. Der Exit-Code taugt seit der [Beobachtung vom 17.09.2026](LASERFORCE.md#die-exit-codes-der-typ-6-zeile--unbestätigt) nicht mehr als Merkmal und wird nur noch protokolliert. Trifft die Annahme nicht zu, beendet der Watchdog das Match später — nie früher. | unbestätigt |
 | **Keine Typ-1-Zeile** | Sendet eine Anlage gar keine Typ-1-Zeile, bleibt der Modus dauerhaft `unknown`. Eine Möglichkeit, die Familie von Hand zu erzwingen, gibt es bewusst (noch) nicht. | bewusst offen |
 | **Beschreibung endet auf einer Zahl** | Kommt ein Stream **ohne** Tabulatoren **und ohne** Schema-Zeilen, und endet die Missionsbeschreibung auf einer Zahl, kann dieses letzte Token verlorengehen. Mit Tabulator oder mit Schema-Zeile korrekt. | bekannte Grenze |
+| **„Hinterherlaufen" ist ein Verdacht** | Die Erkennung sieht nur Treffer, keine Position, keine Entfernung und keine Absicht. Verfolgen ohne zu treffen bleibt unsichtbar; Duelle, gute Spieler und kleine Matches erzeugen Fehlalarme. → [eigener Abschnitt](#grenzen-der-erkennung--was-sie-nicht-sieht-und-wann-sie-danebenliegt) | **bekannte Grenze, gemessen** |
+| **Schwelle 3 ist empfindlich** | Gemessen an vier echten Standardspielen: 32–63 % aller Spieler erreichen sie mindestens einmal je Match. Als Auffälligkeitsliste taugt eher 4 oder 5. Die Vorgabe 3 ist die Bestellung des Betreibers, keine Messempfehlung. | **gemessen** |
+| **`0208` = Eigenbeschuss** | Erschlossen, nicht aus der Protokolldoku: 6 von 6 beobachteten Vorkommen waren teamintern, bei 1120 von 1120 gegnerischen `0205`/`0206`. Sechs Fälle sind eindeutig, aber wenige. Der zusätzliche Team-Vergleich in `_noteTag()` fängt den Fall auch dann ab, wenn die Deutung falsch sein sollte. | **erschlossen, klein belegt** |
+| **`0D06` „blastet"** | Als Flächenwirkung erkannt (ein Actor, mehrere Ziele im selben Zeitstempel), Bedeutung sonst unbelegt. Zählt für „Hinterherlaufen" nicht mit. | unbestätigt |
 
 ---
 

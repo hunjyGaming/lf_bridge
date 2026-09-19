@@ -1,0 +1,76 @@
+{
+  "beschreibung": "Anzeigeprofil \"Laserball\": Tore, Vorlagen, Bälle, Blocks, Resets und Pässe. Protokollfamilie laserball — dort protokolliert die Anlage keine Schüsse, deshalb gibt es hier keine Schussspalten.",
+  "profil": "laserball",
+  "anzeigename": "Laserball",
+  "familie": "laserball",
+  "scoreboard": [
+    "goals",
+    "assists",
+    {
+      "kennzahl": "stealsDone",
+      "gegenstueck": "stealsReceived"
+    },
+    {
+      "kennzahl": "blocksDone",
+      "gegenstueck": "blocksReceived"
+    },
+    {
+      "kennzahl": "resetsDone",
+      "gegenstueck": "resetsReceived"
+    },
+    {
+      "kennzahl": "clearsDone",
+      "gegenstueck": "clearsReceived"
+    },
+    {
+      "kennzahl": "passesDone",
+      "gegenstueck": "passesReceived"
+    },
+    "score",
+    "level"
+  ],
+  "csv": [
+    "goals",
+    "assists",
+    "stealsDone",
+    "stealsReceived",
+    "blocksDone",
+    "blocksReceived",
+    "resetsDone",
+    "resetsReceived",
+    "clearsDone",
+    "clearsReceived",
+    "passesDone",
+    "passesReceived"
+  ],
+  "sortierung": [
+    "goals",
+    "assists"
+  ],
+
+  "_bericht": {
+    "beschreibung": "Der Missionsbericht — die KURZFASSUNG, die nach jedem Match ans Backend geht (docs/INTEGRATION.md). In Laserball protokolliert die Anlage keine Schüsse: Schussfelder und Trefferquote gibt es hier nicht, dafür Tore, Vorlagen, Blocks, Befreiungspässe und Ballabnahmen.",
+    "spieler": [
+      "score",
+      "level",
+      "goals",
+      "assists",
+      "blocksDone",
+      "clearsDone",
+      "stealsDone",
+      "passesDone"
+    ],
+    "uebersicht": [
+      "teams",
+      "sieger",
+      "ende",
+      "punktequelle",
+      "dauer",
+      "spielerzahl"
+    ],
+    "namen": true,
+    "hinweis": "\"clearsDone\" sind die Befreiungspässe aus der eigenen Hälfte, \"stealsDone\" die Ballabnahmen. Wer auch das Gegenstück im Bericht haben will, schreibt den passenden Namen dazu, z. B. \"blocksReceived\" oder \"stealsReceived\"."
+  },
+
+  "hinweis": "Die ersten sieben Scoreboard-Spalten stehen bewusst in genau dieser Reihenfolge — sie sind seit jeher so. Nicht umsortieren, wenn es dafür keinen Grund gibt."
+}

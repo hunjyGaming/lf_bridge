@@ -1,0 +1,38 @@
+{
+  "beschreibung": "VORLAGE für ein neues Anzeigeprofil, also für einen eigenen Spaltensatz. Diese Datei wird nie geladen: der Name beginnt mit einem Unterstrich. Zum Anlegen kopieren, die Kopie ohne Unterstrich benennen (z. B. turnier.json) und ausfüllen. Ein Profil braucht man nur, wenn ein Modus ANDERE Spalten zeigen soll als standard, sm5 oder laserball. Eine neue Modus-NUMMER braucht kein neues Profil — die kommt einfach in die Liste missionsnummern einer Datei in modes/.",
+
+  "profil": "mein_profil",
+  "_zu_profil": "PFLICHT. Der Name, unter dem Modus-Dateien dieses Profil ansprechen: das Feld 'profil' einer Datei in modes/ muss genau so heißen. Nur Kleinbuchstaben, Ziffern, Unterstriche. Am besten so heißen wie die Datei.",
+
+  "anzeigename": "Mein Profil",
+  "_zu_anzeigename": "PFLICHT. Der Text, den ein Mensch liest — steht in der Konsole und in der API.",
+
+  "familie": "sm5",
+  "_zu_familie": "PFLICHT. 'sm5' oder 'laserball'. Sie muss zu den gewählten Spalten passen: ein Laserball-Profil kann keine Schussspalten füllen, ein SM5-Profil keine Tore.",
+
+  "scoreboard": [
+    "score",
+    "level",
+    { "kennzahl": "deactivations", "gegenstueck": "timesDeactivated" }
+  ],
+  "_zu_scoreboard": "PFLICHT. Die Spalten der Live-Anzeige, in dieser Reihenfolge. Jeder Eintrag ist entweder ein Kennzahlname in Anführungszeichen oder ein Objekt mit 'kennzahl' und zusätzlich 'gegenstueck' — dann zeigt die Konsole daneben klein die Gegenzahl (ausgeteilt gegen erhalten). Die gültigen Kennzahlnamen stehen in docs/GAMEMODES.md, Abschnitt 'Spaltenbeschriftungen'. Ein unbekannter Name legt nichts lahm: die Spalte wird gemeldet und übersprungen.",
+
+  "csv": [
+    "shotsFired",
+    "shotsHit",
+    "accuracy"
+  ],
+  "_zu_csv": "PFLICHT. Der Zählerblock der CSV-Dateien, in Ausgabereihenfolge. Nur die Zähler — Spalten wie Datum, Spielername oder Team setzt lf_live selbst davor und dahinter. Achtung: Wer hier Spalten einer bestehenden Datei entfernt oder umsortiert, ändert das Format seiner Auswertungen.",
+
+  "sortierung": ["score"],
+  "_zu_sortierung": "PFLICHT. Wonach eine Gesamtwertung rangiert, wichtigste Kennzahl zuerst. Ein bis zwei Namen genügen.",
+
+  "_bericht": {
+    "spieler": ["score", "level", "shotsFired", "shotsHit", "accuracy"],
+    "uebersicht": ["teams", "sieger", "ende", "punktequelle", "dauer", "spielerzahl"],
+    "namen": true
+  },
+  "_zu_bericht": "FREIWILLIG. Der MISSIONSBERICHT — die Kurzfassung, die nach jedem beendeten Match ans Backend geht (docs/INTEGRATION.md). Fehlt der ganze Abschnitt, gilt die eingebaute Vorgabe des Profils, und der Bericht geht trotzdem raus. Der Name beginnt mit einem Unterstrich, weil der Modus-Lader nur die Anzeigefelder kennt und 'bericht' sonst bei jedem Start als unbekanntes Feld melden würde. Die drei Einträge: 'spieler' = welche Kennzahlen in jedem Spielerblock stehen, in dieser Reihenfolge (höchstens 64; ein Feld aufnehmen heißt einfach: seinen Namen dazuschreiben; ein unbekannter Name wird auf Deutsch gemeldet, übersprungen, und der Bericht geht trotzdem raus). 'uebersicht' = welche Blöcke der Missionsübersicht mitgehen; erlaubt sind genau: teams, sieger, ende, punktequelle, dauer, spielerzahl. 'namen' = ob die Spielernamen mitgehen (false schickt nur noch die Kennung — Datenschutz, siehe docs/INTEGRATION.md). IMMER im Bericht und deshalb hier nicht aufzuführen: Spieler-Kennung, Mitglied-oder-Gast, Team, Ausgang, Herkunft der Zahlen — sowie Match-Kennung, Start, Ende und Modus in der Übersicht. Wird 'accuracy' genannt, gehen 'accuracySource' und 'accuracyIsEstimate' automatisch mit: die Trefferquote ist während des Spiels nur eine Schätzung und liegt systematisch zu hoch.",
+
+  "hinweis": "Ein neues Profil wird erst sichtbar, wenn eine Modus-Datei in modes/ es unter 'profil' nennt. Änderungen an den SPALTEN eines Profils werden von der Web-Konsole erst nach einem Neustart von lf_live angezeigt; neue Modus-NUMMERN greifen sofort. Der Abschnitt '_bericht' wird dagegen bei JEDEM Missionsende frisch gelesen — eine Änderung dort greift ab dem nächsten Match, ohne Neustart."
+}

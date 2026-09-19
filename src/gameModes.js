@@ -29,15 +29,44 @@
  * Unknown mission numbers default to family `sm5` / profile `sm5`: a normal
  * game is counted correctly even when its number is not in the registry.
  *
+ * WHERE THE MODES COME FROM (since the JSON rework)
+ * -------------------------------------------------
+ * The tables below are the BUILT-IN FALLBACK. On load — and again on every
+ * `reloadModes()` — the hand-editable JSON files under `modes/` are read on top
+ * of them:
+ *
+ *   modes/<mode>.json          one game mode: key, label, mission NUMBERS,
+ *                              family, display profile
+ *   modes/profile/<name>.json  one display profile: scoreboard columns, CSV
+ *                              columns, sort order
+ *
+ * A JSON file OVERRIDES a built-in entry of the same key; it never replaces the
+ * built-ins as the last line of defence. Anything wrong in a file (bad JSON,
+ * missing field, unknown family/profile/metric, a mission number claimed twice)
+ * is reported in GERMAN — to stderr and through `modeConfigStatus()` — and that
+ * file (or that one entry) is skipped. The bridge always comes up.
+ *
  * Nothing in here throws; every input is treated as untrusted stream data.
  */
+
+const fs = require('fs');
+const path = require('path');
 
 const FAMILIES = { LASERBALL: 'laserball', SM5: 'sm5' };
 const DEFAULT_FAMILY = FAMILIES.SM5;
 
-/** Display profiles. Separate from FAMILIES on purpose — see the file header. */
-const PROFILES = { STANDARD: 'standard', SM5: 'sm5', LASERBALL: 'laserball' };
-const PROFILE_LIST = [PROFILES.STANDARD, PROFILES.SM5, PROFILES.LASERBALL];
+/**
+ * Display profiles. Separate from FAMILIES on purpose — see the file header.
+ *
+ * `PROFILES` and `PROFILE_LIST` are exported and held by other modules, so a
+ * reload MUTATES them in place instead of replacing them. The three built-in
+ * profiles always stay first and are never removed; a profile that only a JSON
+ * file defines is appended.
+ */
+const BUILTIN_PROFILES = { STANDARD: 'standard', SM5: 'sm5', LASERBALL: 'laserball' };
+const PROFILES = { ...BUILTIN_PROFILES };
+const BUILTIN_PROFILE_LIST = [PROFILES.STANDARD, PROFILES.SM5, PROFILES.LASERBALL];
+const PROFILE_LIST = BUILTIN_PROFILE_LIST.slice();
 
 /** Profile a family falls back to when a registry entry names none. */
 const FAMILY_DEFAULT_PROFILE = {
@@ -47,29 +76,31 @@ const FAMILY_DEFAULT_PROFILE = {
 const DEFAULT_PROFILE = FAMILY_DEFAULT_PROFILE[DEFAULT_FAMILY];
 
 /**
- * Known mission numbers. Sources: docs/LASERFORCE.md ("mission type": 5 = Space
- * Marines 5, 28 = Laserball Ranked). Add a new line here to teach lf_live a
- * mode — see docs/GAMEMODES.md.
- *
- * `profile` is OPTIONAL. Leave it out and the family's default profile applies.
- * Name it when a mode shares a family with another mode but must show a
- * different column set.
+ * Known mission numbers — the BUILT-IN FALLBACK. Sources: docs/LASERFORCE.md
+ * ("mission type": 5 = Space Marines 5, 28 = Laserball Ranked).
  *
  * ┌──────────────────────────────────────────────────────────────────────────┐
- * │ HIER WIRD "STANDARD" EINGETRAGEN, sobald die Modus-Nummer an der Anlage  │
- * │ gemessen ist (docs/GAMEMODES.md -> "Eigene Modus-Nummern ermitteln").    │
- * │ Genau eine Zeile, <NR> durch die gemessene Nummer ersetzen:              │
- * │                                                                          │
- * │   <NR>: { number: <NR>, key: 'standard', label: 'Standard',              │
- * │           family: FAMILIES.SM5, profile: PROFILES.STANDARD },            │
- * │                                                                          │
- * │ Die Nummer ist NICHT belegt und wird hier bewusst NICHT geraten.         │
+ * │ HIER WIRD NICHTS MEHR EINGETRAGEN.                                       │
+ * │ Modi stehen in den JSON-Dateien unter `modes/` — eine Datei je Modus.    │
+ * │ Eine gemessene Modus-Nummer kommt als Zahl in die Liste                  │
+ * │ "missionsnummern" der passenden Datei; "Standard" liegt fertig als       │
+ * │ `modes/standard.json` mit leerer Liste bereit.                           │
+ * │ Schritt für Schritt: docs/GAMEMODES.md -> "Spielmodi in JSON-Dateien".   │
+ * │ Diese Tabelle bleibt nur als Rückfallebene stehen, falls die Dateien     │
+ * │ fehlen oder kaputt sind.                                                 │
  * └──────────────────────────────────────────────────────────────────────────┘
  */
-const REGISTRY = {
+const BUILTIN_REGISTRY = {
   5: { number: 5, key: 'sm5', label: 'Space Marines 5', family: FAMILIES.SM5, profile: PROFILES.SM5 },
   28: { number: 28, key: 'laserball_ranked', label: 'Laserball Ranked', family: FAMILIES.LASERBALL, profile: PROFILES.LASERBALL },
 };
+
+/**
+ * The LIVE registry: built-ins with the JSON files applied on top. Exported and
+ * held by other modules (scripts/inspect.js reads it), so `reloadModes()`
+ * mutates this very object instead of replacing it.
+ */
+const REGISTRY = {};
 
 // ---------------------------------------------------------------------------
 // counters per family
@@ -121,12 +152,6 @@ const SM5_OFFICIAL_FIELDS = [
   'scoutRapid', 'lifeBoost', 'ammoBoost',
   'nukesCancelled', 'ownNukeCancels', 'shot3Hit',
 ];
-
-/**
- * Derived values the engine computes; not counters, never summed.
- * `accuracy` = shotsHit / shotsFired, `accuracySource` = where it came from.
- */
-const DERIVED_FIELDS = ['accuracy', 'accuracySource'];
 
 /** SM5 role from the type-3 `category` column (docs/LASERFORCE.md). */
 const ROLES = {
@@ -309,7 +334,8 @@ const SM5_REST = SM5_FIELDS.filter((f) => f !== 'shotsFired' && f !== 'shotsHit'
 const OFFICIAL_REST = SM5_OFFICIAL_FIELDS.filter((f) => f !== 'livesLeft' && f !== 'shotsLeft');
 
 /**
- * The three display profiles.
+ * The three display profiles — the BUILT-IN FALLBACK. The shipped JSON files
+ * under `modes/profile/` carry exactly these column sets; edit those, not this.
  *
  *   family     — the family a profile belongs to (which counters can be filled)
  *   scoreboard — live scoreboard columns, in display order
@@ -321,7 +347,7 @@ const OFFICIAL_REST = SM5_OFFICIAL_FIELDS.filter((f) => f !== 'livesLeft' && f !
  * `received` on a scoreboard column names the "… suffered" counterpart, which
  * the console shows as a small second number. Unchanged mechanism.
  */
-const PROFILE_DEFS = {
+const BUILTIN_PROFILE_DEFS = {
   // Operator: Punkte, Level, abgegebene Schüsse, Trefferquote.
   [PROFILES.STANDARD]: {
     family: FAMILIES.SM5,
@@ -375,18 +401,25 @@ const PROFILE_DEFS = {
   },
 };
 
+/** The LIVE profile table: built-ins with `modes/profile/*.json` on top. */
+const PROFILE_DEFS = {};
+
 /**
  * German display name of each profile — the text a human reads.
  *
  * It lives HERE, next to the profile definitions, not in the API server: the
  * profile names and their display strings belong together, and every consumer
  * (API, console, legend) must read the same one. Use `profileLabel()`.
+ * `anzeigename` in a profile JSON file overrides an entry.
  */
-const PROFILE_LABELS = {
+const BUILTIN_PROFILE_LABELS = {
   [PROFILES.STANDARD]: 'Standard',
   [PROFILES.SM5]: 'SM5',
   [PROFILES.LASERBALL]: 'Laserball',
 };
+
+/** The LIVE label table. Mutated in place by `reloadModes()`. */
+const PROFILE_LABELS = {};
 
 // ---------------------------------------------------------------------------
 // helpers
@@ -413,14 +446,18 @@ function toModeNumber(v) {
 function cleanDesc(v) {
   if (typeof v !== 'string') return '';
   // eslint-disable-next-line no-control-regex
-  const s = v.replace(/[ -]+/g, ' ').replace(/\s+/g, ' ').trim();
+  const s = v.replace(/[\u0000-\u001f\u007f-\u009f]+/g, ' ').replace(/\s+/g, ' ').trim();
   return s.slice(0, 64);
 }
 
-/** Normalize a family string; anything unknown becomes the default family. */
+/**
+ * Normalize a family string; anything unknown becomes the default family.
+ * Exported because src/statsWriter.js needs exactly this rule — it used to keep
+ * a second, character-for-character equivalent copy of it.
+ */
 function normFamily(family) {
   const f = String(family == null ? '' : family).trim().toLowerCase();
-  return f === FAMILIES.LASERBALL ? FAMILIES.LASERBALL : FAMILIES.SM5;
+  return f === FAMILIES.LASERBALL ? FAMILIES.LASERBALL : DEFAULT_FAMILY;
 }
 
 /** Normalize a profile string; anything unknown becomes the default profile. */
@@ -591,16 +628,6 @@ function newOfficialStats() {
   return out;
 }
 
-/** Fields that are blank (not 0) until the official type-7 block has arrived. */
-function officialFields() {
-  return SM5_OFFICIAL_FIELDS.slice();
-}
-
-/** Derived, non-counted fields the engine computes. */
-function derivedFields() {
-  return DERIVED_FIELDS.slice();
-}
-
 /**
  * Player-object field names of a profile's CSV counter block, in output order.
  * @param {string} familyOrProfile family name (back-compat) or profile name
@@ -761,6 +788,399 @@ function listModes() {
     .sort((a, b) => a.number - b.number);
 }
 
+// ---------------------------------------------------------------------------
+// mode files — modes/*.json and modes/profile/*.json
+//
+// These files are edited BY HAND, on a hall PC, under time pressure. A typo in
+// one of them must never take the bridge down: everything below reports in
+// German and falls back to the built-in tables above.
+// ---------------------------------------------------------------------------
+
+/** Hard limits. The files come off the local disk, but are still read defensively. */
+const MODE_FILE_MAX_BYTES = 256 * 1024;   // one file
+const MODE_FILE_MAX_COUNT = 200;          // files per directory
+const MODE_MAX_NUMBERS = 200;             // mission numbers per mode file
+const MODE_MAX_COLUMNS = 200;             // column names per list
+
+/** Field names a file may carry. Anything else is flagged as a probable typo. */
+const MODE_FIELDS = ['schluessel', 'anzeigename', 'missionsnummern', 'familie', 'profil'];
+const PROFILE_FIELDS = ['profil', 'anzeigename', 'familie', 'scoreboard', 'csv', 'sortierung'];
+/** Free-text fields: they exist so a JSON file can carry its own comments. */
+const TEXT_FIELDS = ['beschreibung', 'hinweis', 'kommentar'];
+
+/** Result of the last load — served by `modeConfigStatus()`. */
+let MODE_STATUS = { dir: '', files: [], modes: [], profiles: [], problems: [], ok: true, loadedAt: null };
+
+/** Where the mode files live. `LF_MODES_DIR` overrides it (tests, packaging). */
+function modesDir() {
+  const env = process.env.LF_MODES_DIR;
+  if (env && String(env).trim()) return path.resolve(String(env).trim());
+  return path.join(__dirname, '..', 'modes');
+}
+
+/** No prototype pollution through an object key, whatever a file contains. */
+function jsonReviver(key, value) {
+  if (key === '__proto__' || key === 'constructor' || key === 'prototype') return undefined;
+  return value;
+}
+
+/** One reportable problem. `file` is the path as a human sees it. */
+function problem(level, file, message) {
+  return { level, file, message };
+}
+
+/** Untrusted display text -> printable, bounded. */
+function cleanFileText(v, max) {
+  if (typeof v !== 'string') return '';
+  // eslint-disable-next-line no-control-regex
+  return v.replace(/[\u0000-\u001f\u007f-\u009f]+/g, ' ').replace(/\s+/g, ' ').trim().slice(0, max);
+}
+
+/** Untrusted key/name -> a safe lowercase identifier, or '' when unusable. */
+function ident(v) {
+  const s = String(v == null ? '' : v).trim().toLowerCase();
+  return /^[a-z][a-z0-9_]{0,39}$/.test(s) ? s : '';
+}
+
+/** For an error message: show what the file actually contained, bounded. */
+function shown(v) {
+  if (v === undefined) return '(fehlt)';
+  if (v === null) return 'null';
+  if (typeof v === 'object') return Array.isArray(v) ? '(Liste)' : '(Objekt)';
+  if (typeof v === 'string') return `"${cleanFileText(v, 40)}"`;
+  return cleanFileText(String(v), 40) || '(leer)';
+}
+
+/** True when `name` is a metric of the METRICS table. */
+function isMetric(name) {
+  return typeof name === 'string' && Object.prototype.hasOwnProperty.call(METRICS, name);
+}
+
+/** Flag fields a file carries that neither the schema nor the comment set knows. */
+function checkUnknownFields(obj, allowed, rel, problems) {
+  for (const k of Object.keys(obj)) {
+    if (allowed.includes(k) || TEXT_FIELDS.includes(k) || k.startsWith('_')) continue;
+    problems.push(problem('warn', rel,
+      `Unbekanntes Feld "${cleanFileText(k, 40)}" — Tippfehler? Das Feld wird ignoriert. Bekannt sind: ${allowed.join(', ')} (dazu ${TEXT_FIELDS.join(', ')} als freier Text).`));
+  }
+}
+
+/**
+ * Read and JSON-parse one file. Returns the object, or null with the reason
+ * already pushed onto `problems`.
+ */
+function readModeJson(full, rel, problems) {
+  let st;
+  try { st = fs.statSync(full); }
+  catch (err) {
+    problems.push(problem('error', rel, `Die Datei kann nicht gelesen werden (${err && err.code ? err.code : 'unbekannter Fehler'}). Sie wird übersprungen; es gelten die eingebauten Vorgaben.`));
+    return null;
+  }
+  if (!st.isFile()) return null;
+  if (st.size === 0) {
+    problems.push(problem('error', rel, 'Die Datei ist leer. Sie wird übersprungen; es gelten die eingebauten Vorgaben.'));
+    return null;
+  }
+  if (st.size > MODE_FILE_MAX_BYTES) {
+    problems.push(problem('error', rel, `Die Datei ist ${Math.round(st.size / 1024)} KB groß, erlaubt sind höchstens ${MODE_FILE_MAX_BYTES / 1024} KB. Sie wird übersprungen; es gelten die eingebauten Vorgaben.`));
+    return null;
+  }
+  let txt;
+  try { txt = fs.readFileSync(full, 'utf8'); }
+  catch (err) {
+    problems.push(problem('error', rel, `Die Datei kann nicht gelesen werden (${err && err.code ? err.code : 'unbekannter Fehler'}). Sie wird übersprungen; es gelten die eingebauten Vorgaben.`));
+    return null;
+  }
+  txt = txt.replace(/^\uFEFF/, '');
+  if (!txt.trim()) {
+    problems.push(problem('error', rel, 'Die Datei enthält nur Leerzeichen. Sie wird übersprungen; es gelten die eingebauten Vorgaben.'));
+    return null;
+  }
+  let obj;
+  try { obj = JSON.parse(txt, jsonReviver); }
+  catch (err) {
+    problems.push(problem('error', rel, `Die Datei ist kein gültiges JSON: ${cleanFileText(err && err.message, 160)}. Häufigste Ursachen: ein Komma zu viel vor der schließenden Klammer, ein fehlendes Anführungszeichen, oder ein Kommentar — JSON kennt keine Kommentare, benutzen Sie dafür das Feld "beschreibung". Die Datei wird übersprungen; es gelten die eingebauten Vorgaben.`));
+    return null;
+  }
+  if (!obj || typeof obj !== 'object' || Array.isArray(obj)) {
+    problems.push(problem('error', rel, 'Die Datei muss ein JSON-Objekt sein, also mit { beginnen und mit } enden. Sie wird übersprungen; es gelten die eingebauten Vorgaben.'));
+    return null;
+  }
+  return obj;
+}
+
+/**
+ * One column list of a profile file. Entries are either a plain metric name or
+ * `{ "kennzahl": …, "gegenstueck": … }`. Returns null only on a HARD error
+ * (the field is not a list at all); an unusable single entry is skipped.
+ */
+function parseColumnList(raw, field, rel, problems) {
+  if (!Array.isArray(raw)) {
+    problems.push(problem('error', rel, `Das Pflichtfeld "${field}" fehlt oder ist keine Liste (erwartet z. B. ["score", "level"]). Die Datei wird übersprungen; es gelten die eingebauten Vorgaben.`));
+    return null;
+  }
+  const out = [];
+  for (const item of raw.slice(0, MODE_MAX_COLUMNS)) {
+    let key = '';
+    let received = '';
+    if (typeof item === 'string') {
+      key = item.trim();
+    } else if (item && typeof item === 'object' && !Array.isArray(item)) {
+      key = typeof item.kennzahl === 'string' ? item.kennzahl.trim() : '';
+      received = typeof item.gegenstueck === 'string' ? item.gegenstueck.trim() : '';
+    } else {
+      problems.push(problem('warn', rel, `Ein Eintrag in "${field}" ist weder ein Name noch ein Objekt mit "kennzahl" — er wird übersprungen.`));
+      continue;
+    }
+    if (!isMetric(key)) {
+      problems.push(problem('warn', rel, `Unbekannte Kennzahl "${cleanFileText(key, 40) || '(leer)'}" in "${field}" — diese Spalte wird übersprungen. Die gültigen Kennzahlen stehen in docs/GAMEMODES.md, Abschnitt "Spaltenbeschriftungen".`));
+      continue;
+    }
+    if (received && !isMetric(received)) {
+      problems.push(problem('warn', rel, `Unbekannte Kennzahl "${cleanFileText(received, 40)}" als "gegenstueck" von "${key}" — die Spalte bleibt, das Gegenstück entfällt.`));
+      received = '';
+    }
+    const col = { key };
+    if (received) col.received = received;
+    out.push(col);
+  }
+  return out;
+}
+
+/** One `modes/profile/<name>.json`. Returns null when the file must be skipped. */
+function parseProfileFile(obj, rel, problems) {
+  checkUnknownFields(obj, PROFILE_FIELDS, rel, problems);
+
+  const name = ident(obj.profil);
+  if (!name) {
+    problems.push(problem('error', rel, `Pflichtfeld "profil" fehlt oder ist unbrauchbar (gefunden: ${shown(obj.profil)}). Erlaubt sind Kleinbuchstaben, Ziffern und Unterstriche, z. B. "standard". Die Datei wird übersprungen; es gelten die eingebauten Vorgaben.`));
+    return null;
+  }
+  const family = ident(obj.familie);
+  if (family !== FAMILIES.SM5 && family !== FAMILIES.LASERBALL) {
+    problems.push(problem('error', rel, `Unbekannte Protokollfamilie ${shown(obj.familie)} im Feld "familie". Erlaubt sind genau zwei: "${FAMILIES.LASERBALL}" und "${FAMILIES.SM5}". Die Datei wird übersprungen; es gelten die eingebauten Vorgaben.`));
+    return null;
+  }
+  const scoreboard = parseColumnList(obj.scoreboard, 'scoreboard', rel, problems);
+  if (!scoreboard) return null;
+  const csv = parseColumnList(obj.csv, 'csv', rel, problems);
+  if (!csv) return null;
+  const sort = parseColumnList(obj.sortierung, 'sortierung', rel, problems);
+  if (!sort) return null;
+  if (!scoreboard.length || !csv.length || !sort.length) {
+    problems.push(problem('error', rel, 'Nach dem Prüfen ist "scoreboard", "csv" oder "sortierung" leer — so lässt sich keine Tabelle bauen. Die Datei wird übersprungen; es gelten die eingebauten Vorgaben.'));
+    return null;
+  }
+  const label = cleanFileText(obj.anzeigename, 64);
+  if (!label) {
+    problems.push(problem('error', rel, `Pflichtfeld "anzeigename" fehlt oder ist leer (gefunden: ${shown(obj.anzeigename)}). Das ist der Text, den ein Mensch liest, z. B. "Laserball". Die Datei wird übersprungen; es gelten die eingebauten Vorgaben.`));
+    return null;
+  }
+  return {
+    profile: name,
+    label,
+    def: { family, scoreboard, fields: csv.map((c) => c.key), sort: sort.map((c) => c.key) },
+  };
+}
+
+/** One `modes/<mode>.json`. Returns null when the file must be skipped. */
+function parseModeFile(obj, rel, problems, knownProfiles) {
+  checkUnknownFields(obj, MODE_FIELDS, rel, problems);
+
+  const key = ident(obj.schluessel);
+  if (!key) {
+    problems.push(problem('error', rel, `Pflichtfeld "schluessel" fehlt oder ist unbrauchbar (gefunden: ${shown(obj.schluessel)}). Das ist der gleichbleibende Kurzname für Dateien und Auswertungen, z. B. "laserball_ranked" — Kleinbuchstaben, Ziffern, Unterstriche. Die Datei wird übersprungen; es gelten die eingebauten Vorgaben.`));
+    return null;
+  }
+  const label = cleanFileText(obj.anzeigename, 64);
+  if (!label) {
+    problems.push(problem('error', rel, `Pflichtfeld "anzeigename" fehlt oder ist leer (gefunden: ${shown(obj.anzeigename)}). Die Datei wird übersprungen; es gelten die eingebauten Vorgaben.`));
+    return null;
+  }
+  const family = ident(obj.familie);
+  if (family !== FAMILIES.SM5 && family !== FAMILIES.LASERBALL) {
+    problems.push(problem('error', rel, `Unbekannte Protokollfamilie ${shown(obj.familie)} im Feld "familie". Erlaubt sind genau zwei: "${FAMILIES.LASERBALL}" (Tore, Pässe) und "${FAMILIES.SM5}" (Schüsse, Treffer). Die Datei wird übersprungen; es gelten die eingebauten Vorgaben.`));
+    return null;
+  }
+  let profile = '';
+  if (obj.profil !== undefined && obj.profil !== null && obj.profil !== '') {
+    profile = ident(obj.profil);
+    if (!profile || !knownProfiles.includes(profile)) {
+      problems.push(problem('error', rel, `Unbekanntes Anzeigeprofil ${shown(obj.profil)} im Feld "profil". Bekannt sind zurzeit: ${knownProfiles.join(', ')} — je eine Datei unter modes/profile/. Die Datei wird übersprungen; es gelten die eingebauten Vorgaben.`));
+      return null;
+    }
+  }
+  if (!Array.isArray(obj.missionsnummern)) {
+    problems.push(problem('error', rel, `Pflichtfeld "missionsnummern" fehlt oder ist keine Liste (gefunden: ${shown(obj.missionsnummern)}). Erwartet wird eine Liste von Zahlen, z. B. [5] oder [5, 17] — oder [], solange die Nummer noch nicht gemessen ist. Die Datei wird übersprungen; es gelten die eingebauten Vorgaben.`));
+    return null;
+  }
+  const numbers = [];
+  for (const raw of obj.missionsnummern.slice(0, MODE_MAX_NUMBERS)) {
+    const n = toModeNumber(raw);
+    if (n == null) {
+      problems.push(problem('warn', rel, `${shown(raw)} in "missionsnummern" ist keine gültige Missionsnummer — erlaubt sind ganze Zahlen von 0 bis 65535, ohne Anführungszeichen. Dieser Eintrag wird übersprungen.`));
+      continue;
+    }
+    if (!numbers.includes(n)) numbers.push(n);
+  }
+  return { key, label, family, profile, numbers };
+}
+
+/** Sorted list of the `.json` files of one directory. Never throws. */
+function listModeFiles(dir, problems, rel) {
+  let names;
+  try { names = fs.readdirSync(dir); }
+  catch (err) {
+    if (err && err.code === 'ENOENT') {
+      if (rel) problems.push(problem('warn', rel, 'Das Verzeichnis fehlt. Es gelten die eingebauten Vorgaben.'));
+      return [];
+    }
+    problems.push(problem('error', rel || dir, `Das Verzeichnis kann nicht gelesen werden (${err && err.code ? err.code : 'unbekannter Fehler'}). Es gelten die eingebauten Vorgaben.`));
+    return [];
+  }
+  const out = [];
+  for (const n of names.sort()) {
+    if (!n.toLowerCase().endsWith('.json')) continue;
+    if (n.startsWith('_') || n.startsWith('.')) continue;   // _vorlage.json and friends
+    if (!/^[A-Za-z0-9._-]+$/.test(n)) {
+      problems.push(problem('warn', `${rel}${n}`, 'Der Dateiname enthält ungewöhnliche Zeichen. Die Datei wird übersprungen; erlaubt sind Buchstaben, Ziffern, Punkt, Bindestrich und Unterstrich.'));
+      continue;
+    }
+    if (out.length >= MODE_FILE_MAX_COUNT) {
+      problems.push(problem('warn', rel || dir, `Mehr als ${MODE_FILE_MAX_COUNT} Dateien — alles darüber wird ignoriert.`));
+      break;
+    }
+    out.push(n);
+  }
+  return out;
+}
+
+/**
+ * Print the problems where a hall PC can see them. Never throws.
+ *
+ * Identical repeats are swallowed: the files are read at require time AND again
+ * on every config apply, and the same three lines on every console save would
+ * train the operator to ignore them. A CHANGED set is always printed again.
+ */
+let LAST_REPORT = '';
+function reportModeProblems(problems) {
+  const sig = problems.map((p) => `${p.level}|${p.file}|${p.message}`).join('\n');
+  if (sig === LAST_REPORT) return;
+  LAST_REPORT = sig;
+  for (const p of problems) {
+    const line = `[${new Date().toISOString()}] ${p.level === 'error' ? 'ERROR' : 'WARN'} gamemodes: ${p.file ? `${p.file}: ` : ''}${p.message}\n`;
+    try { process.stderr.write(line); } catch (_err) { /* nothing we can do */ }
+  }
+}
+
+/**
+ * Read `modes/` on top of the built-in tables and publish the result.
+ *
+ * Mutates REGISTRY / PROFILE_DEFS / PROFILE_LABELS / PROFILES / PROFILE_LIST in
+ * place — other modules hold references to exactly those objects.
+ *
+ * @param {{quiet?:boolean}} [opts] `quiet: true` suppresses the stderr report
+ * @returns {object} the same object `modeConfigStatus()` returns
+ */
+function reloadModes(opts) {
+  const quiet = !!(opts && opts.quiet);
+  const problems = [];
+  const dir = modesDir();
+
+  // ---- start from the built-ins -------------------------------------------
+  const defs = structuredClone(BUILTIN_PROFILE_DEFS);
+  const labels = { ...BUILTIN_PROFILE_LABELS };
+  const order = BUILTIN_PROFILE_LIST.slice();
+  const registry = structuredClone(BUILTIN_REGISTRY);
+  const files = [];
+  const loadedModes = [];
+  /** number -> file that claimed it, for the duplicate check among JSON files. */
+  const claimed = {};
+
+  try {
+    // ---- profiles first: a mode file may only name a profile that exists ----
+    const pdir = path.join(dir, 'profile');
+    for (const name of listModeFiles(pdir, problems, 'modes/profile/')) {
+      const rel = `modes/profile/${name}`;
+      files.push(rel);
+      const obj = readModeJson(path.join(pdir, name), rel, problems);
+      if (!obj) continue;
+      const parsed = parseProfileFile(obj, rel, problems);
+      if (!parsed) continue;
+      defs[parsed.profile] = parsed.def;
+      labels[parsed.profile] = parsed.label;
+      if (!order.includes(parsed.profile)) order.push(parsed.profile);
+    }
+
+    // ---- then the modes -----------------------------------------------------
+    for (const name of listModeFiles(dir, problems, 'modes/')) {
+      const rel = `modes/${name}`;
+      files.push(rel);
+      const obj = readModeJson(path.join(dir, name), rel, problems);
+      if (!obj) continue;
+      const parsed = parseModeFile(obj, rel, problems, order);
+      if (!parsed) continue;
+
+      const taken = [];
+      for (const n of parsed.numbers) {
+        if (Object.prototype.hasOwnProperty.call(claimed, n)) {
+          problems.push(problem('error', rel, `Die Missionsnummer ${n} ist schon in ${claimed[n]} vergeben. Eine Nummer darf nur zu genau einem Modus gehören. Diese Nummer wird übersprungen, der Rest der Datei gilt — bitte die Nummer in einer der beiden Dateien entfernen.`));
+          continue;
+        }
+        claimed[n] = rel;
+        taken.push(n);
+        const entry = { number: n, key: parsed.key, label: parsed.label, family: parsed.family };
+        if (parsed.profile) entry.profile = parsed.profile;
+        registry[n] = entry;
+      }
+      loadedModes.push({ file: rel, key: parsed.key, label: parsed.label, family: parsed.family, profile: parsed.profile || null, numbers: taken });
+    }
+  } catch (err) {
+    // A bug in the loader must not be worse than a broken file.
+    problems.push(problem('error', 'modes/', `Die Modus-Dateien konnten nicht verarbeitet werden (${cleanFileText(err && err.message, 160)}). Es gelten vollständig die eingebauten Vorgaben.`));
+  }
+
+  // ---- publish, in place --------------------------------------------------
+  for (const k of Object.keys(PROFILE_DEFS)) delete PROFILE_DEFS[k];
+  Object.assign(PROFILE_DEFS, defs);
+  for (const k of Object.keys(PROFILE_LABELS)) delete PROFILE_LABELS[k];
+  Object.assign(PROFILE_LABELS, labels);
+  for (const k of Object.keys(REGISTRY)) delete REGISTRY[k];
+  Object.assign(REGISTRY, registry);
+  for (const k of Object.keys(PROFILES)) delete PROFILES[k];
+  Object.assign(PROFILES, BUILTIN_PROFILES);
+  for (const p of order) {
+    const k = p.toUpperCase();
+    if (!Object.prototype.hasOwnProperty.call(PROFILES, k)) PROFILES[k] = p;
+  }
+  PROFILE_LIST.length = 0;
+  PROFILE_LIST.push(...order);
+
+  MODE_STATUS = {
+    dir,
+    files,
+    profiles: order.slice(),
+    modes: loadedModes,
+    problems,
+    ok: !problems.length,
+    loadedAt: new Date().toISOString(),
+  };
+  if (!quiet && problems.length) reportModeProblems(problems);
+  return modeConfigStatus();
+}
+
+/**
+ * What the last `reloadModes()` made of `modes/` — for the log, the status
+ * endpoint and the console. `problems[]` is German, plain text, with the file
+ * name in `file`.
+ */
+function modeConfigStatus() {
+  return structuredClone(MODE_STATUS);
+}
+
+// Read the files once, at require time, before anybody asks anything.
+reloadModes();
+
 module.exports = {
   FAMILIES,
   DEFAULT_FAMILY,
@@ -774,15 +1194,12 @@ module.exports = {
   METRIC_GROUPS,
   PROFILE_LABELS,
   SM5_OFFICIAL_FIELDS,
-  DERIVED_FIELDS,
   resolveMode,
   resolveModeWithProfile,
   familyOf,
   statFields,
   newPlayerStats,
   newOfficialStats,
-  officialFields,
-  derivedFields,
   csvColumns,
   counterColumns,
   profileFields,
@@ -791,6 +1208,7 @@ module.exports = {
   listProfiles,
   profileOf,
   withProfile,
+  normFamily,
   normProfile,
   resolveProfile,
   metricInfo,
@@ -801,4 +1219,6 @@ module.exports = {
   roleLabel,
   listModes,
   snake,
+  reloadModes,
+  modeConfigStatus,
 };

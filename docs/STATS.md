@@ -10,6 +10,7 @@ Ordner (Standard): `data/stats/` neben dem Programm. Änderbar per `.env`
 > Zusätzlich schreibt lf_live eine **lesbare Event-Log-Datei** nach `data/logs/`
 > (eine Zeile je Ereignis, zum Mitlesen/Grep). Eigene Doku: [LOGGING.md](LOGGING.md).
 
+- [CSV oder Missionsbericht?](#csv-oder-missionsbericht)
 - [Getrennt nach Familie — und warum](#getrennt-nach-familie--und-warum)
 - [Anzeigeprofil: was in welcher Spalte steht](#anzeigeprofil-was-in-welcher-spalte-steht)
 - [Die Dateien](#die-dateien)
@@ -27,6 +28,32 @@ Ordner (Standard): `data/stats/` neben dem Programm. Änderbar per `.env`
 - [Einstellungen (Konsole → Statistik)](#einstellungen-konsole--statistik)
 - [Löschen und Zurücksetzen](#löschen-und-zurücksetzen)
 - [API](#api)
+
+---
+
+## CSV oder Missionsbericht?
+
+Am Ende eines Matches entstehen **zwei** Dinge, und sie beantworten verschiedene
+Fragen. Beide werden aus demselben Zustand gebaut und widersprechen sich nie.
+
+| | CSV-Dateien | [Missionsbericht](INTEGRATION.md#missionsbericht-die-kurzfassung-eines-matches) |
+|---|---|---|
+| **Wofür** | die eigene Auswertung: Bestenlisten, Excel, pandas | die Gegenseite: Buchungs-/Mitgliederverwaltung |
+| **Wohin** | `data/stats/` auf **diesem** PC | über die Ausgänge und MQTT **aus dem Haus** |
+| **Umfang** | **alles** — bis zu 41 Zähler je Spieler | die **Kurzfassung** — was der Betreiber ausgewählt hat |
+| **Format** | `snake_case`-Spalten, eine Zeile je Spieler | JSON, `camelCase`, ein Block je Spieler |
+| **Spieler-Kennung** | `player_id` (ohne Präfix) | zusätzlich `entityId`, `idKind`, `memberId` — **Mitglied und Gast sind unterscheidbar** |
+| **Wenn das Ziel weg ist** | betrifft die CSV nicht | Warteschlange auf Platte, übersteht einen Neustart |
+| **Eingestellt in** | `csv` im Anzeigeprofil | `_bericht` im **selben** Anzeigeprofil |
+
+Beide Auswahllisten stehen in derselben Datei `modes/profile/<profil>.json` und
+benutzen dieselben Kennzahlnamen — nur schreibt die eine CSV-Spalten und die
+andere JSON-Felder. Die Zuordnung „Feldname ↔ CSV-Spalte" steht in
+[GAMEMODES.md → Spaltenbeschriftungen](GAMEMODES.md#spaltenbeschriftungen).
+
+Eine Regel gilt in beiden, und sie ist wichtiger als jede andere: **ein Wert, den
+die Anlage nicht gemeldet hat, bleibt leer bzw. `null` — nie `0`.** Siehe
+[Leere Zellen sind Absicht](#leere-zellen-sind-absicht).
 
 ---
 
@@ -607,11 +634,14 @@ gestört — es endet normal und schreibt seine eigenen, neuen Zeilen.
 
 ## API
 
-- `GET /api/stats/totals` — Gesamtwertung als JSON. Liefert **eine** Familie:
-  die des zuletzt aufgezeichneten Matches, sonst die zuletzt geschriebene
-  Gesamtwertung, sonst die alte `totals.csv`. Einen Parameter zur Auswahl gibt es
-  derzeit nicht — wer gezielt eine Familie braucht, lädt sie über
-  `/api/stats/file?name=totals_sm5.csv`.
+- `GET /api/stats/totals` — Gesamtwertung als JSON. Liefert **eine** Familie.
+  Ohne Parameter ist das die des zuletzt aufgezeichneten Matches, sonst die
+  zuletzt geschriebene Gesamtwertung, sonst die alte `totals.csv`.
+  Gezielt wählen lässt sie sich mit `?family=laserball|sm5` oder mit
+  `?profile=<anzeigeprofil>` (das Profil wird auf seine Familie aufgelöst).
+  Beides wird gegen die Registry geprüft; etwas Unbekanntes wird ignoriert
+  statt durchgereicht. Die Antwort nennt in `families` und `profiles`, wozu
+  überhaupt Daten vorliegen — siehe [API.md](API.md).
 - `GET /api/stats/files` — Liste aller CSV-Dateien, auch der neuen
 - `GET /api/stats/file?name=<pfad>` — eine Datei herunterladen
 - `GET /api/stats/reset/plan` — was ein Zurücksetzen löschen würde, nach Gruppen
@@ -621,8 +651,8 @@ gestört — es endet normal und schreibt seine eigenen, neuen Zeilen.
 
 Details und Auth: [API.md](API.md).
 
-> **Bekannte Einschränkung der Web-Konsole.** Die Tabelle „Gesamtwertung" im
-> Statistik-Tab zeigt fest die **Laserball**-Spalten (Tore, Vorlagen, Steals …).
-> Liefert `/api/stats/totals` eine SM5-Gesamtwertung, bleiben diese Spalten leer.
-> Die SM5-Zahlen sind vollständig vorhanden — nur eben in
-> `totals_sm5.csv`, die im selben Tab unter „Dateien" zum Download steht.
+> **Die Web-Konsole zeigt jede Familie richtig an.** Die Tabelle
+> „Gesamtwertung" im Statistik-Tab baut ihre Kopfzeile aus den Schlüsseln, die
+> `/api/stats/totals` tatsächlich liefert, und beschriftet sie aus derselben
+> Kennzahlen-Tabelle wie überall sonst. Sobald mehr als eine Familie Daten hat,
+> erscheint darüber ein Umschalter zwischen den Anzeigeprofilen.

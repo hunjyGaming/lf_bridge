@@ -1,0 +1,9 @@
+{
+  "beschreibung": "Standard — das normale Spiel Ihrer Anlage. Das Anzeigeprofil steht bereit, die Missionsnummer ist NICHT bekannt und wird hier bewusst NICHT geraten.",
+  "schluessel": "standard",
+  "anzeigename": "Standard",
+  "missionsnummern": [],
+  "familie": "sm5",
+  "profil": "standard",
+  "hinweis": "HIER DIE GEMESSENE NUMMER EINTRAGEN. Nummer mit \"node scripts/inspect.js 9100\" messen (Anleitung: docs/GAMEMODES.md, Abschnitt \"Eigene Modus-Nummern ermitteln und eintragen\"), dann oben aus \"missionsnummern\": [] ein \"missionsnummern\": [<Nummer>] machen — nur die Zahl, sonst nichts ändern. Solange die Liste leer ist, ist dieser Modus wirkungslos und die Anlage läuft als unbekannter sm5-Modus, was völlig in Ordnung ist."
+}

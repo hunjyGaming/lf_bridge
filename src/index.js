@@ -12,6 +12,8 @@ const { EventLog } = require('./eventLog');
 const { TcpIngest } = require('./tcpIngest');
 const { Capture } = require('./capture');
 const { Outputs } = require('./outputs');
+const { MatchReporter, optionalMqttSink } = require('./matchReport');
+const { MqttOut } = require('./mqtt');
 const { StreamServer } = require('./streamServer');
 const { ApiServer } = require('./apiServer');
 const { Notifier } = require('./notify');
@@ -37,8 +39,23 @@ const eventLog = new EventLog(config.data, logger);
 const tcp = new TcpIngest({ logger, getConfig });
 const capture = new Capture({ logger, getConfig });
 const outputs = new Outputs({ logger, getConfig, getState });
+// MQTT out -> FunZone location server (docs/MQTT.md). Off by default and
+// deliberately NOT part of the state tick: it publishes per mission, not per
+// frame, and must never be able to hold the parser up.
+const mqtt = new MqttOut({ logger, getConfig });
 const streamServer = new StreamServer({ logger, getConfig, getState });
 const notifier = new Notifier({ logger, getConfig });
+// Missionsbericht (docs/STATS.md, docs/INTEGRATION.md): die Kurzfassung eines
+// beendeten Matches. Sie entsteht NEBEN den CSV-Dateien, geht über die
+// bestehenden Ausgänge und über MQTT raus und liegt bis zur Zustellung in einer
+// Warteschlange auf der Platte — ein nicht erreichbares Ziel kostet keine
+// Mission, auch über einen Neustart hinweg.
+const reports = new MatchReporter({ logger, getConfig });
+reports.addSink('ausgänge', (report) => outputs.sendReport(report));
+{
+  const mqttSink = optionalMqttSink(mqtt, logger);
+  if (mqttSink) reports.addSink(mqttSink.name, mqttSink.send);
+}
 
 const api = new ApiServer({
   logger, config, engine, roster, stats, outputs, eventLog, notifier, capture,
@@ -60,6 +77,10 @@ tcp.on('stream-end', () => {
   if (tcp.stats.connected <= 0) engine.noteStreamLost();
 });
 tcp.on('line', (line) => {
+  // Vor dem Parser: der Bericht merkt sich die ROHE Spielerkennung mit Präfix
+  // (`#` Mitglied · `@` Gast), die cleanId() gleich darauf entfernt. Kostet für
+  // jede Zeile, die keine Typ-3-Zeile ist, genau einen Zeichenvergleich.
+  reports.noteLine(line);
   try { engine.processLogLine(line); }
   catch (err) { logger.error('engine', `parse error: ${err.message} :: ${line.slice(0, 160)}`); }
 });
@@ -68,8 +89,11 @@ tcp.on('line', (line) => {
 // three push consumers. Event broadcasts stay immediate (see 'event' below).
 engine.on('change', () => { api.markDirty(); streamServer.markDirty(); outputs.markDirty(); stats.onChange(engine.gameState); });
 engine.on('event', (evt) => { api.broadcastEvent(evt); streamServer.broadcastEvent(evt); outputs.onEvent(evt); stats.onEvent(evt); eventLog.onEvent(evt); });
-engine.on('match_start', () => { const s = engine.snapshot(); stats.onMatchStart(s); eventLog.onMatchStart(s); });
-engine.on('match_end', () => { const s = engine.snapshot(); stats.onMatchEnd(s); eventLog.onMatchEnd(s); });
+// Runde beginnt / endet. Der MQTT-Aufruf steht bewusst am ENDE der Kette und
+// kann nichts blockieren: er wirft nie, wartet nie und verwirft lieber eine
+// Nachricht, als den Parser aufzuhalten (docs/MQTT.md).
+engine.on('match_start', () => { const s = engine.snapshot(); stats.onMatchStart(s); eventLog.onMatchStart(s); mqtt.publishMatchStart(s); reports.onMatchStart(s); });
+engine.on('match_end', () => { const s = engine.snapshot(); stats.onMatchEnd(s); eventLog.onMatchEnd(s); mqtt.publishMatchEnd(s); reports.onMatchEnd(s); });
 
 // ---- one shared state tick ----
 // If any consumer is dirty AND has somebody to send to, serialize the state
@@ -109,11 +133,18 @@ function getStatus() {
     stateTickMs: config.data.stateTickMs,
     tcp: { ...tcp.stats },
     csv: stats.status(),
+    // Missionsbericht: wie viele Berichte noch auf Zustellung warten, wie viele
+    // ein Überlauf verworfen hat und was zuletzt schiefging.
+    report: reports.status(),
     capture: capture.status(),
     eventLog: eventLog.status(),
     localRoster: roster.status(),
     outputs: outputs.statusList(),
     outputAllow: config.data.outputAllow,
+    // Verbindungszustand, gezählte und verworfene Nachrichten, letzter Fehler.
+    // Enthält KEINE Zugangsdaten — die Broker-URL wird um ein etwaiges
+    // user:pass@ bereinigt (src/mqtt.js, redactUrl).
+    mqtt: mqtt.status(),
     streamServer: { enabled: config.data.streamServer.enabled, host: streamServer.host, port: streamServer.port, clients: streamServer.clientCount },
     envPins: config.envPins,
     matchEnd: { ...config.data.matchEnd },
@@ -161,6 +192,7 @@ async function reconcile() {
   outputs.reconcile();
   streamServer.reconcile();
   capture.reconcile();
+  mqtt.reconcile();
 
   if (JSON.stringify(config.data.http) !== lastHttp) {
     lastHttp = JSON.stringify(config.data.http);
@@ -287,6 +319,11 @@ ipWatch.unref?.();
   engine.setRoster(roster.getMap());
   outputs.reconcile();
   streamServer.reconcile();
+  // Ein nicht erreichbarer Broker darf den Start NICHT verzögern: reconcile()
+  // baut die Verbindung im Hintergrund auf und wartet auf nichts.
+  mqtt.reconcile();
+  // Was ein früherer Lauf nicht mehr loswerden konnte, geht jetzt raus.
+  reports.queue.start();
 
   const net = reachability(config.data);
   knownIps = net.addresses.map((a) => a.address).sort().join(',');
@@ -294,6 +331,7 @@ ipWatch.unref?.();
   logger.info('lf-live', `this PC: ${net.hostname} — ${addressSummary(net.addresses)}`);
   logger.info('lf-live', `Laserforce log export -> ${config.data.tcp.host}:${config.data.tcp.port}`);
   if (config.data.csv.enabled) logger.info('stats', `CSV stats -> ${stats.dir()}`);
+  if (config.data.mqtt.enabled) logger.info('mqtt', `MQTT -> ${mqtt.status().broker} · Topic ${mqtt.status().topic} (docs/MQTT.md)`);
   if (config.data.capture.enabled) logger.warn('capture', `Roh-Mitschnitt AKTIV -> ${capture.dir()} — enthält Spielernamen und Mitglieds-IDs (docs/CAPTURE.md)`);
 
   if (!config.data.admin.passwordHash && config.data.admin.enabled !== false) {
@@ -315,7 +353,9 @@ function shutdown() {
   try {
     if (engine.endMatch('shutdown')) logger.warn('lf-live', 'ein laufendes Match wurde beim Beenden abgerechnet (endReason: shutdown)');
   } catch (err) { logger.error('lf-live', `could not finalize the running match: ${err.message}`); }
-  tcp.stop(); outputs.stop(); streamServer.stop(); api.stop();
+  // AFTER engine.endMatch() above, so the match_end message is on its way
+  // before the client says goodbye and closes.
+  tcp.stop(); outputs.stop(); mqtt.stop(); streamServer.stop(); api.stop();
   capture.shutdown();
   eventLog.flush();
   setTimeout(() => process.exit(0), 200);

@@ -1,0 +1,11 @@
+{
+  "beschreibung": "Space Marines 5 — der klassische SM5-Modus. Missionsnummer 5 ist die einzige öffentlich belegte SM5-Nummer.",
+  "schluessel": "sm5",
+  "anzeigename": "Space Marines 5",
+  "missionsnummern": [
+    5
+  ],
+  "familie": "sm5",
+  "profil": "sm5",
+  "hinweis": "Weitere SM5-Varianten, die an Ihrer Anlage denselben Spaltensatz zeigen sollen, brauchen keine eigene Datei: einfach ihre gemessene Nummer zusätzlich in \"missionsnummern\" schreiben, z. B. [5, 17, 21]."
+}

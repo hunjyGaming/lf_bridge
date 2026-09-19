@@ -10,5 +10,11 @@ data/
 inspect-report.json
 .DS_Store
 
+# modes/ is NOT ignored on purpose: the game-mode and display-profile JSON files
+# ship with the project, and a measured mission number belongs in the repository
+# (docs/GAMEMODES.md). Nothing in there is a secret or machine-specific.
+!modes/
+!modes/**
+
 # graphify knowledge graph output
 graphify-out/

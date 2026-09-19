@@ -13,7 +13,7 @@ zugeschnitten.
 | Laserforce-Bind | `0.0.0.0` | `LF_TCP_HOST=<Hallen-Subnetz>` |
 | Raw-TCP-Stream | **aus**, Bind `127.0.0.1` | so lassen; für LAN gezielt `LF_STREAM_HOST=0.0.0.0` |
 | Zugriffs-Token | keiner | `LF_API_TOKEN=<lang & zufällig>` — für Programme; schützt auch den Raw-Stream |
-| CORS | **keine** (leer) | so lassen; nur bei Bedarf feste Liste in `LF_CORS_ORIGINS` |
+| CORS | **keine** (leer) | so lassen; nur bei Bedarf feste Liste in `LF_CORS_ORIGINS` — [Anzeige auf einem zweiten Rechner](#anzeige-auf-einem-zweiten-rechner-anbinden) |
 | Rate-Limit | 600 / Min / IP | niedriger via `LF_RATE_LIMIT_PER_MIN` |
 | Ausgangs-Ziele | beliebig | `LF_OUTPUT_ALLOW=host1,\*.beispiel.de:443` |
 | `X-Forwarded-For` | wird **ignoriert** | nur hinter eigenem Reverse-Proxy: `LF_TRUST_PROXY=true` |
@@ -133,6 +133,18 @@ Statistik-Schreibers, nicht nur die Dateien — siehe [STATS.md](STATS.md).
   **immer verworfen** — Passwörter laufen nur über `/api/auth/*`. Beim Speichern gilt: leerer `apiToken` = **unverändert** (löschen nur
   mit `apiTokenClear: true`), zurückgeschickte Maske = **gespeichertes Secret
   behalten**. Die Konsole kann die Konfiguration also gefahrlos zurückschreiben.
+- **Broker-URL mit Zugangsdaten**: trägt `mqtt.url` ein `benutzer:passwort@`,
+  wird es **überall** zu `mqtt://***@host` — im Log, in `GET /api/status` und
+  in `GET /api/config`. Schickt die Konsole die maskierte Form zurück, bleibt
+  der gespeicherte Wert unverändert. Besser ist trotzdem `LF_MQTT_USERNAME` /
+  `LF_MQTT_PASSWORD`: die stehen nur in der Umgebung, haben kein Gegenstück in
+  `config.json` und werden erst im Moment des Verbindungsaufbaus gelesen
+  ([CONFIG.md](CONFIG.md#was-es-nur-in-der-umgebung-gibt)).
+- **Zugangsdaten in Fehlermeldungen**: eine abgelehnte SMTP-Anmeldung meldet den
+  **Schritt**, der scheiterte (`AUTH LOGIN (Passwort) -> 535 …`), niemals die
+  gesendete Zeile. Bei `AUTH LOGIN` ist diese Zeile das base64-kodierte
+  Passwort, und die Fehlermeldung landet über `notify.last` im Log, in
+  `GET /api/status` und in `GET /api/network`.
 - **Audit-Log**: jede angenommene Änderung an `/api/config`, jeder
   `/api/outputs/test`, jeder `/api/notify/test`, jeder **erfolgreiche und
   fehlgeschlagene Login**, die Ersteinrichtung, jede angeforderte
@@ -142,7 +154,11 @@ Statistik-Schreibers, nicht nur die Dateien — siehe [STATS.md](STATS.md).
 - **CORS**: nur Origins aus `cors` bekommen `Access-Control-Allow-Origin`
   (Standard: **leer** = keine). Cross-Origin-Anfragen können **nur GET** sein
   (`Allow-Methods: GET, OPTIONS`). Die Konsole selbst ist same-origin und braucht
-  kein CORS.
+  kein CORS. Eine abgewiesene Herkunft ist **nicht mehr stumm**: die Antwort
+  trägt `X-LF-Origin-Allowed: 0`, der Dienst schreibt eine `warn`-Zeile (Scope
+  `http`, gedrosselt auf eine je Herkunft und Minute), und
+  [`GET /api/access`](API.md#get-apiaccess--immer-offen) sagt es dem Aufrufer direkt.
+  Ausgeliefert wird die **Liste** der erlaubten Herkünfte dabei nie.
 - **CSRF**: eine mutierende Anfrage (`POST/PUT/PATCH/DELETE`) **ohne gültiges
   Bearer-Token** wird mit 403 abgelehnt, außer sie bringt `Sec-Fetch-Site:
   same-origin` (vom Browser gesetzt, nicht fälschbar) **oder** den Header
@@ -163,11 +179,18 @@ Statistik-Schreibers, nicht nur die Dateien — siehe [STATS.md](STATS.md).
   jede mutierende Anfrage ohne Token `Sec-Fetch-Site: same-origin` oder
   `X-LF-Console: 1` (siehe unten). Auch der Login selbst geht durch diese Prüfung.
 - **Konsole**: feste Datei-Allowlist (`/`, `/index.html`, `/styles.css`,
-  `/app.js`, `/login`, `/login.js`, `/setup`, `/setup.js` — alles andere 404),
+  `/app.js`, `/login`, `/login.html`, `/login.js`, `/setup`, `/setup.html`,
+  `/setup.js` — alles andere 404),
   strikte CSP, `X-Frame-Options: DENY`, `nosniff`, kein Framing, keine externen
   Ressourcen. Ohne Anmeldung liefern `/` und `/app.js` nur eine Umleitung auf
   `/login` bzw. `/setup`; öffentlich sind ausschließlich diese beiden Seiten,
   ihre Skripte und das Stylesheet.
+- **Herkunft der eigenen Konsole**: eine Anfrage, deren `Origin` genau die
+  Adresse ist, unter der sie hier ankam, gilt immer als erlaubt. Ein Browser
+  schickt `Origin` auch bei einer same-origin-POST — ohne diese Regel meldete
+  jeder Login und jedes Speichern eine CORS-Warnung, die sachlich falsch ist.
+  Gefälscht werden kann damit nichts: den `Host`-Kopf setzt der Browser selbst,
+  und wer kein Browser ist, unterliegt CORS ohnehin nicht.
 - **Timeouts**: `requestTimeout` 15 s, `headersTimeout` 10 s, `keepAliveTimeout`
   5 s — hängende Verbindungen binden keine Ressourcen. Tote WebSocket-Clients
   werden per Ping/Pong alle 30 s erkannt und getrennt.
@@ -183,11 +206,119 @@ Statistik-Schreibers, nicht nur die Dateien — siehe [STATS.md](STATS.md).
   ist ein leerer Knoten, dessen Zeichen aus dem Stylesheet kommt. Zeilen über
   4096 Bytes werden für die Live-Ansicht mit einem sichtbaren Vermerk gekürzt;
   die aufgezeichnete Datei bleibt davon unberührt byteweise vollständig.
-- **WebSocket**: Clients dürfen genau **eine** Nachricht senden
-  (`{"type":"rawtap","on":…}`); alles über 256 Bytes wird verworfen, ohne
-  geparst zu werden, und alles andere ignoriert.
+- **Namen aus dem Strom sind Fremdeingabe**: ein Spieler wählt seinen Codenamen
+  selbst, und nichts am TCP-Feed ist beglaubigt. Spieler- und Teamnamen werden
+  deshalb beim Einlesen von Steuerzeichen (C0 **und** C1) befreit und auf 64
+  Zeichen gekürzt, bevor sie irgendwo landen — sonst stünde ein NUL oder eine
+  ANSI-Fluchtsequenz in der lesbaren Ereignis-Logdatei und auf der Standardausgabe
+  des Dienstes. Eine Entität, die sich `__proto__` nennt, wird abgewiesen, statt
+  den Prototyp der Spielerliste zu ersetzen.
+- **CSV-Formeln**: eine Zelle, die mit `=`, `+`, `-`, `@`, Tabulator oder CR
+  beginnt, führt Excel, LibreOffice und Google Sheets als **Formel** aus — auch
+  `=cmd|'…'!A0`, das nach einem externen Programm fragt. Da ein Spielername in
+  jeder Statistikdatei landet und die Dateien für deutsches Excel geschrieben
+  werden (`;`, BOM), markiert `csvCell()` solche Zellen mit einem
+  vorangestellten Apostroph als Text. Eine echte Zahl — auch eine negative —
+  bleibt unangetastet.
+- **WebSocket**: Clients dürfen genau **zwei** Nachrichten senden —
+  `{"type":"rawtap","on":…}` und `{"type":"subscribe",…}` (Auswahl des Feeds und
+  der Ereignis-Bündelung, [API.md](API.md#die-nachrichten-die-ein-client-senden-darf)).
+  Alles über 256 Bytes wird verworfen, ohne geparst zu werden, und alles andere
+  ignoriert. Beide Nachrichten sind read-only — sie ändern nur, **was** dieser
+  eine Client bekommt, nie etwas am Dienst. Ein abgelehnter Handshake nennt
+  seinen Grund in `X-LF-Reason` und im Log, statt stumm zu schließen.
 - **config.json** wird mit Dateirechten `0600` geschrieben. Secrets stehen dort
   im Klartext (lokaler Einzel-PC) — für Ports/Token besser `.env` nutzen.
+
+## Anzeige auf einem zweiten Rechner anbinden
+
+Der häufigste Fall: die Bridge läuft auf dem Hallen-PC, die Beamer-Anzeige auf
+einem **anderen** Rechner im selben Netz. Das scheitert erfahrungsgemäß genau
+hier — der Browser blockt still, die Anzeige bleibt leer, und nichts sagt warum.
+
+### Die zwei Einstellungen
+
+```ini
+# .env auf dem HALLEN-PC (dem mit lf_live), danach Dienst neu starten
+LF_API_TOKEN=<mind. 24 zufällige Zeichen>
+LF_CORS_ORIGINS=http://anzeige-pc:5173
+```
+
+| | wofür | wo eintragen |
+|---|---|---|
+| **Zugriffs-Token** | lässt das Programm überhaupt an die Daten | `LF_API_TOKEN` oder Konsole → Einstellungen |
+| **Herkunftsfreigabe** | erlaubt dem **Browser**, die Antwort zu benutzen | `LF_CORS_ORIGINS` oder Konsole → Einstellungen |
+
+`LF_CORS_ORIGINS` ist eine Komma-Liste von **Origins**, nicht von URLs: Schema +
+Host + Port, ohne Pfad und ohne Schrägstrich am Ende. `http://anzeige-pc:5173`
+ist etwas anderes als `http://192.168.1.77:5173` und etwas anderes als
+`http://anzeige-pc` — eingetragen werden muss **genau das**, was im
+Adressfeld des Anzeige-Browsers vor dem Pfad steht.
+
+> **Der WebSocket braucht die Herkunftsfreigabe NICHT.** Browser wenden CORS auf
+> WebSocket-Verbindungen nicht an. `ws://hallen-pc:8080/ws?token=…` funktioniert
+> also allein mit dem Token. Erst ein `fetch()` auf `/api/*` von derselben Seite
+> braucht den `cors`-Eintrag. Wer nur den WebSocket nutzt, kommt mit **einer**
+> Einstellung aus — wer beides nutzt, braucht beide. Diese Asymmetrie kostet die
+> meiste Zeit bei der Fehlersuche.
+
+### Prüfen, ob es geht
+
+Vom **Anzeige-Rechner** aus, nicht vom Hallen-PC:
+
+```bash
+# 1. Ist der Dienst überhaupt da?
+curl -i http://hallen-pc:8080/api/health
+
+# 2. Kommt genau MEINE Kombination aus Token und Herkunft durch?
+curl -i -H "Origin: http://anzeige-pc:5173" \
+        -H "Authorization: Bearer $LF_API_TOKEN" \
+        http://hallen-pc:8080/api/access
+```
+
+`/api/access` ist der Prüfstein und braucht selbst keine Anmeldung. Gut ist:
+
+```jsonc
+{ "data": { "authenticated": true, "originAllowed": true,
+            "tokenAccepted": true, "problems": [] } }
+```
+
+Steht in `problems` etwas, steht dort im Klartext, was zu tun ist. Im Browser
+derselbe Test aus der Konsole der Entwicklerwerkzeuge der Anzeigeseite:
+
+```js
+fetch("http://hallen-pc:8080/api/access", { headers: { Authorization: "Bearer <token>" } })
+  .then(r => r.json()).then(x => console.log(x.data.problems));
+```
+
+### Die typischen Fehler, und woran man sie erkennt
+
+| Symptom | Ursache | Abhilfe |
+|---|---|---|
+| Browser-Konsole: *„blocked by CORS policy"*; Antwort hat **kein** `Access-Control-Allow-Origin`, dafür `X-LF-Origin-Allowed: 0` | Herkunft nicht in `cors` | Origin in `LF_CORS_ORIGINS` eintragen — **genau** so, wie er im Adressfeld steht |
+| `401 {"error":"unauthorized","tokenSent":false}` | kein Token mitgeschickt | `Authorization: Bearer <token>`, beim WebSocket `?token=<token>` |
+| `401 … "tokenSent":true` | falsches Token | Token abgleichen (Groß-/Kleinschreibung, Leerzeichen am Ende) |
+| WebSocket schließt sofort, JS meldet nur ein nacktes `error` | Handshake abgelehnt | Netzwerk-Tab: Status + Header `X-LF-Reason` (`unauthorized` / `not_found`). Im Dienst-Log steht dieselbe Ablehnung mit IP und Herkunft |
+| `/api/health` von außen nicht erreichbar | Dienst hört nur lokal, oder Firewall | `LF_HTTP_HOST=0.0.0.0`; Windows-Firewall für den Port freigeben |
+| Alles geht, aber nach einer Weile `429` | Rate-Limit | seltener pollen, besser den WebSocket nutzen; notfalls `LF_RATE_LIMIT_PER_MIN` anheben |
+| Anzeige zeigt Daten, aber die Uhr läuft falsch | Restzeit selbst gerechnet | `clock.direction` / `clock.displayMs` verwenden — [API.md](API.md#die-uhr--die-eine-regel-an-der-alles-hängt) |
+
+Zusätzlich schreibt der Dienst bei jeder abgewiesenen Herkunft eine `warn`-Zeile
+(Scope `http`, höchstens eine je Herkunft und Minute) und bei jedem abgelehnten
+WebSocket-Handshake eine im Scope `ws`. **Eine stumme Abweisung gibt es nicht
+mehr** — sie steht entweder in der Antwort, im Header oder im Log.
+
+Verraten wird dabei nichts Neues: `/api/access` sagt nur, was der Aufrufer
+ohnehin selbst messen kann (seine eigene Herkunft, ob sein Token akzeptiert
+wurde, ob ein Login verlangt wird). Die **Liste** der erlaubten Herkünfte und
+alles über das Token selbst bleiben drin.
+
+### Und wenn die Anzeige schreiben können soll?
+
+Soll sie nicht. Alles Neue für Anzeigen ist **read-only** (`GET`). Für
+mutierende Anfragen gilt unverändert: Cross-Origin geht nur `GET`
+(`Allow-Methods: GET, OPTIONS`), und ohne gültiges Bearer-Token braucht ein
+`POST` zusätzlich `Sec-Fetch-Site: same-origin` oder `X-LF-Console: 1`.
 
 ## Was NICHT geschützt ist (bewusst)
 
@@ -210,9 +341,22 @@ Statistik-Schreibers, nicht nur die Dateien — siehe [STATS.md](STATS.md).
   `LF_ADMIN_PASSWORD` in die `.env` schreiben, dann gibt es das Fenster nie.
   Der Dienst warnt bei jedem Start, solange noch nichts eingerichtet ist, und
   schickt es über einen eingerichteten Kanal auch heraus.
-- `/api/health` und `/api/auth/session` bleiben immer ohne Anmeldung erreichbar
-  (für Monitoring bzw. die Login-Seite). Sie verraten nur, ob der Dienst läuft,
-  ob gerade ein Match aktiv ist und ob ein Login verlangt wird.
+- `/api/health`, `/api/auth/session` und `/api/access` bleiben immer ohne
+  Anmeldung erreichbar (für Monitoring, die Login-Seite und die Fehlersuche an
+  einer Anzeige auf einem zweiten Rechner). Sie verraten nur, ob der Dienst
+  läuft, ob gerade ein Match aktiv ist, ob ein Login verlangt wird — und, bei
+  `/api/access`, was der Aufrufer über **sich selbst** ohnehin messen kann: die
+  eigene Herkunft, ob sie freigegeben ist (das sagt schon der fehlende
+  `Access-Control-Allow-Origin`-Header), und ob das eigene Token angenommen
+  wurde. Die Liste der erlaubten Herkünfte und alles über das Token selbst
+  bleiben drin. `/api/access` liegt **hinter** dem Rate-Limit.
+- **Der WebSocket unterliegt nicht der `cors`-Liste** — Browser wenden CORS auf
+  WebSocket-Verbindungen schlicht nicht an. Für `/ws` ist also **allein das
+  Zugriffs-Token** (bzw. das Sitzungs-Cookie) die Schranke. Wer den Live-Zustand
+  im LAN nicht jedem zeigen will, muss `LF_API_TOKEN` setzen; eine leere
+  `cors`-Liste schützt `/ws` nicht. Das ist bewusst so gelassen: eine Anzeige
+  auf einem zweiten Rechner ist genau so ein Cross-Origin-Browser-Client, und
+  eine Sperre hier würde den vorgesehenen Fall unmöglich machen.
 
 ## Empfehlung für ein nicht-vertrauenswürdiges Netz
 

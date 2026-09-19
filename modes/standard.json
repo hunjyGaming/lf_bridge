@@ -1,0 +1,11 @@
+{
+  "beschreibung": "Standard — das normale Spiel Ihrer Anlage. Die Missionsnummer 7 ist an der Anlage gemessen: vier echte Mitschnitte vom 19.09.2026 tragen alle \"1\\t7\\t| Standard LZ - 2 Teams |\". Familie sm5, eigenes Anzeigeprofil standard.",
+  "schluessel": "standard",
+  "anzeigename": "Standard",
+  "missionsnummern": [
+    7
+  ],
+  "familie": "sm5",
+  "profil": "standard",
+  "hinweis": "Der Anzeigename bleibt bewusst schlicht \"Standard\" und nicht \"| Standard LZ - 2 Teams |\": die Anlage schickt ihren eigenen Namen in der Typ-1-Zeile mit, und der gewinnt zur Laufzeit immer — im Betrieb steht also ohnehin der Anlagenname da. Der Registry-Name ist nur der Rückfall, wenn die Anlage nichts mitschickt, und dafür ist der Zierrahmen aus senkrechten Strichen nur Ballast. Weitere Standard-Varianten Ihrer Anlage brauchen keine eigene Datei: einfach ihre gemessene Nummer zusätzlich in \"missionsnummern\" schreiben, z. B. [7, 9]."
+}

@@ -18,6 +18,7 @@ TCP-Stream kommt. Dies ist die **einzige** Protokoll-Referenz des Projekts.
 - [Typ-7 (SM5-Endblock) im Detail](#typ-7-sm5-endblock-im-detail)
 - [Typ-4-Event-Codes: gemeinsame Match-Steuerung](#typ-4-event-codes-gemeinsame-match-steuerung)
 - [Typ-4-Event-Codes: Space Marines 5](#typ-4-event-codes-space-marines-5)
+- [Typ-4-Event-Codes: Standardmodus (Nummer 7)](#typ-4-event-codes-standardmodus-nummer-7--an-der-eigenen-anlage-gemessen)
 - [Typ-4-Event-Codes: Laserball](#typ-4-event-codes-laserball)
 - [Typ-4-Event-Codes: 7SM / Nexus](#typ-4-event-codes-7sm--nexus)
 - [Spielvarianten](#spielvarianten)
@@ -99,7 +100,7 @@ Zeilentyp**.
 
 **Spielernamen** kommen aus der Typ-3-Zeile (Feld nach `player`). Optional
 überschreibt eine selbst gepflegte Namensliste (`data/roster.csv`, siehe
-[CONFIG.md](CONFIG.md#namensliste-optional)) einzelne Namen/Teams. lf_live
+[CONFIG.md](CONFIG.md#namensliste)) einzelne Namen/Teams. lf_live
 kontaktiert **keine externen Dienste**.
 
 Das Format ist **versioniert** — Zeile 0 nennt die Version (z. B. `2.006`).
@@ -168,22 +169,49 @@ identische Ergebnisse.
 | `0` | info / Kopf | `0  file-version  program-version  centre` | 1×, erste Zeile | ⚪ ignoriert (Version nicht ausgewertet) |
 | `1` | mission | `1  type  desc  start  [duration]  [penalty]` — `duration` ab v2.001, `penalty` ab v2.003 | 1×, nach Typ 0 | `type` → **Spielmodus**, `desc` → Anzeigename, `duration` → Spieluhr. Details: [Typ-1 im Detail](#typ-1-mission-im-detail) |
 | `2` | team | `2  index  desc…  colour-enum  colour-desc  [#rgb]` — `#rgb` ab v2.004 | je Team 1×, „Neutral" zuletzt | → `teams[index] = {name, color}` |
-| `3` | entity-start | `3  time  id  type  desc  team  level  category  [battlesuit]  [memberId]` — `battlesuit` ab v2.003, `memberId` in späten 2.006 | je Entity 1×, **nach `0100`** | wenn `type == player` und `team != 5` → Spieler anlegen; `level`/`category`/`battlesuit`/`memberId` werden **jetzt gemerkt** |
+| `3` | entity-start | `3  time  id  type  desc  team  level  category  [battlesuit]  [memberId]` — `battlesuit` ab v2.003, `memberId` in späten 2.006 | je Entity 1×, **nach `0100`** | wenn die Spalte `type` den Wert `player` trägt → Spieler anlegen; `level`/`category`/`battlesuit`/`memberId` werden **jetzt gemerkt**. Zur Spalte statt zum Wort: [Typ-3 im Detail](#typ-3-login-nach-0100-im-detail) |
 | `4` | **event** | `4  time  code  <actor>  <verb…>  <target>` | laufend | siehe Code-Tabellen |
 | `5` | score | `5  time  entity  old  delta  new` | begleitet jedes werterelevante Typ-4-Event | **Punktestand-Autorität** für alle Modi → `scores` / `players[id].score`, `scoreSource='tdf'`. Details: [Typ-5 im Detail](#typ-5-score-im-detail) |
 | `6` | entity-end | `6  time  id  type  score` — `type` = Exit-Code, Zuordnung **unbestätigt**, siehe [Exit-Codes](#die-exit-codes-der-typ-6-zeile--unbestätigt) | je Entity 1× (am Ende oder bei Elimination mitten im Spiel) | → `match_summary`-Ereignis (informativ, verändert den Zustand nicht); Exit-Code wird in `exitCodes` festgehalten |
-| `7` | sm5-stats | `7  id  <23 benannte Felder>` = 24 Felder + Typ-Spalte | je Entity 1×, **nur SM5** — in Laserball nicht vorhanden | **offizielle Endstatistik** → `players[id].official`, überschreibt die SM5-Live-Zähler, `statsSource='tdf7'`. Details: [Typ-7 im Detail](#typ-7-sm5-endblock-im-detail) |
+| `7` | sm5-stats | `7  id  <23 benannte Felder>` = 24 Felder + Typ-Spalte | je Entity 1× — **in Laserball nicht vorhanden und, gemessen, auch im Standardmodus (Nummer 7) nicht** | **offizielle Endstatistik** → `players[id].official`, überschreibt die SM5-Live-Zähler, `statsSource='tdf7'`. Details: [Typ-7 im Detail](#typ-7-sm5-endblock-im-detail) |
 | `8` | — | nicht dokumentiert / nicht beobachtet | — | – |
 | `9` | player-state | `9  time  entity  state` — ab v2.005 (SM5); in Laserball ab v2.004 | laufend | → `players[id].status` |
 | `3`–`9` | (alle In-Game-Zeilen) | Spalte 1 = Spielzeit in ms | – | → `elapsedTime`. **Ausnahme Typ 7**: hat keine `time`-Spalte und lässt `elapsedTime` unberührt |
 
-**Reihenfolge im echten Betrieb:** `0` → `1` → `2` (Teams) → `0100` (Start) →
-viele `3` (Logins, sobald Spieler aktiviert werden) → `4`/`5`/`9` (Spielverlauf)
-→ `6`/`7` (Endabrechnung) → `0101`. **`0100` leert die Spielerliste** — Logins
-kommen im echten Ablauf *danach*. `lf_simulate` hält diese Reihenfolge ein.
+**Reihenfolge im echten Betrieb — an vier echten Mitschnitten gemessen:**
+`0` → `1` → `2` (Teams) → `0100` (Start) → viele `3` (Logins, sobald Spieler
+aktiviert werden) → `4`/`5`/`9` (Spielverlauf) → **`0101`** → Typ-6-Block.
+**`0100` leert die Spielerliste** — Logins kommen im echten Ablauf *danach*.
+`lf_simulate` hält diese Reihenfolge ein.
 
-Die Typ-7-Zeilen kommen **vor** `0101` — die offiziellen Endzahlen stehen also
-fest, bevor das Match als beendet gilt und weggeschrieben wird.
+> **KORREKTUR (19.09.2026, vier echte Mitschnitte, Modus 7 „Standard LZ - 2
+> Teams").** Hier stand bis dahin, die Reihenfolge sei `6`/`7` → `0101`. Das ist
+> **falsch herum**. Gemessen kommt **`0101` zuerst**, und der Typ-6-Block folgt
+> unmittelbar danach — in allen vier Mitschnitten, ohne Ausnahme:
+>
+> | Mitschnitt | `0101` in Zeile | Typ-6-Block | Typ-7 |
+> |---|---|---|---|
+> | 01:46:50 | 9200 | 9202–9237 (36×) | **0** |
+> | 01:59:42 | 9719 | 9721–9766 (46×) | **0** |
+> | 02:13:07 | 13916 | 13917–13963 (47×) | **0** |
+> | 02:26:46 | 9867 | 9869–9904 (36×) | **0** |
+>
+> **Einzelne** Typ-6-Zeilen kommen sehr wohl vorher: im Mitschnitt von 02:13:07
+> steht eine in Zeile 13696, gut 200 Zeilen vor dem `0101` — ein Spieler, der
+> mitten im Spiel ausgeschieden ist (Exit-Code `01`). Nur der **Block** liegt
+> hinter dem `0101`.
+>
+> **Was das für lf_live bedeutet: nichts, und das ist der Punkt.** Die
+> Ende-Erkennung fragt nie nach einer Reihenfolge. `0101` gewinnt immer sofort
+> (`mission_end`), und der Typ-6/7-Pfad ist nur der Ersatzweg für den Fall, dass
+> gar kein `0101` kommt. Dass der Block *danach* liegt, heißt lediglich: im
+> Normalbetrieb wird dieser Ersatzweg nie gebraucht. Siehe
+> [Wann ein Match als beendet gilt](#wann-ein-match-als-beendet-gilt).
+
+Wo es Typ-7-Zeilen gibt, kommen sie **vor** `0101` — die offiziellen Endzahlen
+stünden also fest, bevor das Match als beendet gilt. Im Standardmodus dieser
+Anlage gibt es sie aber überhaupt nicht, siehe
+[Typ-7 im Detail](#typ-7-sm5-endblock-im-detail).
 
 ---
 
@@ -250,8 +278,24 @@ Fallstricke dazu stehen unter
   Andere Modi (7SM/Nexus, Junior, diverse Varianten) haben eigene, öffentlich
   nicht dokumentierte Typ-Nummern. Wie lf_live damit umgeht und wie man die
   Nummern der eigenen Anlage ermittelt: [GAMEMODES.md](GAMEMODES.md).
-- **Team-Index `5`** wird vom Parser als „kein echtes Team" behandelt (Neutral /
-  Nicht-Spieler) und beim Login übersprungen.
+- **Neutral ist an dieser Anlage Team-Index `2`, nicht `5`.** Gemessen an vier
+  echten Mitschnitten (19.09.2026): die Typ-2-Zeilen lauten
+  `2 0 Blaues Team`, `2 1 Rotes Team`, `2 2 Neutral`, und **jede**
+  Nicht-Spieler-Entity (`gallery-target`, `generator-target`, `standard-target`,
+  `beacon`) trägt Team `2` — 24 von 24 über alle vier Mitschnitte. Ein Index `5`
+  kam in keinem einzigen vor.
+
+  > **KORREKTUR.** Hier stand, Team-Index `5` sei „kein echtes Team". Der
+  > Parser filterte danach (`teamId !== '5'`) und wurde allein davon gerettet,
+  > dass er **zusätzlich** auf die Entity-Art prüft. Der Filter auf `5` steht
+  > weiterhin im Code — er schadet nichts und deckt Anlagen ab, die es
+  > tatsächlich so halten —, aber **tragend ist er nicht**. Tragend ist die
+  > Spalte `type`: nur `player` wird angelegt. Siehe
+  > [Typ-3 im Detail](#typ-3-login-nach-0100-im-detail).
+  >
+  > **Team-Index ist keine Konstante.** Welcher Index „Neutral" bedeutet, sagt
+  > die Anlage in ihren eigenen Typ-2-Zeilen. Nichts darf darauf bauen, dass es
+  > `2` oder `5` ist.
 
 ---
 
@@ -331,10 +375,40 @@ der optionalen Namensliste, falls vorhanden.
 
 `3  <time>  <id>  player  <name…>  <team>  <level>  <category>  [battlesuit]  [memberId]`
 
-Der Parser sucht ab dem Token `player` die **Signatur „drei Zahlen in Folge"**
-(Team, Level, Category); alle Tokens zwischen `player` und dieser Dreiergruppe
-sind der Name. Entities mit `team == 5` (Neutral / Nicht-Spieler wie Targets,
-Referees) werden **nicht** als Spieler angelegt.
+**Die Entity-Art steht in einer eigenen Spalte** — `type`, laut Schema-Zeile
+`;3/entity-start  time  id  type  desc  team  level  category  battlesuit  memberId`
+die vierte. Gemessene Werte an dieser Anlage: `player`, `standard-target`,
+`gallery-target`, `generator-target`, `beacon`. Der Parser liest sie **dort**
+und legt nur `player` als Spieler an.
+
+> **KORREKTUR und Umbau (19.09.2026).** Bis dahin suchte der Parser mit
+> `cols.indexOf('player')` das **Wort** `player` irgendwo in der Zeile. Das ging
+> gut, solange keine Nicht-Spieler-Entity so **heißt** — die Namen der Ziele
+> vergibt aber der Betreiber an der Konsole frei. Eine Punktestation namens
+> „player" wäre als Spieler angelegt worden, mit `standard-target` als Kennung.
+> Zusätzlich hing das Ganze am Whitespace-Split.
+>
+> Jetzt gilt: liegt eine Schema-Zeile für Typ 3 vor **und** lässt sich die
+> Datenzeile mit ihr zur Deckung bringen (TAB-Spalten, oder das eine Feld mit
+> Leerzeichen — der Name — wieder zusammengefaltet), wird die Spalte `type`
+> gelesen. Sonst **ändert sich gar nichts**: dann läuft weiterhin genau die alte
+> Suche nach dem Wort, Byte für Byte. Der Rückfall ist Absicht — an dieser
+> Stelle hängt die gesamte Spielererkennung, und eine Anlage ohne
+> Schema-Zeilen darf davon nichts merken.
+
+Ab der Spalte `type` sucht der Parser die **Signatur „drei Zahlen in Folge"**
+(Team, Level, Category); alle Tokens dazwischen sind der Name. Zusätzlich
+werden Entities mit `team == 5` nicht angelegt — dieser Filter stammt aus der
+Fremdquelle, ist an dieser Anlage aber **wirkungslos**, weil Neutral hier
+Index `2` ist (siehe oben). Tragend ist allein die Spalte `type`.
+
+**Die `id`-Spalte ist keine Zahl.** Gemessen trägt sie `#` plus acht
+alphanumerische Zeichen (`#aA1bB2cC`, `#dD4eE5fF`); Nicht-Spieler-Entities
+tragen `@` plus eine kleine Zahl (`@30`, `@91`). Sie darf nirgends numerisch
+behandelt, verglichen oder sortiert werden. Die **eigentliche Mitgliedsnummer**
+steht in der letzten Spalte `memberId` und sieht ganz anders aus:
+`21-101-10001` — siehe
+[INTEGRATION.md → Mitglied oder Gast](INTEGRATION.md#mitglied-oder-gast--und-was-offen-bleibt).
 
 `level` und `category` wurden früher verworfen und werden **jetzt gemerkt**:
 `category` ist die SM5-Rolle und wird zusätzlich als Klartext (`roleLabel`)
@@ -420,6 +494,26 @@ geführt.
 > 120-Sekunden-Watchdog gelaufen). Maßgeblich ist jetzt allein die
 > **Vollständigkeit**, siehe
 > [Endabrechnung ≠ einzelne Elimination](#endabrechnung--einzelne-elimination).
+
+> **Die Roh-Mitschnitte sind jetzt da — und sie stützen die Fremdquelle
+> (19.09.2026, vier Standardspiele).** Gezählt über alle vier:
+>
+> | Exit-Code | Vorkommen | wo |
+> |---|---|---|
+> | `02` | 165 | ausnahmslos im Typ-6-Block **hinter** dem `0101` |
+> | `01` | 1 | einzeln **mitten im Spiel**, 220 Zeilen vor dem `0101` |
+>
+> Das ist genau die Zuordnung der Fremdquelle: `02` = reguläres Ende, `01` =
+> vorzeitiges Ausscheiden. Die Beobachtung vom 17.09.2026 („reguläres
+> Standardspiel meldet `01`") lässt sich an den Mitschnitten **nicht**
+> bestätigen; vermutlich wurde dort eine einzelne Ausscheider-Zeile gesehen.
+> Die Tabelle oben bleibt trotzdem `unbestätigt`: belegt sind jetzt `01` und
+> `02`, nicht `04` und `17`.
+>
+> **Am Code ändert das nichts, und das ist Absicht.** Die Erkennung wieder an
+> `02` zu hängen, hieße sich auf eine Zuordnung zu verlassen, die zwei
+> Beobachtungen derselben Anlage widersprüchlich beschreiben. Die
+> Vollständigkeitsregel funktioniert ohne sie.
 > Der Exit-Code wird nur noch **festgehalten** — er ist der Wert, gegen den die
 > Mitschnitte auszuwerten sind, kein Wert, auf den sich eine Entscheidung
 > stützen darf.
@@ -452,6 +546,37 @@ und `id`, ab Spaltenindex 2.
 
 Typ-7-Zeilen kommen je Entity einmal am Matchende, **vor** `0101`. In Laserball
 gibt es sie nicht.
+
+> ### Im Standardmodus (Nummer 7) gibt es **keine** Typ-7-Zeilen
+>
+> **Gemessen, nicht vermutet.** In vier vollständigen Mitschnitten echter
+> Standardspiele vom 19.09.2026 — zusammen 42 870 Zeilen, 141 Spieler, jedes
+> Spiel regulär mit `0101` beendet — steht **keine einzige** Typ-7-Zeile. Der
+> Endblock, den die Fremdquelle für SM5 beschreibt, kommt in diesem Modus nie.
+>
+> **Die Folge für den Betrieb:** alles, was ausschließlich aus Typ 7 stammt,
+> bleibt im Standardmodus **dauerhaft leer** — das sind
+>
+> - `livesLeft` (Leben),
+> - `shotsLeft` (Munition),
+> - die **amtliche** Trefferquote `accuracy` samt `shotsFired`/`shotsHit` aus
+>   der Anlagenrechnung.
+>
+> Was stattdessen angezeigt und geschrieben wird, sind die **Live-Zähler** von
+> lf_live aus dem Ereignisstrom. Sie tragen `statsSource: "live"`,
+> `accuracySource: "live"` und `accuracyIsEstimate: true`. Eine Korrektur am
+> Matchende findet **nicht** statt, weil es nichts gibt, womit korrigiert werden
+> könnte.
+>
+> **Das ist kein Fehler und keine kaputte Anlage.** Leere Felder in einem
+> Standardspiel sind der Normalfall. Wer sie für einen Ausfall hält, sucht an
+> der falschen Stelle. Dasselbe in Betreibersprache steht in
+> [GAMEMODES.md](GAMEMODES.md#warum-im-standardmodus-leben-munition-und-trefferquote-leer-bleiben).
+>
+> **Warum `shotsFired` dadurch zu niedrig bleibt.** Laserforce meldet keinen
+> eigenen Schuss-Event; lf_live kann nur die Schüsse zählen, die als Treffer
+> oder Fehlschuss sichtbar werden. In SM5 korrigiert der Typ-7-Block das am
+> Ende. Im Standardmodus bleibt es bei der **Untergrenze**.
 
 **Die Zeile hat keine `time`-Spalte** — Spalte 1 ist die Entity-ID, nicht die
 Spielzeit. lf_live lässt `elapsedTime` bei Typ-7-Zeilen deshalb bewusst unberührt.
@@ -548,6 +673,86 @@ Klammern sind aus der Spezifikation, nicht von lf_live gezählt.
 | `0B03` | Base Award | score | Bei vorzeitigem Spielende durch Team-Elimination wird ein Ziel automatisch einem Spieler des Siegerteams zugesprochen. +1001. | verified |
 
 `0100` / `0101` siehe [gemeinsame Match-Steuerung](#typ-4-event-codes-gemeinsame-match-steuerung).
+
+---
+
+## Typ-4-Event-Codes: Standardmodus (Nummer 7) — an der eigenen Anlage gemessen
+
+Modus-Nummer `7`, Anzeigename der Anlage `| Standard LZ - 2 Teams |`, Familie
+`sm5`. **Einzige Quelle: vier vollständige Roh-Mitschnitte vom 19.09.2026**
+(42 870 Zeilen, 141 Spieler, jedes Spiel regulär mit `0101` beendet). Keine
+Fremdquelle kennt diese Codes.
+
+> **Die Mitschnitte selbst liegen nicht im Repository und dürfen es nie.** Sie
+> enthalten echte Spielernamen und weltweit eindeutige Laserforce-Mitglieds-IDs.
+> **Sämtliche Kennungen, Namen und Mitgliedsnummern in dieser Datei, in
+> `src/eventCatalog.js` und in `scripts/check.js` sind erfunden** und nur in der
+> gemessenen *Form* nachgebildet. Nur die Zahlen — Häufigkeiten, Anteile,
+> Zeitabstände — stammen aus den Mitschnitten.
+
+Der komplette SM5-Satz oben gilt hier unverändert mit; die Tabelle listet **nur
+das, was zusätzlich vorkommt**. Die Anlage schickt zu jedem Code ein **deutsches
+Klartext-Verb** in derselben Zeile mit — daraus, und aus Häufigkeit, Actor/Ziel,
+Teamzugehörigkeit, Punktezeilen und Spieler-Zuständen, stammen die Deutungen
+unten. Nichts davon ist geraten; wo die Daten nichts hergeben, steht das da.
+
+| Code | Klartext der Anlage | Label | Kategorie | Gesamt | Bedeutung und Beleg | Status |
+|---|---|---|---|---|---|---|
+| `0208` | `<#A> " phasert " <#B>` | Player Hit (Eigenbeschuss) | combat | **48** | **Eigenbeschuss.** 48 von 48 Vorkommen zwischen Spielern **desselben** Teams, während `0205`/`0206` in denselben Mitschnitten **5333 von 5333** Mal gegnerische Teams betrafen. Actor **−50** (48 von 48 Punktezeilen), Ziel ohne Punktezeile. Deaktiviert in der Regel nicht: nur 11 von 48 Zielen gingen binnen 1,5 s in Zustand ≠ 0 (Vergleich `0205`: 68/142, `0206`: 4688/5191). | **verified** |
+| `0402` | `<#A> " aktiviert Unverwundbarkeit"` | Unverwundbarkeit aktiviert | special | **38** | Nur Actor, kein Ziel, **keine** Punktezeile (38/38). 11 verschiedene Akteure über **alle** Login-Level 0–3 → keine rollen- oder levelgebundene Fähigkeit. Bei 8 von 38 steht auf demselben Zeitstempel ein `0E00` „wird zum Held befördert" desselben Spielers — ob der Rang die Fähigkeit auslöst, ist damit **nicht** belegt. | **verified** |
+| `0408` | `<#A> " aktiviert Vergeltung"` | Vergeltung aktiviert | special | **31** | Nur Actor, kein Ziel, **keine** Punktezeile (31/31), und nur in **zwei** der vier Mitschnitte. Beide beobachteten Akteure hatten Login-Level 3 — bei **genau zwei** verschiedenen Spielern ist daraus keine Rollenbindung abzuleiten, und sie wird hier auch nicht behauptet. | **verified** |
+| `0700` | `"Zustand von " <@Z> " ist kritisch"` | Generator kritisch | special | **13** | **Kein Actor** — das erste Feld hinter dem Code ist Text. Das Ziel war in allen 13 Fällen dieselbe Nicht-Spieler-Entity `@30` (`generator-target`, Name „Generator", Team 2). Keine Punktezeile. | **verified** |
+| `0701` | `<#A> " wurde verstrahlt"` | Verstrahlung | combat | **212** | Nur Actor, kein Ziel, **keine** Punktezeile (212/212). **Folgt immer auf `0700`:** kleinster gemessener Abstand zur vorangehenden Generatorwarnung 8025 ms, größter 23 933 ms — und **jede** der 13 Warnungen zog genau **eine** Serie nach sich (13 Serien, je rund 14 s, Wiederholung je Spieler im Median 5,4 s). In 193 von 212 Fällen geht der Spieler binnen 500 ms in Zustand ≠ 0, wird also deaktiviert. | **verified** |
+| `0D05` | `<#A> " blastet " <#B>` | Blast (Treffer) | combat | **1** | **Genau ein** Vorkommen. Gleiches Verb wie `0D06`, Ziel im Gegnerteam, Actor +110, Ziel ohne Punktezeile — aber das Ziel ging **nicht** in Zustand ≠ 0. Das legt dasselbe Verhältnis wie `0205`:`0206` nahe (Treffer ohne Deaktivierung). Bei n=1 **nicht belegt**. | **unverified** |
+| `0D06` | `<#A> " blastet " <#B>` | Blast (Deaktivierung) | combat | **78** | 78 von 78 gegen **gegnerische** Teams. Actor bekommt eine Punktezeile im selben Bereich wie `0206` (gemessen +60 bis +140), Ziel keine. In **75 von 78** geht das Ziel binnen 1,5 s in Zustand ≠ 0 (Vergleichswert `0206`: 4688/5191) → Deaktivierung. **Mehrere Ziele auf demselben Zeitstempel** (beobachtet bis zu 2) → Mehrfach-/Flächentreffer. | **verified** |
+| `0E00` | `<#A> " wird zum " <Rang> " befördert"` | Beförderung | other | **25** | Nur Actor, kein Ziel, **keine** Punktezeile (25/25). Der **Rang steht als eigenes Feld** zwischen den beiden Textteilen; lf_live liest ihn dort heraus (`evt.rank`) — aber nur, wenn die Zeile TAB-getrennt ankam, sonst ist die Feldgrenze nicht bestimmbar. Beobachtete Ränge: Schütze 9×, Held 7×, Unsterblicher 5×, Raketenliebhaber 4×. **Welche Wirkung ein Rang hat, geben die Daten nicht her.** | **verified** |
+
+**Was lf_live daraus macht.** Alle acht bekommen einen eigenen Ereignistyp
+(`player_hit`, `player_deactivate`, `invulnerability`, `retaliation`,
+`generator_critical`, `irradiated`, `promotion`) statt wie bisher als generisches
+`lf_event` durchzulaufen. Sie **verändern keinen Zustand und keinen Zähler** —
+genau wie `0400`/`0500` vorher: `_emitAuxEvent()` schreibt nie in `gameState`.
+
+**Bewusst NICHT gemacht:** `0208` und `0D06` fließen **nicht** in `shotsFired`,
+`shotsHit` oder `deactivations` ein. Ob die Anlage einen Eigenbeschuss als
+Treffer zählt und wie sie einen Blast verbucht, steht in ihrer eigenen
+Endabrechnung — und die gibt es in diesem Modus nicht (Typ 7 fehlt). Es gibt
+also nichts, woran sich eine solche Zuordnung prüfen ließe, und geraten wird
+hier nicht. Ebenso bleibt `0D06` aus der Serien-Erkennung
+(„Hinterherlaufen", `CHASE_TAG_CODES` = `0205`/`0206`) heraus: das ist eine
+eingeführte fachliche Regel, und 78 Ereignisse gegen 5333 würden sie nur
+verwackeln.
+
+### Unbekannte Codes beschriften sich künftig selbst
+
+Die Schema-Zeile für Typ 4 lautet schlicht `;4/event  time  type  varies` — der
+Rest der Zeile ist **frei**. Eine echte Anlage füllt ihn mit Entity-Verweisen
+und **deutschem Klartext** im Wechsel:
+
+```
+4 ⇥ 0000196 ⇥ 0D06 ⇥ #jJ9kK0lL ⇥ " blastet " ⇥ #mM1nN2oO
+4 ⇥ 0109912 ⇥ 0E00 ⇥ #gG7hH8iI ⇥ " wird zum " ⇥ Held ⇥ " befördert"
+4 ⇥ 0002482 ⇥ 0700 ⇥ "Zustand von " ⇥ @30 ⇥ " ist kritisch"
+```
+
+**Jede Halle darf eigene Spielmodi anlegen.** Ein Katalog kann deshalb nie
+vollständig sein — die Anlage aber liefert die Bedeutung ihrer eigenen Codes
+selbst mit. lf_live nutzt das jetzt: `eventCatalog.streamPhrase()` ersetzt jeden
+Verweis mit `#`/`@` durch den aufgelösten Spielernamen (unbekannte bleiben roh
+stehen) und nimmt alles andere **wörtlich**. Aus `Event 0F00: A -> B` wird so
+„Anna blastet Bert" — **ohne dass irgendetwas geraten wird**, denn die Worte
+sind die der Anlage.
+
+Grenzen, bewusst eng gezogen:
+
+- Der Selbsttext greift **nur**, wenn der Katalog den Code nicht kennt. Eine
+  dokumentierte Formulierung wird nie überschrieben.
+- Der Text ist **Fremdeingabe** von einem unauthentifizierten TCP-Feed: er wird
+  von Steuerzeichen befreit, auf eine Zeile normalisiert und auf 160 Zeichen
+  gekürzt, bevor er in Log, CSV oder Konsole landet.
+- Er beschriftet, er **deutet nicht**: kein Zähler, kein Punktestand, kein
+  Zustand hängt daran. Ein neuer Code bleibt fachlich unbekannt — er ist nur
+  nicht mehr unlesbar.
 
 ---
 
@@ -702,11 +907,15 @@ sich anders verhält als hier beschrieben.
 
 ### Endabrechnung ≠ einzelne Elimination
 
-Die Reihenfolge am Matchende ist `6`/`7` (Endabrechnung) → `0101`. Die
-Endabrechnung ist damit das stärkste vorhandene Signal für „Mission vorbei" —
-aber eine **einzelne** Typ-6-Zeile bedeutet nur, dass *eine* Entity ausgeschieden
-ist, und das passiert mitten im Spiel. Sie darf das Match **auf keinen Fall**
-beenden. Unterschieden wird deshalb so:
+Die Reihenfolge am Matchende ist — gemessen an vier echten Mitschnitten —
+**`0101` zuerst, danach der Typ-6-Block**; Typ 7 kommt im Standardmodus gar
+nicht (Belege oben in
+[Reihenfolge im echten Betrieb](#zeilentypen-09)). Die Endabrechnung ist damit
+**nicht** das erste Signal, sondern der **Ersatzweg** für den Fall, dass kein
+`0101` kommt. Eine **einzelne** Typ-6-Zeile bedeutet ohnehin nur, dass *eine*
+Entity ausgeschieden ist, und das passiert mitten im Spiel — belegt: im
+Mitschnitt von 02:13:07 steht eine solche Zeile gut 200 Zeilen vor dem `0101`.
+Sie darf das Match **auf keinen Fall** beenden. Unterschieden wird deshalb so:
 
 - **Typ 7** kommt ausschließlich am Matchende (und nur in SM5). Eine einzige
   Zeile genügt als Signal.
@@ -771,7 +980,7 @@ Endabrechnung.
 | Zeile 0 | ⚪ ignoriert (Version nicht ausgewertet) |
 | Zeile 1 (Mission) | `mode` (Nummer, Familie, Anzeigename) + `missionDesc`; `duration` und `durationKnown`; `mode_change`-Event |
 | Zeile 2 | `teams[index] = {name, color}` |
-| Zeile 3 (`player`, `team != 5`) | Spieler angelegt; `player_join`-Event; zusätzlich `level`, `category`, `roleLabel`, `battlesuit`, `memberId` und die Zählerfelder der Familie |
+| Zeile 3 (Spalte `type` = `player`) | Spieler angelegt; `player_join`-Event; zusätzlich `level`, `category`, `roleLabel`, `battlesuit`, `memberId` und die Zählerfelder der Familie |
 | Zeile 5 (Score) | **autoritativer Punktestand** → `scores[team]` bzw. `players[id].score`, `scoreSource='tdf'`; zusätzlich weiterhin das `score`-Event mit `teamId`/`old`/`new`/`delta` |
 | Zeile 6 (Entity-Ende) | `match_summary`-Event mit `entityId`/`exitCode`/`score` (informativ, kein Zustandswechsel); der Exit-Code wird in `exitCodes`/`exitCodesSeen` festgehalten; zählt zusätzlich zur [Erkennung der Endabrechnung](#endabrechnung--einzelne-elimination) — **nie allein** |
 | Zeile 7 (SM5-Endblock) | `players[id].official` (Rohwerte), überschreibt die SM5-Live-Zähler, `statsSource='tdf7'`, `sm5_stats`-Event; setzt die Frist der [Endabrechnung](#endabrechnung--einzelne-elimination) |
@@ -857,13 +1066,13 @@ Es ist **erwartet**, dass diese Liste Lücken hat. Alles hier ist entweder nicht
 | **SM5-Varianten** (Zombies, VIP, Kill Confirmed, Zone Control, Domination …) | Mögliche modus-spezifische Sonder-Codes (Infektion, VIP-down, Zonen-Capture) sind nirgends dokumentiert. | unbestätigt |
 | **`1102` (Tor-Variante)** | Als Konstante `GOAL_B` in lfstats, aber in keiner Beispieldatei beobachtet. | unbestätigt |
 | **`0901`** | Erscheint nur in einer Ignorier-Liste neben `0900`/`0902`; Bedeutung unbekannt. | unbestätigt |
-| **Nicht belegte `0xxx`-Codes** | u. a. `0207`, `0208`, `020A+`, `0302`, `0305`, `0307`, `0309+`, `0401`–`0403`, `0406+`, `0501`, `0503`–`0509`, `0511`, `0513+`, `0601+`, `0700`–`08FF`, `0B01`, `0B02`, `0B04+` sind in keiner Quelle beschrieben. | Lücke |
+| **Nicht belegte `0xxx`-Codes** | u. a. `0207`, `020A+`, `0302`, `0305`, `0307`, `0309+`, `0401`, `0403`, `0406`, `0407`, `0409+`, `0501`, `0503`–`0509`, `0511`, `0513+`, `0601+`, `0702`–`08FF`, `0B01`, `0B02`, `0B04+`, `0D00`–`0D04`, `0D07+`, `0E01+` sind in keiner Quelle beschrieben. `0208`, `0402`, `0408`, `0700`, `0701`, `0D05`, `0D06` und `0E00` sind seit dem 19.09.2026 **an der eigenen Anlage gemessen** — siehe [Standardmodus (Nummer 7)](#typ-4-event-codes-standardmodus-nummer-7--an-der-eigenen-anlage-gemessen). | Lücke |
 | **`1000`–`10FF` / `12xx+`** | Kein `10xx`- oder `12xx`-Laserball-Code bekannt; nur `11xx` belegt. | Lücke |
 | **Zeilentyp `8`** | Nicht dokumentiert, nicht beobachtet. | Lücke |
 | **Score-Deltas** | Die `±100 / −20 / +1001 / +500`-Angaben stammen aus der lfstats-Spezifikation, nicht aus lf_live-Zählung. Gegen Zeile 5 der echten Anlage prüfen. | teils unbestätigt |
 | **Explizite Resets `110B`/`110C`** | Codes belegt, Bedeutung/Auslöser nicht gegen echte Anlage verifiziert. Werden jetzt als `reset`-Event ausgegeben, fließen aber nicht in `resetsDone`/`resetsReceived` (die kommen weiter aus `1104`+Status). | teilweise |
 | **`1105` Round Start** | Wird als `round_start`-Event ausgegeben, aber es gibt weiterhin keine „pro Runde"-Statistik. | offen |
-| **Modus-Nummern außer `5` und `28`** | Keine weitere Nummer ist belegt. 7SM/Nexus und sämtliche SM5- und Laserball-Varianten haben unbekannte Nummern und müssen an der eigenen Anlage ermittelt werden ([GAMEMODES.md](GAMEMODES.md#eigene-modus-nummern-ermitteln-und-eintragen)). | Lücke |
+| **Modus-Nummern außer `5`, `7` und `28`** | `7` ist seit dem 19.09.2026 an der eigenen Anlage gemessen (Standard, „| Standard LZ - 2 Teams |", Familie `sm5`) und steht in `modes/standard.json`. Sonst ist keine weitere Nummer belegt. 7SM/Nexus und sämtliche SM5- und Laserball-Varianten haben unbekannte Nummern und müssen an der eigenen Anlage ermittelt werden ([GAMEMODES.md](GAMEMODES.md#eigene-modus-nummern-ermitteln-und-eintragen)). | Lücke |
 | **Typ-7-Feldreihenfolge** | Die 23 Feldnamen stammen aus der lfstats-`TDF_Spec` und sind nicht gegen eine echte Anlage geprüft. Eine `;`-Schema-Zeile der Anlage hat Vorrang und macht die Frage gegenstandslos. | teils unbestätigt |
 | **Zuordnung Typ-7 → Live-Zähler** | Welches Typ-7-Feld welchen SM5-Live-Zähler überschreibt, ist aus den Feldnamen erschlossen (`shotOpponent` → `deactivations`, `timesZapped` → `timesDeactivated`, `missiledOpponent` → `missileHits`). Nicht verifiziert. | unbestätigt |
 | **`shotsFired` live** | Laserforce meldet keinen Schuss-Event. Die Live-Zahl ist systematisch zu niedrig, bis der Typ-7-Block sie korrigiert. Für Laserball und für SM5-Zähler ohne Typ-7-Pendant bleibt es dabei. | bekannte Grenze |
@@ -871,9 +1080,15 @@ Es ist **erwartet**, dass diese Liste Lücken hat. Alles hier ist entweder nicht
 | **Offizieller Score / Endstand** | Zeile 5 ist jetzt die Autorität für `gameState.scores` und `players[id].score`, Zeile 7 die Autorität für die SM5-Endstatistik. Nicht übernommen wird weiterhin der Score aus Zeile 6 (bleibt rein informativ). | weitgehend geschlossen |
 | **Farb-Enum → RGB** | Fallback-RGB pro `colour-enum` (für v2.003-Feeds ohne `#rgb`) nicht implementiert. | offen |
 | **`0101` beim Beenden von Hand** | Ob die Anlage den Mission-End-Code auch dann schickt, wenn der Spielleiter die Mission an der Konsole abbricht, ist **nicht gemessen**. Deshalb die vier Beendigungswege in [Wann ein Match als beendet gilt](#wann-ein-match-als-beendet-gilt) — sie greifen unabhängig davon. Gegen einen Mitschnitt (`scripts/inspect.js`) prüfen. | unbestätigt |
-| **Typ-6-Exit-Codes** | Die Zuordnung `02` Ende · `04` eliminiert · `01` Kick · `17` Ref-Kick stammt aus der Community-Spezifikation und ist durch eine **Beobachtung an einer echten Anlage (17.09.2026)** in Frage gestellt: dort endet ein reguläres Standardspiel mit `01`. Die Fremdtabelle bleibt stehen, gilt aber durchgehend als unbestätigt. lf_live entscheidet nichts mehr am Exit-Code, sondern hält ihn in `exitCodes`/`exitCodesSeen` fest. → [Typ-6 im Detail](#die-exit-codes-der-typ-6-zeile--unbestätigt) | **unbestätigt** |
+| **Typ-6-Exit-Codes** | Die Zuordnung `02` Ende · `04` eliminiert · `01` Kick · `17` Ref-Kick stammt aus der Community-Spezifikation. Die Mitschnitte vom 19.09.2026 **stützen** sie für `01` und `02` (165× `02` im Endblock hinter dem `0101`, 1× `01` mitten im Spiel) und widersprechen damit der Beobachtung vom 17.09.2026; `04` und `17` bleiben unbelegt. Die Fremdtabelle bleibt stehen, gilt aber durchgehend als unbestätigt. lf_live entscheidet nichts mehr am Exit-Code, sondern hält ihn in `exitCodes`/`exitCodesSeen` fest. → [Typ-6 im Detail](#die-exit-codes-der-typ-6-zeile--unbestätigt) | **unbestätigt** |
 | **Zweite Zahl der Beobachtung (`1095`, Laserball)** | Der Betreiber nannte für Laserball eine Zahl `1095`. Ob Entity-Kennung oder Exit-Code, ist aus der Angabe **nicht** ableitbar. Hier wird nicht geraten; die Mitschnitte müssen es zeigen. | offen |
 | **Typ-6 am Matchende** | Dass am regulären Ende **jede** verbliebene Entity eine Typ-6-Zeile schickt, stammt aus der Spezifikation, nicht aus einer Messung der eigenen Anlage. Die Vollständigkeitsregel steht und fällt damit. Trifft es nicht zu, wird die Endabrechnung nicht erkannt und der Watchdog beendet das Match später — nie früher. | unbestätigt |
+| **`exitCodes` bleibt im Standardmodus leer** | Folge der gemessenen Reihenfolge: der Typ-6-Block kommt **hinter** dem `0101` und läuft damit in ein bereits beendetes Match. `_noteEntityEnd()` steigt dort aus, `exitCodes`/`exitCodesSeen` bleiben leer. Die Zeilen selbst werden weiterhin als `match_summary`-Ereignis ausgegeben. Beide Felder sind **rein diagnostisch** und entscheiden nichts — deshalb bleibt es so. | **gemessen** |
+| **Teamstand im Standardmodus** | **Gemessen: die Anlage schickt in Modus 7 keine einzige Typ-5-Zeile auf eine TEAM-Kennung** — alle 5551 Punktezeilen der vier Mitschnitte nennen einen Spieler. `gameState.scores` je Team bleibt deshalb auf 0, und der Missionsbericht meldet folgerichtig 0:0 und `draw`. Die Spielerpunkte stimmen dagegen exakt (141 von 141 Spielern deckungsgleich mit der letzten Typ-5-Zeile ihrer Kennung). Dass der Teamstand die Summe der Spielerpunkte wäre, legen die Typ-6-Zeilen nahe (dort steht je Spieler ein Score), ist aber **nicht belegt** — und wird deshalb nicht gerechnet. | **offen, mit Auswirkung** |
+| **`0D05` (Blast ohne Deaktivierung)** | **Ein einziges** Vorkommen in vier Mitschnitten. Die Deutung als nicht-deaktivierender Gegenpart zu `0D06` ist plausibel (gleiches Verb, Gegnerteam, Ziel bleibt in Zustand 0), bei n=1 aber nicht belegt. | unbestätigt |
+| **Wirkung der Ränge (`0E00`)** | Dass ein Spieler zum „Held", „Schütze", „Unsterblicher" oder „Raketenliebhaber" befördert wird, ist belegt. **Was der Rang bewirkt, nicht.** Einziger Anhaltspunkt: 4 der 7 Held-Beförderungen liegen auf demselben Zeitstempel wie ein `0402` (Unverwundbarkeit) desselben Spielers — 3 nicht. Zu wenig. | unbestätigt |
+| **`0208`/`0D06` in den Live-Zählern** | Eigenbeschuss und Blast fließen bewusst **nicht** in `shotsFired`/`shotsHit`/`deactivations` ein. Wie die Anlage sie selbst verbucht, stünde in ihrer Endabrechnung — die es in diesem Modus nicht gibt (kein Typ 7). Damit fehlt jeder Prüfstein, und geraten wird nicht. | bewusst offen |
+| **Kein Typ 7 im Standardmodus** | **Gemessen und damit geklärt, aber mit dauerhafter Folge:** in vier vollständigen Standardspielen steht keine einzige Typ-7-Zeile. Leben, Munition und die amtliche Trefferquote bleiben dort für immer leer; angezeigt werden die Live-Zähler mit `statsSource: "live"`. → [Typ-7 im Detail](#typ-7-sm5-endblock-im-detail) | **gemessen** |
 | **Melden alle Entities gleichzeitig?** | Ob die Typ-6-Zeilen der Endabrechnung wirklich in einem Block kommen (und nicht über Sekunden verteilt), ist nicht gemessen. Relevant nur für die Länge der Frist `matchEnd.endBlockSeconds`. | unbestätigt |
 
 ---

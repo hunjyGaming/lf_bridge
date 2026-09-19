@@ -53,7 +53,15 @@ Der Dateiname-Präfix (`events`) ist über `eventLog.filenamePrefix` änderbar.
 | `LF_EVENTLOG_ENABLED` | `eventLog.enabled` | `true` | Datei schreiben an/aus |
 | `LF_EVENTLOG_DIR` | `eventLog.dir` | `data/logs` | Zielordner (relativ zum Programm) |
 | `LF_EVENTLOG_ROTATE` | `eventLog.rotate` | `daily` | `daily` \| `match` \| `none` |
+| `LF_EVENTLOG_FLUSH_MS` | `eventLog.flushMs` | `250` | wie lange eine Zeile höchstens wartet, um sich **einen** Schreibvorgang mit den nächsten zu teilen (0–5000). `0` = jede Zeile einzeln |
 | — | `eventLog.filenamePrefix` | `events` | Dateiname-Präfix |
+
+Inhalt und **Reihenfolge** der Datei sind von `flushMs` nicht betroffen — nur
+die Zahl der Schreibaufrufe. Bei `0` kostete diese Datei allein rund ein Drittel
+der gesamten CPU-Zeit des Dienstes; der Preis der Bündelung ist, dass bei einem
+harten Stromausfall bis zu `flushMs` Millisekunden Logzeilen fehlen können. Bei
+geordnetem Beenden nicht: `flush()` hängt an `process.exit` und schreibt
+synchron. Messwerte: [PERFORMANCE.md](PERFORMANCE.md).
 
 Änderungen an `eventLog.*` über die Konsole wirken **erst nach einem Neustart**
 des Dienstes.

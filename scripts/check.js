@@ -5,10 +5,15 @@ const fs = require('fs');
 const os = require('os');
 const path = require('path');
 
+// Jedes Modul unter src/ muss sich laden lassen. Die Liste war unvollständig —
+// gameModes, matchReport, mqtt, eventLog, eventCatalog und tdfSchema fehlten,
+// obwohl sie zum Teil beim Laden Dateien lesen und Tabellen aufbauen.
 const mods = [
   '../src/config', '../src/logger', '../src/engine', '../src/localRoster', '../src/statsWriter',
   '../src/tcpIngest', '../src/capture', '../src/outputs', '../src/streamServer', '../src/apiServer',
   '../src/auth', '../src/netinfo', '../src/notify', '../src/smtp',
+  '../src/gameModes', '../src/matchReport', '../src/mqtt', '../src/eventLog',
+  '../src/eventCatalog', '../src/tdfSchema', '../src/chaseLog',
 ];
 let failed = 0;
 for (const m of mods) {
@@ -84,6 +89,19 @@ try {
   assert.strictEqual(csvCell('say "hi"', ','), '"say ""hi"""', 'quotes doubled');
   assert.strictEqual(csvCell('plain', ','), 'plain', 'plain value untouched');
   assert.deepStrictEqual(splitCsv('a;"b;c";d', ';'), ['a', 'b;c', 'd'], 'round-trips quoted field');
+  // Formel-Einschleusung: ein Spielername kommt aus dem TDF-Strom und der
+  // Spieler wählt ihn selbst. Eine Zelle, die mit = + - @ Tab oder CR beginnt,
+  // führt Excel/LibreOffice/Sheets als FORMEL aus (`=cmd|…!A0` öffnet einen
+  // Dialog „externes Programm starten?"). Sie muss als Text markiert ankommen.
+  assert.strictEqual(csvCell("=cmd|'/C calc'!A0", ';'), "'=cmd|'/C calc'!A0", 'formula cell marked as text');
+  assert.strictEqual(csvCell('@SUM(A1)', ','), "'@SUM(A1)", 'leading @ neutralised');
+  assert.strictEqual(csvCell('+49 170', ','), "'+49 170", 'leading + neutralised');
+  // … aber eine echte Zahl bleibt eine Zahl, sonst wäre jede negative
+  // Statistik-Zelle plötzlich Text.
+  assert.strictEqual(csvCell(-5, ','), '-5', 'negative number untouched');
+  assert.strictEqual(csvCell('-12.5', ','), '-12.5', 'negative decimal untouched');
+  // und zweimal durch csvCell() darf nicht zweimal markieren
+  assert.strictEqual(csvCell(csvCell('=x', ','), ','), "'=x", 'marking is idempotent');
 
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'lfstats-'));
   const cwd = process.cwd(); process.chdir(dir);
@@ -104,7 +122,7 @@ try {
   // player objects — no SM5 counters present, so: laserball.
   const players = fs.readFileSync(path.join(dir, 'stats', 'all_players_laserball.csv'), 'utf8');
   assert.ok(players.includes('Mara') && players.includes('win'), 'all_players_laserball.csv has the winner row');
-  const totals = fs.readFileSync(path.join(dir, 'stats', 'totals_laserball.csv'), 'utf8').replace(/^﻿/, '');
+  const totals = fs.readFileSync(path.join(dir, 'stats', 'totals_laserball.csv'), 'utf8').replace(/^\uFEFF/, '');
   assert.ok(totals.split(/\r?\n/).filter(Boolean).length === 3, 'totals_laserball.csv: header + 2 players');
   assert.ok(totals.includes('Mara;1;1;0;0;2;1'), 'Mara totals: 1 match, 1 win, 2 goals, 1 assist');
   assert.ok(fs.existsSync(path.join(dir, 'stats', 'matches')), 'per-match folder written');
@@ -117,7 +135,7 @@ try {
   sw.onChange(st2); sw.onMatchStart(st2); sw.onMatchEnd(st2);
   const totals2 = fs.readFileSync(path.join(dir, 'stats', 'totals_laserball.csv'), 'utf8');
   assert.ok(totals2.includes('Mara;2;1;1;0;3;'), 'Mara after 2 matches: 2 played, 1 win, 1 loss, 3 goals total');
-  const pm2 = fs.readFileSync(path.join(dir, 'stats', 'player_modes.csv'), 'utf8').replace(/^﻿/, '');
+  const pm2 = fs.readFileSync(path.join(dir, 'stats', 'player_modes.csv'), 'utf8').replace(/^\uFEFF/, '');
   assert.ok(pm2.split(/\r?\n/).filter(Boolean).length === 3, 'player_modes.csv: header + 2 players, one mode each');
   assert.ok(/1001;Mara;unknown;[^;]*;laserball;2;/.test(pm2), 'Mara played the same mode twice');
   process.chdir(cwd);
@@ -1035,7 +1053,7 @@ try {
   const pause = () => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 3);
   const feedMatch = (lines) => { pause(); for (const l of lines) eng.processLogLine(l); };
   const rowsOf = (name) => {
-    const text = fs.readFileSync(path.join(dir, name), 'utf8').replace(/^﻿/, '');
+    const text = fs.readFileSync(path.join(dir, name), 'utf8').replace(/^\uFEFF/, '');
     const lines = text.split(/\r?\n/).filter(Boolean);
     const head = splitCsv(lines[0], DELIM);
     return lines.slice(1).map((l) => {
@@ -1046,7 +1064,7 @@ try {
     });
   };
   const headOf = (name) => splitCsv(
-    fs.readFileSync(path.join(dir, name), 'utf8').replace(/^﻿/, '').split(/\r?\n/)[0], DELIM,
+    fs.readFileSync(path.join(dir, name), 'utf8').replace(/^\uFEFF/, '').split(/\r?\n/)[0], DELIM,
   );
 
   // (a) Laserball: Anna + Ben
@@ -1358,8 +1376,14 @@ try {
   {
     const { eng, t0 } = start();
     eng.processLogLine('7 @1 Anna 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0');
-    assert.strictEqual(eng.checkMatchEnd(t0 + 9999), null, 'type 7 only arms the deadline');
-    assert.strictEqual(eng.checkMatchEnd(t0 + 10000), 'watchdog', 'type 7 ends the match after the grace period');
+    // Gemessen wird ab dem Moment, in dem die Frist SCHARF wurde — nicht ab
+    // `t0`. Zwischen beiden kann die echte Uhr eine Millisekunde weiterlaufen,
+    // und dann war der Test bei `t0 + 10000` um genau diese Millisekunde zu
+    // früh dran. Alle anderen Fälle hier rechnen längst so.
+    const armed7 = eng._endBlockAt;
+    assert.ok(armed7 != null, 'eine Typ-7-Zeile allein schärft die Frist');
+    assert.strictEqual(eng.checkMatchEnd(armed7 + 9999), null, 'type 7 only arms the deadline');
+    assert.strictEqual(eng.checkMatchEnd(armed7 + 10000), 'watchdog', 'type 7 ends the match after the grace period');
     assert.strictEqual(eng.snapshot().endSource, 'summary_type7', 'and the source names the type-7 block');
 
     const again = start();
@@ -1485,7 +1509,7 @@ try {
       .forEach((l) => eng.processLogLine(l));
   };
   const matches = () => {
-    const text = fs.readFileSync(path.join(dir, 'matches.csv'), 'utf8').replace(/^﻿/, '');
+    const text = fs.readFileSync(path.join(dir, 'matches.csv'), 'utf8').replace(/^\uFEFF/, '');
     const lines = text.split(/\r?\n/).filter(Boolean);
     const head = splitCsv(lines[0], DELIM);
     return lines.slice(1).map((l) => {
@@ -1518,13 +1542,13 @@ try {
   assert.strictEqual(rows.length, 4, 'shutdown: nothing is lost when the service stops');
 
   // all four matches carry a real result, not an empty shell
-  const players = fs.readFileSync(path.join(dir, 'all_players_laserball.csv'), 'utf8').replace(/^﻿/, '');
+  const players = fs.readFileSync(path.join(dir, 'all_players_laserball.csv'), 'utf8').replace(/^\uFEFF/, '');
   const playerLines = players.split(/\r?\n/).filter(Boolean);
   assert.strictEqual(playerLines.length, 1 + 4 * 2, 'header + two players per match, four matches');
   assert.ok(playerLines.slice(1).every((l) => /;(Anna|Ben);/.test(l)), 'every row names a player');
   assert.deepStrictEqual(rows.map((r) => r.winner_score), ['1', '2', '3', '1'], 'each match kept its own result');
   assert.ok(rows.every((r) => r.match_id && r.ended_at && r.players === '2'), 'every match row is complete');
-  const totals = fs.readFileSync(path.join(dir, 'totals_laserball.csv'), 'utf8').replace(/^﻿/, '');
+  const totals = fs.readFileSync(path.join(dir, 'totals_laserball.csv'), 'utf8').replace(/^\uFEFF/, '');
   assert.ok(/;Anna;4;/.test(totals), 'Anna is credited with all four matches');
   fs.rmSync(dir, { recursive: true, force: true });
   console.log('  ok    engine.matchEnd.stats');
@@ -1672,6 +1696,634 @@ try {
     console.log('  ok    smtp.message');
   } catch (err) { failed++; console.error(`  FAIL  smtp.message\n        ${err.stack}`); }
 
+  // Ein abgelehntes AUTH LOGIN darf das Passwort nicht in die Fehlermeldung
+  // schreiben: die landet über notifier.last im Log, in /api/status und in
+  // /api/network. Ein winziger SMTP-Server, der jeden AUTH-Schritt ablehnt.
+  try {
+    const net = require('net');
+    const { sendMail } = require('../src/smtp');
+    const PASS = 'streng-geheim-42';
+    const srv = net.createServer((sock) => {
+      sock.setEncoding('utf8');
+      sock.write('220 pruefserver\r\n');
+      sock.on('data', (d) => {
+        for (const line of String(d).split('\r\n').filter(Boolean)) {
+          if (/^EHLO/i.test(line)) sock.write('250-pruefserver\r\n250 AUTH LOGIN\r\n');
+          else if (/^AUTH LOGIN$/i.test(line)) sock.write('334 VXNlcm5hbWU6\r\n');
+          else sock.write('535 Zugangsdaten abgelehnt\r\n');
+        }
+      });
+      sock.on('error', () => {});
+    });
+    await new Promise((r) => srv.listen(0, '127.0.0.1', r));
+    let caught = null;
+    try {
+      await sendMail({
+        host: '127.0.0.1', port: srv.address().port, secure: false,
+        user: 'kasse@halle.de', pass: PASS, to: 'technik@halle.de',
+        subject: 'x', text: 'x', timeoutMs: 3000,
+      });
+    } catch (err) { caught = err; }
+    srv.close();
+    assert.ok(caught, 'a rejected login throws');
+    const b64 = Buffer.from(PASS, 'utf8').toString('base64');
+    assert.ok(!caught.message.includes(b64), 'the base64 password is NOT in the error message');
+    assert.ok(!caught.message.includes(PASS), 'the plaintext password is NOT in the error message');
+    assert.ok(caught.message.includes('AUTH LOGIN'), 'the error still names the step that failed');
+    console.log('  ok    smtp.authSecret');
+  } catch (err) { failed++; console.error(`  FAIL  smtp.authSecret\n        ${err.stack}`); }
+
+  // Der Broker-URL darf `benutzer:passwort@` tragen (docs/MQTT.md sagt das
+  // selbst). GET /api/config ist die eine Stelle, an der KEIN Zugangsdatum
+  // stehen darf — sie lieferte den URL bis hierher ungeschwärzt aus.
+  try {
+    const { redactUrl } = require('../src/mqtt');
+    assert.strictEqual(redactUrl('mqtt://kasse:geheim@broker:1883'), 'mqtt://***@broker:1883', 'userinfo redacted');
+    assert.strictEqual(redactUrl('mqtt://broker:1883'), 'mqtt://broker:1883', 'a url without credentials is untouched');
+
+    const { ApiServer } = require('../src/apiServer');
+    const api = Object.create(ApiServer.prototype);
+    const cfg = require('../src/config').normalize({
+      mqtt: { url: 'mqtts://kasse:geheim@broker:8883' },
+      apiToken: 'apitok-XYZ-987', outputs: [{ kind: 'webhook', url: 'https://a.example/x', secret: 's3cr3t' }],
+      notify: { email: { host: 'mail.example', to: 'a@b.c', pass: 'mailpw' }, webhook: { url: 'https://w.example/h', secret: 'hooksec' } },
+    });
+    api.config = { data: cfg, envPins: [] };
+    api.notifier = null;
+    const shown = api._redactedConfig();
+    const asText = JSON.stringify(shown);
+    for (const secret of ['geheim', 's3cr3t', 'mailpw', 'hooksec', 'apitok-XYZ-987']) {
+      assert.ok(!asText.includes(secret), `GET /api/config leaks nothing: "${secret}" is gone`);
+    }
+    assert.strictEqual(shown.mqtt.url, 'mqtts://***@broker:8883', 'broker url masked');
+    assert.strictEqual(shown.mqttUrlHasCredentials, true, 'and the console is told that it is masked');
+    // die Maske zurückgeschickt = „unverändert lassen"
+    const back = api._unredactPatch({ mqtt: { url: 'mqtts://***@broker:8883' } });
+    assert.strictEqual(back.mqtt.url, 'mqtts://kasse:geheim@broker:8883', 'posting the mask back keeps the stored url');
+    const changed = api._unredactPatch({ mqtt: { url: 'mqtt://anderer:1883' } });
+    assert.strictEqual(changed.mqtt.url, 'mqtt://anderer:1883', 'a really edited url still gets through');
+    console.log('  ok    apiServer.configSecrets');
+  } catch (err) { failed++; console.error(`  FAIL  apiServer.configSecrets\n        ${err.stack}`); }
+
+  // Namen kommen aus dem TDF-Strom und sind Fremdeingabe: der Spieler wählt
+  // seinen Codenamen selbst. Steuerzeichen daraus landen sonst in der lesbaren
+  // Ereignis-Logdatei und auf stdout, und die Länge ist unbegrenzt.
+  try {
+    const { Engine } = require('../src/engine');
+    const eng = new Engine({ logger: null });
+    // Die Steuerzeichen werden zur LAUFZEIT gebaut — in dieser Datei darf
+    // keines wörtlich stehen, das prüft source.noControlChars weiter unten.
+    const BEL = String.fromCharCode(7);
+    const ESC = String.fromCharCode(27);
+    const CTL_RE = new RegExp("[\\u0000-\\u001f\\u007f-\\u009f]");
+    const lang = 'A'.repeat(300);
+    [
+      '1 28 Laserball 0 300000 0',
+      '2 0 Ro' + BEL + 't 5 solid #ef4444',
+      '4 0 0100',
+      '3 10 event @1 player An' + ESC + 'na 0 3 1',
+      '3 11 event @2 player ' + lang + ' 0 3 1',
+      '3 12 event @__proto__ player Boes 0 3 1',
+    ].forEach((l) => eng.processLogLine(l));
+    const s = eng.snapshot();
+    const namen = Object.values(s.players).map((p) => p.name);
+    assert.ok(namen.length >= 2, 'both well-formed logins landed');
+    assert.ok(namen.every((n) => !CTL_RE.test(n)), 'no control character survives in a player name');
+    assert.ok(namen.every((n) => n.length <= 64), 'a player name is bounded to 64 characters');
+    assert.ok(!CTL_RE.test(s.teams['0'].name), 'no control character survives in a team name');
+    assert.ok(!Object.prototype.hasOwnProperty.call(s.players, '__proto__'), 'an entity called __proto__ is refused');
+    assert.strictEqual(Object.getPrototypeOf(s.players), Object.prototype, 'and the player map keeps its prototype');
+    console.log('  ok    engine.foreignNames');
+  } catch (err) { failed++; console.error(`  FAIL  engine.foreignNames\n        ${err.stack}`); }
+
+  // Ein Umlaut, der beim Lesen des Request-Bodys genau auf eine Chunk-Grenze
+  // fällt, darf den Body nicht zerstören. Das ist kein Randfall: jeder deutsche
+  // Ausgangsname enthält welche, und die Konsole schickt die ganze
+  // Konfiguration in EINEM POST zurück.
+  try {
+    const { ApiServer } = require('../src/apiServer');
+    const { EventEmitter } = require('events');
+    const api = Object.create(ApiServer.prototype);
+    const body = Buffer.from(JSON.stringify({ name: 'Ausgang Süd — Tür Ost', note: 'grün' }), 'utf8');
+    // Genau zwischen den beiden Bytes eines „ü" trennen.
+    const cut = body.indexOf(Buffer.from('ü', 'utf8')) + 1;
+    const req = new EventEmitter();
+    req.destroy = () => {};
+    const p = api._readBody(req);
+    req.emit('data', body.subarray(0, cut));
+    req.emit('data', body.subarray(cut));
+    req.emit('end');
+    const parsed = await p;
+    assert.ok(parsed, 'a body split inside a multi-byte character still parses');
+    assert.strictEqual(parsed.name, 'Ausgang Süd — Tür Ost', 'and it parses to the very same text');
+
+    // und die Grenze greift weiterhin
+    const req2 = new EventEmitter();
+    let destroyed = false;
+    req2.destroy = () => { destroyed = true; };
+    const p2 = api._readBody(req2);
+    req2.emit('data', Buffer.alloc(513 * 1024));
+    req2.emit('end');
+    assert.strictEqual(await p2, null, 'an oversized body is refused');
+    assert.ok(destroyed, 'and the connection is dropped instead of read to the end');
+    console.log('  ok    apiServer.readBody');
+  } catch (err) { failed++; console.error(`  FAIL  apiServer.readBody\n        ${err.stack}`); }
+
+  // Die CORS-Warnung darf nicht auf die eigene Konsole losgehen: ein Browser
+  // schickt `Origin` auch bei einer SAME-ORIGIN-POST, und ohne Sonderfall
+  // erzeugte jeder Login und jedes Speichern eine Warnung, die sachlich falsch
+  // ist („der Browser wird die Antwort STILL verwerfen").
+  try {
+    const { ApiServer } = require('../src/apiServer');
+    const api = Object.create(ApiServer.prototype);
+    api.config = { data: require('../src/config').normalize({ cors: ['https://anzeige.example'] }), envPins: [] };
+    const req = (headers) => ({ headers, socket: {} });
+
+    assert.strictEqual(api._originAllowed(null, req({ host: 'hallen-pc:8080' })), true, 'no Origin at all = not a browser request');
+    assert.strictEqual(
+      api._originAllowed('http://hallen-pc:8080', req({ host: 'hallen-pc:8080', origin: 'http://hallen-pc:8080' })),
+      true, 'the console itself is never "a blocked origin"',
+    );
+    assert.strictEqual(
+      api._originAllowed('https://anzeige.example', req({ host: 'hallen-pc:8080' })),
+      true, 'an origin from cors[] is allowed',
+    );
+    assert.strictEqual(
+      api._originAllowed('http://fremd.example', req({ host: 'hallen-pc:8080' })),
+      false, 'a foreign origin is still refused',
+    );
+    // ein anderer PORT auf demselben Rechner ist eine ANDERE Herkunft
+    assert.strictEqual(
+      api._originAllowed('http://hallen-pc:9999', req({ host: 'hallen-pc:8080' })),
+      false, 'another port on the same host is a different origin',
+    );
+    console.log('  ok    apiServer.sameOriginNotBlocked');
+  } catch (err) { failed++; console.error(`  FAIL  apiServer.sameOriginNotBlocked\n        ${err.stack}`); }
+
+  // Missionsbericht — bis hierher von keiner Testsuite berührt, obwohl er der
+  // Weg ist, auf dem ein beendetes Match den Rechner verlässt. Geprüft wird,
+  // was ein Betreiber bemerken würde: Inhalt, Datenschutzschalter und die
+  // Warteschlange auf der Platte (ein totes Ziel darf keine Mission kosten).
+  try {
+    const { MatchReporter, REPORT_SCHEMA } = require('../src/matchReport');
+    const { Engine } = require('../src/engine');
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'lfrep-'));
+    const qdir = path.join(dir, 'reports');
+    const quiet = { debug() {}, info() {}, warn() {}, error() {} };
+
+    const spielen = () => {
+      const eng = new Engine({ logger: null });
+      const rep = new MatchReporter({ logger: quiet, getConfig: () => ({}), dir: qdir });
+      eng.on('match_start', () => rep.onMatchStart(eng.snapshot()));
+      [
+        '1\t28\tLaserball\t0\t300000\t0',
+        '2\t0\tRot\t5\tsolid\t#ef4444',
+        '2\t1\tBlau\t5\tsolid\t#38bdf8',
+        '4\t0\t0100',
+        '3\t10\tevent\t#4711\tplayer\tMara\t0\t3\t1',
+        '3\t11\tevent\t@91\tplayer\tGast 1\t1\t3\t1',
+        '4\t9000\t0301\t#4711',
+        '4\t9500\t0101',
+      ].forEach((l) => { rep.noteLine(l); eng.processLogLine(l); });
+      return { rep, snap: eng.snapshot() };
+    };
+
+    const { rep, snap } = spielen();
+    const report = rep.onMatchEnd(snap);
+    assert.ok(report, 'a finished match produces a report');
+    assert.strictEqual(report.schema, REPORT_SCHEMA, 'the report names its schema');
+    assert.strictEqual(report.players.length, 2, 'every player is in the report');
+    assert.ok(report.players.some((p) => p.name === 'Mara'), 'names are included by default');
+    // Mitglied (#) und Gast (@) müssen unterscheidbar bleiben — das ist der
+    // einzige Grund, warum noteLine() überhaupt in den heißen Pfad hängt.
+    assert.ok(report.players.some((p) => p.idKind === 'member') && report.players.some((p) => p.idKind === 'guest'),
+      'member and guest are told apart');
+
+    // Datenschutzschalter
+    const save = process.env.LF_REPORT_NAMES;
+    process.env.LF_REPORT_NAMES = 'false';
+    const anon = spielen();
+    const ohne = anon.rep.onMatchEnd(anon.snap);
+    assert.ok(ohne.players.every((p) => p.name === undefined || p.name === null), 'LF_REPORT_NAMES=false leaves every name out');
+    assert.ok(ohne.players.every((p) => p.playerId), 'but the players stay distinguishable by id');
+    if (save === undefined) delete process.env.LF_REPORT_NAMES; else process.env.LF_REPORT_NAMES = save;
+
+    // Warteschlange: ein totes Ziel darf die Mission nicht kosten
+    const wartend = () => fs.readdirSync(qdir).filter((n) => n.endsWith('.json'));
+    assert.ok(wartend().length >= 1, 'an undelivered report waits on disk');
+    rep.queue.addSink('kaputt', () => { throw new Error('Ziel tot'); });
+    await rep.queue.drain();
+    assert.ok(wartend().length >= 1, 'a failing sink leaves the report in the queue');
+    rep.queue.sinks.length = 0;
+    rep.queue.addSink('ok', () => true);
+    await rep.queue.drain();
+    assert.deepStrictEqual(wartend(), [], 'a successful delivery clears the queue');
+    rep.queue.stop?.();
+
+    process.chdir(path.dirname(dir));
+    fs.rmSync(dir, { recursive: true, force: true });
+    console.log('  ok    matchReport');
+  } catch (err) { failed++; console.error(`  FAIL  matchReport\n        ${err.stack}`); }
+
+  // MQTT ohne Broker: es darf nichts krachen, nichts blockieren und vor allem
+  // nichts von den Zugangsdaten in status() auftauchen.
+  try {
+    const { MqttOut } = require('../src/mqtt');
+    const save = { u: process.env.LF_MQTT_USERNAME, p: process.env.LF_MQTT_PASSWORD };
+    process.env.LF_MQTT_USERNAME = 'kasse';
+    process.env.LF_MQTT_PASSWORD = 'streng-geheim-42';
+    const out = new MqttOut({
+      logger: { debug() {}, info() {}, warn() {}, error() {} },
+      getConfig: () => ({ mqtt: { enabled: false, url: 'mqtt://kasse:geheim@broker:1883', topic: '/decs/lfpassthrough' } }),
+    });
+    const st = out.status();
+    const asText = JSON.stringify(st);
+    assert.ok(!asText.includes('streng-geheim-42') && !asText.includes('geheim@'), 'status() carries no credentials');
+    assert.strictEqual(st.broker, 'mqtt://***@broker:1883', 'a url with userinfo is redacted in status()');
+    assert.strictEqual(st.authConfigured, true, 'but it does say that credentials exist');
+    assert.strictEqual(st.enabled, false, 'switched off stays switched off');
+    // Mit abgeschaltetem MQTT darf ein publish() nichts tun und nichts werfen.
+    assert.strictEqual(out.publish({ event: 'match_report' }, 'report'), false, 'publish() with mqtt off reports "not sent"');
+    out.stop();
+    if (save.u === undefined) delete process.env.LF_MQTT_USERNAME; else process.env.LF_MQTT_USERNAME = save.u;
+    if (save.p === undefined) delete process.env.LF_MQTT_PASSWORD; else process.env.LF_MQTT_PASSWORD = save.p;
+    console.log('  ok    mqtt.statusNoSecrets');
+  } catch (err) { failed++; console.error(`  FAIL  mqtt.statusNoSecrets\n        ${err.stack}`); }
+
+  // Quellhygiene: rohe Steuerzeichen in einer Quelldatei lassen git sie als
+  // BINÄR einstufen (so geschehen in src/web/app.js) und machen jeden Diff
+  // wertlos. Diese Prüfung hält das dauerhaft draußen.
+  try {
+    // `.claude` kommt neu dazu: darunter legt das Werkzeug Arbeitskopien des
+    // Projekts (worktrees) ab. Das sind Kopien fremder Stände, keine
+    // Quelldateien dieses Baums — sie hier mitzuprüfen meldet Fehler in Dateien,
+    // die gar nicht zu diesem Stand gehören.
+    const SKIP = new Set(['node_modules', '.git', '.claude', 'graphify-out', 'data', 'locationserver-integration']);
+    const EXT = new Set(['.js', '.json', '.md', '.html', '.css']);
+    const root = path.join(__dirname, '..');
+    const hits = [];
+    (function walk(d) {
+      for (const e of fs.readdirSync(d, { withFileTypes: true })) {
+        if (SKIP.has(e.name)) continue;
+        const p = path.join(d, e.name);
+        if (e.isDirectory()) { walk(p); continue; }
+        if (!EXT.has(path.extname(e.name)) && e.name !== '.env.example') continue;
+        const text = fs.readFileSync(p, 'utf8');
+        let line = 1;
+        for (let i = 0; i < text.length; i++) {
+          const c = text.codePointAt(i);
+          if (c === 10) { line++; continue; }
+          // erlaubt: Tab (9) und CR (13). Verboten: der Rest von C0, DEL, C1,
+          // die unsichtbaren Formatierungszeichen und ein BOM mitten im Text.
+          const bad = (c < 0x20 && c !== 9 && c !== 13) || c === 0x7f
+            || (c >= 0x80 && c <= 0x9f) || (c >= 0x200b && c <= 0x200f)
+            || c === 0x2028 || c === 0x2029 || (c === 0xfeff && i !== 0);
+          if (bad) hits.push(`${path.relative(root, p)}:${line} U+${c.toString(16).toUpperCase().padStart(4, '0')}`);
+        }
+      }
+    })(root);
+    assert.deepStrictEqual(hits, [], `rohe Steuerzeichen in Quelldateien — bitte als \\uXXXX schreiben:\n        ${hits.join('\n        ')}`);
+    console.log('  ok    source.noControlChars');
+  } catch (err) { failed++; console.error(`  FAIL  source.noControlChars\n        ${err.stack}`); }
+
+  // ── Verdacht „Hinterherlaufen" ────────────────────────────────────────────
+  // Die fachliche Regel, dauerhaft festgenagelt. Gespielt wird ein Match in
+  // Standard-Form (Modus 7, „Standard LZ - 2 Teams", Spieler-Kennungen wie in
+  // echten Mitschnitten: `#` + acht alphanumerische Zeichen). Das Protokoll ist
+  // dasselbe wie bei SM5 — allein das ANZEIGEPROFIL entscheidet, ob die
+  // Erkennung läuft, darum stellt der Test es hier ausdrücklich ein.
+  try {
+    const { Engine } = require('../src/engine');
+    const OFF = { watchdogMs: 0, streamLostMs: 0, endBlockMs: 0 };
+    // Modus 7 steht seit dem 19.09.2026 in modes/standard.json und läuft damit
+    // als Profil `standard`. Die Profilliste hier führt `sm5` trotzdem mit, weil
+    // dieser Test nur die fachliche Regel prüft und nicht davon abhängen soll,
+    // welche Nummern der Betreiber gerade eingetragen hat.
+    const mk = (chase) => {
+      const e = new Engine({ logger: null, matchEnd: OFF, chase: { profiles: ['standard', 'sm5'], ...(chase || {}) } });
+      ['1 7 Standard LZ - 2 Teams 0 480000 0', '2 0 Rot 5 solid #ef4444', '2 1 Blau 5 solid #38bdf8', '4 0 0100',
+        '3 10 event #aA1bB2cC player Anna 0 3 1',
+        '3 10 event #bB7kQ2xR player Bert 1 3 1',
+        '3 10 event #cC4nW9tL player Cleo 1 3 1',
+        '3 10 event #dD1sE5vM player Dora 0 3 1'].forEach((l) => e.processLogLine(l));
+      return e;
+    };
+    let t = 1000;
+    /** Ein Treffer-Ereignis, so wie es in den Mitschnitten steht. */
+    const tag = (e, code, a, b) => e.processLogLine(`4 ${t += 10} ${code} #${a}${b ? ` phasert #${b}` : ''}`);
+    const chasing = (e) => e.snapshot().chasing;
+
+    const A = 'aA1bB2cC', B = 'bB7kQ2xR', C = 'cC4nW9tL', D = 'dD1sE5vM';
+
+    // 1) zwei Treffer auf dasselbe Ziel lösen NICHT aus, der dritte schon
+    let eng = mk();
+    assert.strictEqual(eng.snapshot().chaseWatched, true, 'Profil sm5 wird beobachtet, wenn es in der Liste steht');
+    tag(eng, '0206', A, B); tag(eng, '0206', A, B);
+    assert.deepStrictEqual(chasing(eng), [], 'zwei Treffer sind noch keine Serie');
+    tag(eng, '0206', A, B);
+    let list = chasing(eng);
+    assert.strictEqual(list.length, 1, 'drei Treffer auf dasselbe Ziel lösen aus');
+    assert.strictEqual(list[0].playerId, A, 'die Spieler-Kennung steht drin');
+    assert.strictEqual(list[0].playerName, 'Anna', 'der Spielername steht drin');
+    assert.strictEqual(list[0].teamId, '0', 'das Team des Spielers steht drin');
+    assert.strictEqual(list[0].targetId, B, 'wem er hinterherläuft — Kennung');
+    assert.strictEqual(list[0].targetName, 'Bert', 'wem er hinterherläuft — Name');
+    assert.strictEqual(list[0].targetTeamId, '1', 'und dessen Team');
+    assert.strictEqual(list[0].streak, 3, 'die Länge der Serie');
+    assert.strictEqual(list[0].runs, 1, 'und wie oft überhaupt eine Serie zustande kam');
+    assert.strictEqual(list[0].open, true, 'die Serie läuft gerade noch');
+    assert.ok(list[0].lastAt > 0, 'und wann sie zuletzt fortgesetzt wurde');
+
+    // Die Liste ist KUMULATIV fürs Match: eine gerissene Serie verschwindet
+    // nicht, sie hört nur auf zu laufen. Ohne das wäre die Liste fast immer
+    // leer — an den echten Mitschnitten gemessen erreichte ein Drittel bis die
+    // Hälfte aller Spieler irgendwann die Schwelle, gleichzeitig aber nie mehr
+    // als fünf, und am Schlusspfiff meist keiner.
+    tag(eng, '0206', A, C);
+    list = chasing(eng);
+    assert.strictEqual(list.length, 1, 'ein Abbruch löscht den Eintrag nicht');
+    assert.strictEqual(list[0].open, false, 'er ist nur nicht mehr „läuft"');
+    assert.strictEqual(list[0].streak, 3, 'die längste Serie bleibt stehen');
+    assert.strictEqual(list[0].targetName, 'Bert', 'samt der Person, auf die sie ging');
+    // Eine zweite Serie zählt hoch, die längste gewinnt.
+    tag(eng, '0206', A, C); tag(eng, '0206', A, C); tag(eng, '0206', A, C);
+    list = chasing(eng);
+    assert.strictEqual(list.length, 1, 'derselbe Spieler steht genau einmal in der Liste');
+    assert.strictEqual(list[0].runs, 2, 'zwei Serien in diesem Match');
+    assert.strictEqual(list[0].streak, 4, 'genannt wird die längste');
+    assert.strictEqual(list[0].targetName, 'Cleo', 'und deren Ziel');
+
+    // 2) Fehlschüsse und Nicht-Spieler-Ereignisse dazwischen unterbrechen NICHT
+    eng = mk();
+    tag(eng, '0206', A, B);
+    tag(eng, '0201', A); tag(eng, '0202', A);        // Mist-Shots
+    tag(eng, '0203', A); tag(eng, '0204', A);        // Ziele, keine Personen
+    tag(eng, '0205', A, B);                          // „Player Hit" zählt wie „Deactivate"
+    assert.deepStrictEqual(chasing(eng), [], 'nach zwei Treffern noch nichts');
+    tag(eng, '0206', A, B);
+    assert.strictEqual(chasing(eng).length, 1, 'Fehlschüsse dazwischen unterbrechen die Serie nicht');
+    assert.strictEqual(chasing(eng)[0].streak, 3, 'und sie zählen auch nicht mit');
+
+    // 3) ein Treffer auf jemand anderen setzt zurück
+    eng = mk();
+    tag(eng, '0206', A, B); tag(eng, '0206', A, B);
+    tag(eng, '0206', A, C);                          // anderes Ziel -> von vorn
+    tag(eng, '0206', A, B); tag(eng, '0206', A, B);
+    assert.deepStrictEqual(chasing(eng), [], 'ein Treffer auf jemand anderen setzt die Serie zurück');
+    tag(eng, '0206', A, B);
+    assert.strictEqual(chasing(eng).length, 1, 'danach zählt die neue Serie ganz normal weiter');
+
+    // 4) Eigenbeschuss zählt nicht — und unterbricht auch nicht.
+    //    Belegt an den Mitschnitten: `0208` war 6 von 6 Mal teamintern, während
+    //    `0205`/`0206` 1120 von 1120 Mal gegnerisch waren.
+    eng = mk();
+    tag(eng, '0206', A, B);
+    tag(eng, '0208', A, D);                          // eigener Mitspieler, eigener Code
+    tag(eng, '0206', A, D);                          // Mitspieler, aber mit Treffer-Code
+    tag(eng, '0306', A, B);                          // Rakete — bewusst ausgenommen
+    tag(eng, '0D06', A, B);                          // Flächenwirkung — bewusst ausgenommen
+    tag(eng, '0206', A, A);                          // sich selbst — nie eine Verfolgung
+    assert.deepStrictEqual(chasing(eng), [], 'Eigenbeschuss, Raketen und Flächenwirkung zählen nicht');
+    tag(eng, '0206', A, B); tag(eng, '0206', A, B);
+    assert.strictEqual(chasing(eng).length, 1, 'und sie unterbrechen die Serie auf den Gegner auch nicht');
+
+    // 5) Missionsstart setzt zurück
+    eng = mk();
+    tag(eng, '0206', A, B); tag(eng, '0206', A, B); tag(eng, '0206', A, B);
+    assert.strictEqual(chasing(eng).length, 1, 'Serie steht');
+    eng.processLogLine('4 0 0100');
+    assert.deepStrictEqual(chasing(eng), [], 'Missionsstart räumt die Liste');
+    ['3 10 event #aA1bB2cC player Anna 0 3 1', '3 10 event #bB7kQ2xR player Bert 1 3 1'].forEach((l) => eng.processLogLine(l));
+    tag(eng, '0206', A, B); tag(eng, '0206', A, B);
+    assert.deepStrictEqual(chasing(eng), [], 'und die Zählung beginnt im neuen Match bei null');
+
+    // 6) mehrere Verfolger gleichzeitig, längste Serie zuerst
+    eng = mk();
+    for (let i = 0; i < 4; i++) tag(eng, '0206', A, B);
+    for (let i = 0; i < 3; i++) tag(eng, '0206', C, D);
+    list = chasing(eng);
+    assert.strictEqual(list.length, 2, 'zwei Verfolger werden beide gelistet');
+    assert.deepStrictEqual(list.map((x) => x.streak), [4, 3], 'die längste Serie steht oben');
+
+    // 7) die Schwelle ist einstellbar
+    eng = mk({ threshold: 5 });
+    assert.strictEqual(eng.snapshot().chaseThreshold, 5, 'die Schwelle steht im Snapshot');
+    for (let i = 0; i < 4; i++) tag(eng, '0206', A, B);
+    assert.deepStrictEqual(chasing(eng), [], 'vier Treffer reichen bei Schwelle 5 nicht');
+    tag(eng, '0206', A, B);
+    assert.strictEqual(chasing(eng).length, 1, 'fünf schon');
+    // 0 und 1 heißen beide „aus"
+    eng = mk({ threshold: 0 });
+    assert.strictEqual(eng.snapshot().chaseWatched, false, 'Schwelle 0 schaltet die Erkennung ab');
+    for (let i = 0; i < 6; i++) tag(eng, '0206', A, B);
+    assert.deepStrictEqual(chasing(eng), [], 'und dann wird auch nichts gesammelt');
+
+    // 8) der Weg darf nie werfen — auch nicht bei Unsinn im Strom
+    eng = mk();
+    ['4 1 0206', '4 2 0206 #', '4 3 0206 #__proto__ phasert #constructor',
+      '4 4 0206 #aA1bB2cC phasert #gibtsnicht', '4 5 0206 #gibtsnicht phasert #aA1bB2cC']
+      .forEach((l) => eng.processLogLine(l));
+    assert.deepStrictEqual(chasing(eng), [], 'unbekannte oder fehlende Kennungen ergeben nichts');
+    assert.strictEqual(eng.snapshot().missionActive, true, 'und stören das laufende Match nicht');
+
+    console.log('  ok    engine.chase');
+  } catch (err) { failed++; console.error(`  FAIL  engine.chase\n        ${err.stack}`); }
+
+  // Die Steuerung läuft über das ANZEIGEPROFIL — nicht über die Missionsnummer
+  // und nicht über die Familie. Das ist der Kern des Zuschnitts: sobald die
+  // gemessene Standard-Nummer in modes/standard.json steht, greift die
+  // Erkennung von selbst, ohne dass eine Zeile Code sich ändert.
+  try {
+    const { Engine } = require('../src/engine');
+    const gm = require('../src/gameModes');
+    const OFF = { watchdogMs: 0, streamLostMs: 0, endBlockMs: 0 };
+    const A = 'aA1bB2cC', B = 'bB7kQ2xR';
+    let t = 2000;
+    const tag = (e, code, a, b) => e.processLogLine(`4 ${t += 10} ${code} #${a} phasert #${b}`);
+
+    // a) Vorgabe ist NUR `standard`. Eine Missionsnummer, die in modes/ nicht
+    //    eingetragen ist, läuft als Profil `sm5` und bleibt damit stumm — genau
+    //    der Übergangsfall aus docs/GAMEMODES.md (so lief Modus 7 selbst,
+    //    bevor seine Nummer gemessen und eingetragen war).
+    const setup = (e, missionLine) => [missionLine, '4 0 0100',
+      '3 10 event #aA1bB2cC player Anna 0 3 1', '3 10 event #bB7kQ2xR player Bert 1 3 1']
+      .forEach((l) => e.processLogLine(l));
+    let eng = new Engine({ logger: null, matchEnd: OFF });
+    assert.deepStrictEqual(eng.snapshot().chaseProfiles, ['standard'], 'Vorgabe: nur das Profil standard');
+    setup(eng, '1 777 Irgendein neuer Modus 0 480000 0');
+    assert.strictEqual(eng.snapshot().mode.known, false, 'eine nicht eingetragene Nummer bleibt unbekannt');
+    assert.strictEqual(eng.snapshot().mode.profile, 'sm5', 'und läuft als Profil sm5');
+    assert.strictEqual(eng.snapshot().chaseWatched, false, 'wird mit der Vorgabe also nicht beobachtet');
+    for (let i = 0; i < 5; i++) tag(eng, '0206', A, B);
+    assert.deepStrictEqual(eng.snapshot().chasing, [], 'ein nicht beobachtetes Profil sammelt gar nichts');
+    // Der dokumentierte Übergang: `sm5` mit in die Liste, dann läuft es sofort.
+    eng = new Engine({ logger: null, matchEnd: OFF, chase: { profiles: ['standard', 'sm5'] } });
+    setup(eng, '1 777 Irgendein neuer Modus 0 480000 0');
+    assert.strictEqual(eng.snapshot().chaseWatched, true, 'mit `sm5` in der Liste läuft es auch ohne eingetragene Nummer');
+
+    // b) Laserball schlägt NICHT an — weder über die 11xx-Codes noch über die
+    //    SM5-Codes. Der Betreiber will die Ansicht ausdrücklich nur für
+    //    Standardspiele; Laserball wird gar nicht erst unterstützt.
+    for (const profiles of [['standard'], ['standard', 'sm5', 'laserball']]) {
+      const lb = new Engine({ logger: null, matchEnd: OFF, chase: { profiles } });
+      ['1 28 Laserball 0 300000 0', '4 0 0100',
+        '3 10 event #aA1bB2cC player Anna 0 3 1', '3 10 event #bB7kQ2xR player Bert 1 3 1']
+        .forEach((l) => lb.processLogLine(l));
+      assert.strictEqual(lb.snapshot().mode.profile, 'laserball', 'Modus 28 ist Laserball');
+      for (let i = 0; i < 5; i++) { tag(lb, '1104', A, B); tag(lb, '0206', A, B); }
+      assert.deepStrictEqual(lb.snapshot().chasing, [],
+        `Laserball schlägt nie an (Profilliste ${profiles.join('+')})`);
+      // und das Laserball-Zählwerk läuft unverändert weiter
+      assert.strictEqual(lb.snapshot().players[A].blocksDone, 5, 'die Laserball-Zähler bleiben unberührt');
+    }
+
+    // c) Sobald die gemessene Nummer in modes/standard.json steht, greift es —
+    //    ohne Codeänderung. Nachgestellt über ein eigenes Modus-Verzeichnis,
+    //    damit die Datei des Betreibers unangetastet bleibt.
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'lflive-modes-'));
+    const saveDir = process.env.LF_MODES_DIR;
+    try {
+      fs.writeFileSync(path.join(dir, 'standard.json'), JSON.stringify({
+        schluessel: 'standard', anzeigename: 'Standard',
+        missionsnummern: [7], familie: 'sm5', profil: 'standard',
+      }), 'utf8');
+      process.env.LF_MODES_DIR = dir;
+      gm.reloadModes({ quiet: true });
+      const e2 = new Engine({ logger: null, matchEnd: OFF });
+      ['1 7 Standard LZ - 2 Teams 0 480000 0', '4 0 0100',
+        '3 10 event #aA1bB2cC player Anna 0 3 1', '3 10 event #bB7kQ2xR player Bert 1 3 1']
+        .forEach((l) => e2.processLogLine(l));
+      assert.strictEqual(e2.snapshot().mode.profile, 'standard', 'die eingetragene Nummer macht daraus Profil standard');
+      assert.strictEqual(e2.snapshot().chaseWatched, true, 'und damit wird beobachtet — ohne Codeänderung');
+      for (let i = 0; i < 3; i++) tag(e2, '0206', A, B);
+      assert.strictEqual(e2.snapshot().chasing.length, 1, 'die Erkennung greift an einem echten Standardmodus');
+      assert.strictEqual(e2.snapshot().chasing[0].targetName, 'Bert', 'und benennt das Ziel');
+    } finally {
+      if (saveDir === undefined) delete process.env.LF_MODES_DIR; else process.env.LF_MODES_DIR = saveDir;
+      gm.reloadModes({ quiet: true });
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+
+    console.log('  ok    engine.chase.profiles');
+  } catch (err) { failed++; console.error(`  FAIL  engine.chase.profiles\n        ${err.stack}`); }
+
+  // Was die API mitliefert: derselbe Datensatz, dieselben Vorbehalte.
+  try {
+    const { Engine } = require('../src/engine');
+    const { buildDisplay } = require('../src/apiServer');
+    const OFF = { watchdogMs: 0, streamLostMs: 0, endBlockMs: 0 };
+    const eng = new Engine({ logger: null, matchEnd: OFF, chase: { profiles: ['standard', 'sm5'] } });
+    ['1 7 Standard LZ - 2 Teams 0 480000 0', '2 0 Rot 5 solid #ef4444', '2 1 Blau 5 solid #38bdf8', '4 0 0100',
+      '3 10 event #aA1bB2cC player Anna 0 3 1', '3 10 event #bB7kQ2xR player Bert 1 3 1']
+      .forEach((l) => eng.processLogLine(l));
+    let d = buildDisplay(eng.snapshot());
+    assert.ok(d.chase && Array.isArray(d.chase.players), 'der Anzeige-Datensatz führt chase mit');
+    assert.strictEqual(d.chase.threshold, 3, 'die Schwelle steht mit drin');
+    assert.strictEqual(d.chase.watched, true, 'ebenso, ob überhaupt beobachtet wird');
+    assert.strictEqual(d.chase.count, 0, 'noch ist niemand auffällig');
+    assert.strictEqual(d.chase.lowSignal, true, 'zwei Spieler: der Hinweis sagt hier fast nichts, und das steht dabei');
+    for (let i = 0; i < 3; i++) eng.processLogLine(`4 ${3000 + i} 0206 #aA1bB2cC phasert #bB7kQ2xR`);
+    d = buildDisplay(eng.snapshot());
+    assert.strictEqual(d.chase.count, 1, 'die Serie taucht im Anzeige-Datensatz auf');
+    assert.strictEqual(d.chase.players[0].playerName, 'Anna', 'mit Namen');
+    assert.strictEqual(d.chase.players[0].targetName, 'Bert', 'und Ziel');
+    // Ein Verbraucher darf die Liste nicht aus Versehen in den Zustand zurückschreiben.
+    d.chase.players[0].playerName = 'manipuliert';
+    assert.strictEqual(eng.snapshot().chasing[0].playerName, 'Anna', 'die API gibt Kopien heraus, keine Verweise');
+    console.log('  ok    apiServer.chase');
+  } catch (err) { failed++; console.error(`  FAIL  apiServer.chase\n        ${err.stack}`); }
+
+  // Der Tagesmitschrieb: eine Datei je Tag, nur angehängt, jedes Match mit
+  // einem Abschnitt — auch die ohne Befund. Dazu die abgeleitete Tagesübersicht.
+  try {
+    const { ChaseLog } = require('../src/chaseLog');
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'lflive-chaselog-'));
+    const cl = new ChaseLog({ chaseLog: { enabled: true, dir, summary: true } }, null);
+    const day = cl.dayFile();
+    const sum = cl.summaryFile();
+
+    const snap = (over) => ({
+      matchId: 'mabc1234', mode: { label: '| Standard LZ - 2 Teams |', profile: 'standard' },
+      players: { a: {}, b: {}, c: {}, d: {}, e: {}, f: {}, g: {} },
+      elapsedTime: 480000, chaseThreshold: 3, chaseProfiles: ['standard'], chaseWatched: true,
+      chasing: [], ...over,
+    });
+    const row = (pid, name, tid, tname, streak, runs) => ({
+      playerId: pid, playerName: name, teamId: '0',
+      targetId: tid, targetName: tname, targetTeamId: '1',
+      streak, runs: runs || 1, open: false, lastAt: Date.now(),
+    });
+
+    // Match 1: zwei Befunde
+    cl.onMatchEnd(snap({ matchId: 'm0000001', chasing: [row('jJ9kK0lL', 'Ravi', 'hR3k9Lm2', 'Milan', 4), row('aB1cD2eF', 'Mara', 'hR3k9Lm2', 'Milan', 3)] }));
+    let text = fs.readFileSync(day, 'utf8');
+    assert.ok(text.startsWith('# Beobachtung'), 'die Datei beginnt mit dem Kopf');
+    assert.ok(text.includes('Verdacht und keine Feststellung'), 'die Grenzen stehen IM Dateikopf, nicht nur in der Doku');
+    assert.ok(text.includes('Spieler: 7'), 'die Spielerzahl steht beim Match — davon hängt die Aussagekraft ab');
+    assert.ok(/\| `jJ9kK0lL` \| Ravi \| Milan \| `hR3k9Lm2` \| 4 \| 1 \| \d\d:\d\d:\d\d \|/.test(text), 'ein Befund steht als Tabellenzeile drin');
+
+    // Match 2: kein Befund — muss trotzdem vermerkt werden
+    cl.onMatchEnd(snap({ matchId: 'm0000002', chasing: [] }));
+    text = fs.readFileSync(day, 'utf8');
+    assert.strictEqual((text.match(/^# Beobachtung/gm) || []).length, 1, 'der Kopf wird nur einmal geschrieben');
+    assert.strictEqual((text.match(/^## /gm) || []).length, 2, 'jedes Match bekommt einen Abschnitt');
+    assert.ok(text.includes('Niemand war auffällig.'), 'ein Match ohne Befund wird ausdrücklich vermerkt');
+
+    // Match 3: nicht beobachteter Spielmodus — der dritte, eigene Fall
+    cl.onMatchEnd(snap({ matchId: 'm0000003', chaseWatched: false, mode: { label: 'Laserball', profile: 'laserball' } }));
+    text = fs.readFileSync(day, 'utf8');
+    assert.ok(text.includes('nicht beobachtet'), '„nicht beobachtet" ist etwas anderes als „niemand auffällig"');
+
+    // Match 4: derselbe Spieler noch einmal, anderes Ziel
+    cl.onMatchEnd(snap({ matchId: 'm0000004', chasing: [row('jJ9kK0lL', 'Ravi', 'zZ9yY8xX', 'Nora', 3)] }));
+
+    // Nur angehängt: nichts von vorher ist verschwunden
+    text = fs.readFileSync(day, 'utf8');
+    assert.ok(text.includes('m0000001') && text.includes('m0000004'), 'es wird nur angehängt, nie neu geschrieben');
+
+    // Die Tagesübersicht ist vollständig aus der Tagesdatei abgeleitet
+    const s1 = fs.readFileSync(sum, 'utf8');
+    assert.ok(s1.includes('Matches heute: 4'), 'die Übersicht zählt die Matches des Tages');
+    assert.ok(/\| `jJ9kK0lL` \| Ravi \| 2 von 4 \| 4 \| Milan \(1×\), Nora \(1×\) \|/.test(s1),
+      'ein wiederkehrender Name ist als Zahl sichtbar — ohne Bewertung');
+    assert.ok(!/gut|schlecht|verdächtig|Betrug|Täter/i.test(s1), 'die Übersicht urteilt nicht, sie zählt');
+
+    // Der Neustart-Fall: eine frische Instanz kennt nichts aus dem Speicher und
+    // baut die Übersicht trotzdem vollständig — sie liest die Tagesdatei zurück.
+    fs.rmSync(sum, { force: true });
+    const cl2 = new ChaseLog({ chaseLog: { enabled: true, dir, summary: true } }, null);
+    cl2.onMatchEnd(snap({ matchId: 'm0000005', chasing: [row('jJ9kK0lL', 'Ravi', 'hR3k9Lm2', 'Milan', 3)] }));
+    const s2 = fs.readFileSync(sum, 'utf8');
+    assert.ok(s2.includes('Matches heute: 5'), 'nach einem Neustart zählt die Übersicht den ganzen Tag weiter');
+    assert.ok(/\| `jJ9kK0lL` \| Ravi \| 3 von 5 \|/.test(s2), 'weil sie aus der Tagesdatei abgeleitet ist, nicht aus dem Speicher');
+
+    // Feindliche Namen zerlegen die Tabelle nicht.
+    cl.onMatchEnd(snap({
+      matchId: 'm0000006',
+      chasing: [row('#bad id!', 'Pi|pe `tick`\u0007x', 'tgt', 'Ziel\nzeile', 3)],
+    }));
+    text = fs.readFileSync(day, 'utf8');
+    assert.ok(!/\u0007/.test(text), 'Steuerzeichen aus dem Strom landen nicht in der Datei');
+    for (const line of text.split('\n')) {
+      if (!line.startsWith('| `')) continue;
+      assert.strictEqual(line.split('|').length, 9, `jede Tabellenzeile hat genau sieben Spalten: ${line}`);
+    }
+
+    // Abgeschaltet heißt abgeschaltet.
+    const dir2 = fs.mkdtempSync(path.join(os.tmpdir(), 'lflive-chaselog-off-'));
+    const off = new ChaseLog({ chaseLog: { enabled: false, dir: dir2 } }, null);
+    off.onMatchEnd(snap({ chasing: [row('x', 'X', 'y', 'Y', 9)] }));
+    assert.deepStrictEqual(fs.readdirSync(dir2), [], 'abgeschaltet wird nichts geschrieben');
+
+    // Ein Schreibfehler darf nichts werfen.
+    const broken = new ChaseLog({ chaseLog: { enabled: true, dir: path.join(dir, 'x\u0000y') } }, null);
+    assert.strictEqual(broken.onMatchEnd(snap({ chasing: [] })), null, 'ein Schreibfehler meldet nur und wirft nicht');
+
+    fs.rmSync(dir, { recursive: true, force: true });
+    fs.rmSync(dir2, { recursive: true, force: true });
+    console.log('  ok    chaseLog');
+  } catch (err) { failed++; console.error(`  FAIL  chaseLog\n        ${err.stack}`); }
+
   try {
     // The ticker itself: everything above drives checkMatchEnd() by hand, this
     // proves the engine really does it on its own — with a 150 ms threshold, so
@@ -1693,6 +2345,288 @@ try {
     assert.strictEqual(eng._endTimer, null, 'and the ticker stops itself again');
     console.log('  ok    engine.matchEnd.ticker');
   } catch (err) { failed++; console.error(`  FAIL  engine.matchEnd.ticker\n        ${err.stack}`); }
+
+
+  // ══ Echte Anlage, Modus 7 („Standard LZ - 2 Teams") ═══════════════════════
+  // Alles hierunter ist an vier vollständigen Roh-Mitschnitten vom 19.09.2026
+  // gemessen (docs/LASERFORCE.md, Abschnitt „Standardmodus (Nummer 7)"). Die
+  // Mitschnitte selbst dürfen nicht ins Repository — sie enthalten echte Namen
+  // und weltweit eindeutige Mitglieds-IDs. Nachgestellt werden deshalb genau
+  // die Zeilen, auf die es ankommt, in der Form, in der die Anlage sie schickt:
+  // TAB-getrennt, mit Schema-Kommentaren, mit deutschen Klartext-Verben.
+  try {
+    const gm = require('../src/gameModes');
+    assert.strictEqual(gm.resolveMode(7).known, true, 'Modus 7 steht in der Registry');
+    assert.strictEqual(gm.resolveMode(7).key, 'standard', 'Modus 7 ist der Standardmodus');
+    assert.strictEqual(gm.resolveMode(7).family, 'sm5', 'Familie sm5');
+    assert.strictEqual(gm.resolveModeWithProfile(7).profile, 'standard', 'Anzeigeprofil standard');
+    // Der schlichte Registry-Name ist Absicht: den Zierrahmen schickt die
+    // Anlage selbst, und ihr Name gewinnt zur Laufzeit.
+    assert.strictEqual(gm.resolveMode(7, null).label, 'Standard', 'ohne Stream-Namen der schlichte Registry-Name');
+    assert.strictEqual(gm.resolveMode(7, '| Standard LZ - 2 Teams |').label, '| Standard LZ - 2 Teams |',
+      'der Name der Anlage gewinnt');
+    console.log('  ok    gameModes.mode7');
+  } catch (err) { failed++; console.error(`  FAIL  gameModes.mode7\n        ${err.stack}`); }
+
+  /**
+   * Ein Standardspiel, so wie die Anlage es schickt — TAB-getrennt.
+   * Spielerkennungen sind erfundene Kürzel in der echten Form (`#` + acht
+   * alphanumerische Zeichen), die Mitglieds-IDs erfunden, aber in der
+   * gemessenen Form `<land>-<zentrum>-<mitglied>`.
+   */
+  const STANDARD_MATCH = [
+    '0\t2.006\t8.704\t21-101',
+    ';1/mission\ttype\tdesc\tstart\tduration\tpenalty',
+    '1\t7\t| Standard LZ - 2 Teams |\t20260919104649\t480000\t-1000',
+    ';2/team\tindex\tdesc\tcolour-enum\tcolour-desc\tcolour-rgb',
+    '2\t0\tBlaues Team\t12\tIce\t#00A0FF',
+    '2\t1\tRotes Team\t11\tFire\t#FF5000',
+    '2\t2\tNeutral\t0\tNone\t#808080',
+    ';4/event\ttime\ttype\tvaries',
+    '4\t0000000\t0100\t* Missionsbeginn *',
+    ';3/entity-start\ttime\tid\ttype\tdesc\tteam\tlevel\tcategory\tbattlesuit\tmemberId',
+    '3\t0000001\t#aA1bB2cC\tplayer\tAnna Lena\t0\t1\t0\tUnderground\t21-101-10001',
+    '3\t0000001\t#bB2cC3dD\tplayer\tBert\t0\t3\t0\tBalu\t21-101-10002',
+    '3\t0000002\t#cC3dD4eE\tplayer\tCleo\t1\t2\t0\tLoki\t21-103-90412',
+    '3\t0000002\t#dD4eE5fF\tplayer\tDora\t1\t0\t0\tCyborg\t21-101-10003',
+    // Nicht-Spieler-Entities: Team 2 (nicht 5!), leere memberId-Spalte.
+    '3\t0000003\t@30\tgenerator-target\tGenerator\t2\t0\t0\tGenerator\t',
+    '3\t0000004\t@91\tgallery-target\tPunktestation Zufall\t2\t0\t0\tPunktestation Zufall\t',
+    '3\t0000005\t@28\tstandard-target\tPunktestation Rot\t2\t0\t0\tPunktestation Rot\t',
+    '3\t0000006\t@40\tbeacon\tBeacon\t2\t0\t0\tBeacon\t',
+    // Der Bösewicht: eine Punktestation, die „player" HEISST. Genau daran
+    // scheiterte die alte Suche nach dem Wort statt nach der Spalte.
+    '3\t0000007\t@41\tstandard-target\tplayer\t2\t0\t0\tplayer\t',
+    ';5/score\ttime\tentity\told\tdelta\tnew',
+    ';9/player-state\ttime\tentity\tstate',
+    '5\t0010000\t#aA1bB2cC\t0\t110\t110',
+    '4\t0010000\t0206\t#aA1bB2cC\t phasert \t#cC3dD4eE',
+    '9\t0010100\t#cC3dD4eE\t3',
+    '5\t0020000\t#bB2cC3dD\t0\t-50\t-50',
+    '4\t0020000\t0208\t#bB2cC3dD\t phasert \t#aA1bB2cC',
+    '4\t0030000\t0402\t#aA1bB2cC\t aktiviert Unverwundbarkeit',
+    '4\t0031000\t0408\t#bB2cC3dD\t aktiviert Vergeltung',
+    '4\t0040000\t0700\tZustand von \t@30\t ist kritisch',
+    '4\t0048000\t0701\t#dD4eE5fF\t wurde verstrahlt',
+    '5\t0050000\t#dD4eE5fF\t0\t100\t100',
+    '4\t0050000\t0D06\t#dD4eE5fF\t blastet \t#aA1bB2cC',
+    '4\t0050000\t0D06\t#dD4eE5fF\t blastet \t#bB2cC3dD',
+    '5\t0051000\t#cC3dD4eE\t0\t110\t110',
+    '4\t0051000\t0D05\t#cC3dD4eE\t blastet \t#bB2cC3dD',
+    '4\t0060000\t0E00\t#aA1bB2cC\t wird zum \tHeld\t befördert',
+    // Ein Code, den NIEMAND kennt — die Anlage beschreibt ihn aber selbst.
+    '4\t0070000\t0F42\t#aA1bB2cC\t verzaubert \t#dD4eE5fF',
+    // Gemessene Reihenfolge am Ende: 0101 ZUERST, danach der Typ-6-Block.
+    '4\t0480100\t0101\t* Missionsende *',
+    ';6/entity-end\ttime\tid\ttype\tscore',
+    '6\t0480100\t#aA1bB2cC\t02\t110',
+    '6\t0480100\t#bB2cC3dD\t02\t-50',
+    '6\t0480100\t#cC3dD4eE\t02\t110',
+    '6\t0480100\t#dD4eE5fF\t02\t100',
+  ];
+
+  try {
+    const { Engine } = require('../src/engine');
+    const OFF = { watchdogMs: 0, streamLostMs: 0, endBlockMs: 0 };
+    const eng = new Engine({ logger: null, matchEnd: OFF, emitUnknownEvents: true });
+    const evts = [];
+    eng.on('event', (e) => evts.push(e));
+    for (const l of STANDARD_MATCH) eng.processLogLine(l);
+    const st = eng.snapshot();
+
+    // ── Modus
+    assert.strictEqual(st.mode.number, 7, 'die Missionsnummer steht im Zustand');
+    assert.strictEqual(st.mode.key, 'standard', 'erkannt als Standardmodus');
+    assert.strictEqual(st.mode.profile, 'standard', 'mit dem Anzeigeprofil standard');
+    assert.strictEqual(st.mode.family, 'sm5', 'Familie sm5');
+    assert.strictEqual(st.mode.label, '| Standard LZ - 2 Teams |', 'der Name der Anlage gewinnt');
+
+    // ── Entity-Art: nur `player`, und zwar aus der SPALTE, nicht aus dem Wort
+    assert.strictEqual(Object.keys(st.players).length, 4, 'genau die vier Spieler, sonst niemand');
+    for (const bad of ['30', '91', '28', '40', '41']) {
+      assert.ok(!st.players[bad], `Nicht-Spieler-Entity @${bad} wurde NICHT als Spieler angelegt`);
+    }
+    assert.ok(!Object.values(st.players).some((pl) => pl.name === 'player'),
+      'eine Punktestation namens „player" bleibt eine Punktestation');
+    assert.ok(!Object.values(st.players).some((pl) => pl.teamId === '2'),
+      'niemand landet im Neutral-Team (Index 2, nicht 5)');
+    assert.strictEqual(st.teams['2'].name, 'Neutral', 'Neutral ist Team-Index 2');
+
+    // ── Typ-3-Zusatzspalten
+    assert.strictEqual(st.players.aA1bB2cC.battlesuit, 'Underground', 'battlesuit aus der Schema-Spalte');
+    assert.strictEqual(st.players.aA1bB2cC.memberId, '21-101-10001', 'memberId aus der Schema-Spalte');
+    assert.strictEqual(st.players.aA1bB2cC.level, 1, 'level');
+    assert.strictEqual(st.players.cC3dD4eE.teamId, '1', 'Team aus der Schema-Spalte');
+
+    // ── Punkte: Typ 5 ist die Autorität, auch auf Spieler-Kennungen
+    assert.strictEqual(st.players.aA1bB2cC.score, 110, 'Spielerpunkte aus Zeile 5');
+    assert.strictEqual(st.players.bB2cC3dD.score, -50, 'auch negative');
+    assert.strictEqual(st.scoreSource, 'tdf', 'die Anlage ist die Punkte-Autorität');
+
+    // ── Matchende: 0101 gewinnt, obwohl der Typ-6-Block erst danach kommt
+    assert.strictEqual(st.missionActive, false, 'das Match ist beendet');
+    assert.strictEqual(st.endReason, 'mission_end', 'beendet durch 0101');
+    assert.strictEqual(st.endSource, '0101', 'und zwar durch den Code selbst');
+    assert.strictEqual(st.elapsedTime, 480100, 'die Spielzeit steht auf dem 0101-Zeitstempel');
+    // Gemessene Folge der Reihenfolge: weil der Typ-6-Block HINTER dem `0101`
+    // kommt, läuft er in ein bereits beendetes Match. Die Exit-Codes landen
+    // deshalb im Standardmodus NIE in `exitCodes`/`exitCodesSeen` — rein
+    // diagnostische Felder, die nichts entscheiden (docs/LASERFORCE.md).
+    assert.deepStrictEqual(st.exitCodesSeen, [],
+      'die Exit-Codes bleiben leer, weil der Typ-6-Block erst nach dem 0101 kommt');
+    assert.strictEqual(evts.filter((e) => e.type === 'match_summary').length, 4,
+      'die Typ-6-Zeilen werden trotzdem alle als Ereignis ausgegeben');
+
+    // ── Die neu katalogisierten Codes
+    const byCode = {};
+    for (const e of evts) if (e.code) (byCode[e.code] = byCode[e.code] || []).push(e);
+    const one = (code) => {
+      assert.ok(byCode[code] && byCode[code].length, `Code ${code} wird als Ereignis ausgegeben`);
+      return byCode[code][0];
+    };
+    assert.strictEqual(one('0208').type, 'player_hit', '0208 ist ein Treffer …');
+    assert.strictEqual(one('0208').actorTeamId, one('0208').targetTeamId, '… und zwar Eigenbeschuss: gleiches Team');
+    assert.ok(/Eigenbeschuss/.test(one('0208').text), 'der Text sagt es auch');
+    assert.strictEqual(one('0206').actorTeamId !== one('0206').targetTeamId, true, '0206 dagegen gegen ein anderes Team');
+    assert.strictEqual(one('0402').type, 'invulnerability', '0402 = Unverwundbarkeit');
+    assert.strictEqual(one('0402').text, 'Anna Lena aktiviert Unverwundbarkeit', 'mit lesbarem Text');
+    assert.strictEqual(one('0408').type, 'retaliation', '0408 = Vergeltung');
+    assert.strictEqual(one('0408').text, 'Bert aktiviert Vergeltung', 'mit lesbarem Text');
+    assert.strictEqual(one('0700').type, 'generator_critical', '0700 = Generator kritisch');
+    assert.ok(/kritisch/.test(one('0700').text), 'und sagt das auch');
+    assert.strictEqual(one('0701').type, 'irradiated', '0701 = Verstrahlung');
+    assert.strictEqual(one('0701').text, 'Dora wurde verstrahlt', 'mit lesbarem Text');
+    assert.strictEqual(one('0D06').type, 'player_deactivate', '0D06 = Blast mit Deaktivierung');
+    assert.strictEqual(byCode['0D06'].length, 2, 'ein Blast kann mehrere Ziele auf demselben Zeitstempel treffen');
+    assert.strictEqual(one('0D05').type, 'player_hit', '0D05 = Blast ohne Deaktivierung (unbestätigt)');
+    assert.strictEqual(one('0E00').type, 'promotion', '0E00 = Beförderung');
+    assert.strictEqual(one('0E00').rank, 'Held', 'der Rang wird als eigenes Feld gelesen');
+    assert.strictEqual(one('0E00').text, 'Anna Lena wird zum Held befördert', 'und steht im Text');
+
+    // ── Kein Zähler und kein Zustand hängt an den neuen Codes
+    assert.strictEqual(st.players.bB2cC3dD.shotsFired ?? 0, 0,
+      'Eigenbeschuss fließt bewusst NICHT in shotsFired ein');
+    assert.strictEqual(st.players.dD4eE5fF.deactivations ?? 0, 0,
+      'ein Blast fließt bewusst NICHT in deactivations ein');
+
+    // ── Kein Typ 7: die amtlichen Felder bleiben leer, die Quelle sagt es
+    assert.strictEqual(st.players.aA1bB2cC.statsSource, 'live', 'ohne Typ-7-Block bleiben die Live-Zahlen stehen');
+    assert.strictEqual(st.players.aA1bB2cC.livesLeft, null, 'Leben bleiben leer — nicht 0');
+    assert.strictEqual(st.players.aA1bB2cC.shotsLeft, null, 'Munition bleibt leer — nicht 0');
+    assert.strictEqual(st.players.aA1bB2cC.accuracyIsEstimate, true, 'die Trefferquote ist eine Näherung');
+
+    console.log('  ok    engine.mode7.standard');
+  } catch (err) { failed++; console.error(`  FAIL  engine.mode7.standard\n        ${err.stack}`); }
+
+  // Unbekannte Codes beschriften sich aus dem Klartext der Anlage selbst.
+  try {
+    const { Engine } = require('../src/engine');
+    const { streamPhrase, describe } = require('../src/eventCatalog');
+    const OFF = { watchdogMs: 0, streamLostMs: 0, endBlockMs: 0 };
+    const eng = new Engine({ logger: null, matchEnd: OFF, emitUnknownEvents: true });
+    const evts = [];
+    eng.on('event', (e) => evts.push(e));
+    for (const l of STANDARD_MATCH) eng.processLogLine(l);
+
+    const unknown = evts.find((e) => e.code === '0F42');
+    assert.ok(unknown, 'ein völlig unbekannter Code wird überhaupt ausgegeben');
+    assert.strictEqual(describe('0F42').status, 'unknown', '… und der Katalog kennt ihn wirklich nicht');
+    assert.strictEqual(unknown.type, 'lf_event', 'er bleibt fachlich ein unbekanntes Ereignis');
+    assert.strictEqual(unknown.text, 'Anna Lena verzaubert Dora',
+      'aber er ist lesbar — mit den Worten der Anlage und aufgelösten Namen');
+    assert.strictEqual(unknown.streamText, 'Anna Lena verzaubert Dora', 'der Selbsttext steht auch als eigenes Feld da');
+
+    // Der Selbsttext überschreibt NIE eine dokumentierte Formulierung.
+    const known = evts.find((e) => e.code === '0402');
+    assert.strictEqual(known.text, 'Anna Lena aktiviert Unverwundbarkeit', 'bekannter Code: unsere Formulierung gilt');
+
+    // streamPhrase selbst: Fremdeingabe, also gekappt und entschärft.
+    assert.strictEqual(streamPhrase(['#1', ' trifft ', '#2'], (id) => (id === '1' ? 'Ann' : null)),
+      'Ann trifft #2', 'unbekannte Kennungen bleiben roh stehen');
+    assert.strictEqual(streamPhrase([]), '', 'nichts drin, nichts raus');
+    assert.strictEqual(streamPhrase(null), '', 'Unsinn ergibt einen leeren String, keinen Fehler');
+    assert.ok(streamPhrase(['x'.repeat(500)]).length <= 160, 'die Länge ist begrenzt');
+    const ctrl = streamPhrase([`a${String.fromCharCode(7)}b`]);
+    assert.strictEqual(ctrl, 'a b', 'Steuerzeichen werden entschärft');
+    assert.strictEqual(streamPhrase([' wird zum ', 'Held'], () => { throw new Error('boom'); }),
+      'wird zum Held', 'ein werfender Namensauflöser bringt nichts zu Fall');
+
+    console.log('  ok    eventCatalog.streamPhrase');
+  } catch (err) { failed++; console.error(`  FAIL  eventCatalog.streamPhrase\n        ${err.stack}`); }
+
+  // Die Entity-Art kommt aus der Spalte — mit dem alten Weg als Rückfall.
+  // Hier hängt die gesamte Spielererkennung dran, deshalb beide Wege einzeln.
+  try {
+    const { Engine } = require('../src/engine');
+    const OFF = { watchdogMs: 0, streamLostMs: 0, endBlockMs: 0 };
+    const head = ['1\t7\tStandard\t0\t480000\t0', '4\t0\t0100'];
+    // a) MIT Schema-Zeile: die Spalte entscheidet.
+    let e = new Engine({ logger: null, matchEnd: OFF });
+    [...head,
+      ';3/entity-start\ttime\tid\ttype\tdesc\tteam\tlevel\tcategory\tbattlesuit\tmemberId',
+      '3\t1\t#aA1bB2cC\tplayer\tAnna\t0\t1\t0\tSuit\t21-101-1',
+      '3\t1\t@41\tstandard-target\tplayer\t2\t0\t0\tplayer\t',
+    ].forEach((l) => e.processLogLine(l));
+    assert.deepStrictEqual(Object.keys(e.snapshot().players), ['aA1bB2cC'],
+      'mit Schema: nur die Zeile mit type=player wird Spieler');
+
+    // b) OHNE Schema-Zeile: exakt das alte Verhalten, Wort statt Spalte.
+    e = new Engine({ logger: null, matchEnd: OFF });
+    [...head, '3\t1\t#aA1bB2cC\tplayer\tAnna\t0\t1\t0'].forEach((l) => e.processLogLine(l));
+    assert.deepStrictEqual(Object.keys(e.snapshot().players), ['aA1bB2cC'],
+      'ohne Schema greift weiterhin die Wortsuche');
+
+    // c) Leerzeichen statt Tabulatoren, mit Schema: der Name wird
+    //    zurückgefaltet, die Spalte bleibt trotzdem die richtige.
+    e = new Engine({ logger: null, matchEnd: OFF });
+    ['1 7 Standard 0 480000 0', '4 0 0100',
+      ';3/entity-start\ttime\tid\ttype\tdesc\tteam\tlevel\tcategory\tbattlesuit\tmemberId',
+      '3 1 #aA1bB2cC player Anna Lena 0 1 0 Suit 21-101-1',
+    ].forEach((l) => e.processLogLine(l));
+    assert.strictEqual(e.snapshot().players.aA1bB2cC?.name, 'Anna Lena',
+      'Name mit Leerzeichen überlebt den Whitespace-Split');
+
+    // d) Ein Spieler, der wirklich „player" heißt, bleibt ein Spieler.
+    e = new Engine({ logger: null, matchEnd: OFF });
+    [...head,
+      ';3/entity-start\ttime\tid\ttype\tdesc\tteam\tlevel\tcategory\tbattlesuit\tmemberId',
+      '3\t1\t#aA1bB2cC\tplayer\tplayer\t0\t1\t0\tSuit\t21-101-1',
+    ].forEach((l) => e.processLogLine(l));
+    assert.strictEqual(e.snapshot().players.aA1bB2cC?.name, 'player',
+      'ein Spieler namens „player" wird normal angelegt');
+
+    console.log('  ok    engine.entityKind');
+  } catch (err) { failed++; console.error(`  FAIL  engine.entityKind\n        ${err.stack}`); }
+
+  // Die Zerlegung der Mitgliedsnummer — und dass sie die Rohform nie ersetzt.
+  try {
+    const { splitMemberId, buildMatchReport, EntityIds } = require('../src/matchReport');
+    assert.deepStrictEqual(splitMemberId('21-101-10001'),
+      { countryCode: 21, centerCode: 101, memberCode: 10001 }, 'die gemessene Form wird zerlegt');
+    assert.deepStrictEqual(splitMemberId('21-103-90412'),
+      { countryCode: 21, centerCode: 103, memberCode: 90412 },
+      'ein Gast aus einem anderen Zentrum behält SEIN Zentrum');
+    for (const bad of ['', '   ', '21-101', '21-101-10001-9', 'aA1bB2cC', '#21-101-1', '21--1', null, 42, {}]) {
+      assert.strictEqual(splitMemberId(bad), null, `keine Zerlegung für ${JSON.stringify(bad)}`);
+    }
+
+    const { Engine } = require('../src/engine');
+    const OFF = { watchdogMs: 0, streamLostMs: 0, endBlockMs: 0 };
+    const eng = new Engine({ logger: null, matchEnd: OFF });
+    const ids = new EntityIds();
+    for (const l of STANDARD_MATCH) { ids.noteLine(l); eng.processLogLine(l); }
+    const rep = buildMatchReport(eng.snapshot(), { entityIds: ids, mode: eng.snapshot().mode });
+    const anna = rep.players.find((pl) => pl.playerId === 'aA1bB2cC');
+    const cleo = rep.players.find((pl) => pl.playerId === 'cC3dD4eE');
+    assert.strictEqual(anna.memberIdReported, '21-101-10001', 'die Rohform steht weiterhin im Bericht');
+    assert.deepStrictEqual(anna.memberIdParts, { countryCode: 21, centerCode: 101, memberCode: 10001 },
+      'und die Zerlegung steht zusätzlich daneben');
+    assert.strictEqual(cleo.memberIdParts.centerCode, 103,
+      'der Gast wird NICHT dem Zentrum der Anlage zugeschlagen');
+    assert.strictEqual(anna.entityId, '#aA1bB2cC', 'die rohe Kennung bleibt alphanumerisch');
+    assert.strictEqual(anna.memberId, 'aA1bB2cC', 'und wird nirgends in eine Zahl verwandelt');
+    console.log('  ok    matchReport.memberIdParts');
+  } catch (err) { failed++; console.error(`  FAIL  matchReport.memberIdParts\n        ${err.stack}`); }
 
   console.log(failed ? `\n${failed} check(s) failed` : '\nAll checks passed');
   process.exit(failed ? 1 : 0);

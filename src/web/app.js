@@ -268,7 +268,13 @@ function paintFrame() {
     boardsDue = false;
     // Die Tabellen gehoeren in den Live-Bereich; ist ein anderer Reiter offen,
     // gibt es nichts zu zeigen. Der Umschalter oben holt das nach.
-    if (lastState && $('tab-live').classList.contains('active')) renderBoards(lastState);
+    if (lastState && $('tab-live').classList.contains('active')) {
+      renderBoards(lastState);
+      // Bewusst NEBEN renderBoards und nicht darin: renderBoards kehrt bei
+      // „jeder gegen jeden" und ohne Teams frueh zurueck, die Beobachtung soll
+      // aber in jeder Aufteilung zu sehen sein.
+      renderChase(lastState);
+    }
   }
 }
 document.addEventListener('visibilitychange', () => {
@@ -858,6 +864,115 @@ function renderBoards(s) {
   }
 }
 
+// ---------------- Beobachtung „Hinterherlaufen" ----------------
+//
+// Ein VERDACHT, keine Feststellung — und die Anzeige sagt das auch. Gelistet
+// wird, wer zuletzt mehrmals hintereinander dieselbe Person getroffen hat.
+// Niemand wird hier als Betrueger bezeichnet, es gibt keine Warnfarbe und kein
+// Ausrufezeichen; es ist eine Beobachtung zum Nachschauen.
+//
+// Alle Texte gehen ueber textContent (el() legt Kindknoten als Textknoten an) —
+// Spieler- und Zielnamen kommen aus dem ungesicherten TCP-Strom.
+
+/** Ab wievielen Spielern der Hinweis ueberhaupt etwas aussagt (siehe apiServer). */
+const CHASE_LOW_SIGNAL = 6;
+/** Mehr als so viele Zeilen zeigt die Konsole nicht — der Rest steht als Zahl da. */
+const CHASE_MAX_ROWS = 20;
+
+/** „vor 12 s" / „vor 2:05 min". Leerer String, wenn kein brauchbarer Zeitpunkt. */
+function chaseAgo(lastAt) {
+  const t = num(lastAt);
+  if (!(t > 0)) return '';
+  const secs = Math.max(0, Math.round((Date.now() - t) / 1000));
+  if (secs < 60) return `vor ${secs} s`;
+  return `vor ${Math.floor(secs / 60)}:${String(secs % 60).padStart(2, '0')} min`;
+}
+
+let chaseSig = null;
+function renderChase(s) {
+  const box = $('chase-box');
+  const lead = $('chase-lead');
+  const note = $('chase-note');
+  const caveat = $('chase-caveat');
+  if (!box || !lead || !note || !caveat) return;
+
+  const list = Array.isArray(s.chasing) ? s.chasing : [];
+  const watched = s.chaseWatched === true;
+  const th = Math.max(0, num(s.chaseThreshold));
+  const profiles = Array.isArray(s.chaseProfiles) ? s.chaseProfiles.filter((x) => typeof x === 'string') : [];
+  const nPlayers = Object.keys(s.players || {}).length;
+
+  // Neu gezeichnet wird nur, wenn sich etwas Sichtbares geaendert hat. Das
+  // „vor … s" steckt als Fuenf-Sekunden-Stufe mit in der Signatur, damit es
+  // mitlaeuft, ohne die Tabelle fuenfmal je Sekunde neu zu bauen.
+  const sig = JSON.stringify([watched, th, profiles, nPlayers,
+    list.map((c) => [c.playerId, c.targetId, c.streak, c.runs, c.open,
+      Math.floor((Date.now() - num(c.lastAt)) / 5000)])]);
+  if (sig === chaseSig) return;
+  chaseSig = sig;
+
+  box.textContent = '';
+  caveat.hidden = true;
+  caveat.textContent = '';
+
+  if (th < 2) {
+    note.textContent = 'aus';
+    lead.textContent = 'Diese Beobachtung ist ausgeschaltet (Schwelle 0). Einschalten in der Einstellung engine.chase.threshold.';
+    return;
+  }
+  if (!watched) {
+    note.textContent = 'in diesem Spielmodus aus';
+    lead.textContent = profiles.length
+      ? `Diese Beobachtung läuft nur in den Anzeigeprofilen: ${profiles.join(', ')}. Der gerade erkannte Modus gehört nicht dazu.`
+      : 'Für diese Beobachtung ist kein Anzeigeprofil eingetragen.';
+    return;
+  }
+
+  note.textContent = list.length
+    ? `${list.length} von ${nPlayers} Spielern · Schwelle ${th}`
+    : `${th} Treffer hintereinander · ${nPlayers} Spieler im Match`;
+  lead.textContent = `Wer in diesem Match mindestens einmal ${th}-mal hintereinander dieselbe Person getroffen hat, steht hier — die Liste bleibt bis zum nächsten Match stehen. Das ist ein Hinweis zum Nachschauen und kein Nachweis: Fehlschüsse dazwischen unterbrechen die Serie nicht, ein Treffer auf jemand anderen setzt sie zurück, und bei Schwelle 3 landet erfahrungsgemäß ein gutes Drittel aller Spieler irgendwann hier.`;
+
+  if (nPlayers > 0 && nPlayers < CHASE_LOW_SIGNAL) {
+    caveat.textContent = `Nur ${nPlayers} Spieler im Match: bei so wenigen Gegnern ist eine Serie von ${th} Treffern auf dieselbe Person völlig normal und sagt so gut wie nichts.`;
+    caveat.hidden = false;
+  }
+
+  if (!list.length) {
+    box.append(el('p', { className: 'chase-empty' }, 'Derzeit niemand auffällig.'));
+    return;
+  }
+
+  const tbl = el('table', { className: 'stat chase-table' });
+  const head = el('tr');
+  const HEAD = [
+    ['Spieler-Kennung', 'Die Kennung, unter der die Anlage diesen Spieler führt.'],
+    ['Spieler', 'Der Name aus dem Datenstrom der Anlage.'],
+    ['blieb dran an', 'Die Person, auf die seine längste Serie ging.'],
+    ['längste Serie', 'Die meisten Treffer, die er in diesem Match ohne Unterbrechung auf dieselbe Person gesetzt hat.'],
+    ['Serien', 'So oft kam in diesem Match überhaupt eine Serie zustande.'],
+    ['zuletzt', 'Wann eine solche Serie zuletzt weiterlief. „läuft" heißt: gerade jetzt.'],
+  ];
+  for (const [h, t] of HEAD) head.append(el('th', { title: t }, h));
+  tbl.append(head);
+  for (const c of list.slice(0, CHASE_MAX_ROWS)) {
+    const tr = el('tr');
+    tr.append(el('td', { className: 'chase-id' }, c.playerId == null ? '' : String(c.playerId)));
+    // Bewusst NICHT die Klasse `pl`: die klebt in .stat-scroll links fest, und
+    // hier gaebe es zwei Namensspalten, die sich dann uebereinanderlegen.
+    tr.append(el('td', { className: 'chase-name' }, c.playerName == null ? '' : String(c.playerName)));
+    tr.append(el('td', { className: 'chase-name' }, c.targetName == null ? '' : String(c.targetName)));
+    tr.append(el('td', {}, `${num(c.streak)}×`));
+    tr.append(el('td', {}, String(Math.max(1, num(c.runs)))));
+    tr.append(el('td', { className: 'chase-ago' }, c.open ? 'läuft' : chaseAgo(c.lastAt)));
+    tbl.append(tr);
+  }
+  box.append(el('div', { className: 'stat-scroll' }, tbl));
+  if (list.length > CHASE_MAX_ROWS) {
+    box.append(el('p', { className: 'chase-empty' }, `… und ${list.length - CHASE_MAX_ROWS} weitere.`));
+  }
+}
+
 // ---------------- Legende ----------------
 // Erklaert jede Kennzahl, die im AKTUELLEN Spielmodus zu sehen ist, dazu die
 // Lesehilfen der Anzeige. Texte kommen aus /api/modes (`help`); die Legende
@@ -867,7 +982,7 @@ function renderLegend(s, scols, sm5) {
   const body = $('legend-body');
   if (!body) return;
   const modeLabel = (s.mode && typeof s.mode.label === 'string' && s.mode.label) ? s.mode.label : '';
-  const sig = `${modeLabel} ${sm5} ${scols.map((c) => c.key + '/' + (c.received || '')).join(',')}`;
+  const sig = `${modeLabel}\u0000${sm5}\u0000${scols.map((c) => c.key + '/' + (c.received || '')).join(',')}`;
   if (sig === legendSig) return;
   legendSig = sig;
 
@@ -1098,15 +1213,17 @@ const events = (() => {
     }
   }
 
+  // `/api/logs/events` ist der EINZIGE Endpunkt dafuer (src/apiServer.js). Hier
+  // stand frueher zusaetzlich `/api/events/file` aus einer aelteren Fassung —
+  // den Pfad gibt es serverseitig nicht, der zweite Versuch lief immer ins 404.
   async function probeFile() {
     const link = $('ev-file');
     if (!link) return;
-    for (const path of ['/api/logs/events', '/api/events/file']) {
-      try {
-        const res = await fetch(path, { method: 'HEAD', headers: token ? { Authorization: 'Bearer ' + token } : {} });
-        if (res.ok) { link.href = path + (token ? `?token=${encodeURIComponent(token)}` : ''); link.hidden = false; return; }
-      } catch {}
-    }
+    const path = '/api/logs/events';
+    try {
+      const res = await fetch(path, { method: 'HEAD', headers: token ? { Authorization: 'Bearer ' + token } : {} });
+      if (res.ok) { link.href = path + (token ? `?token=${encodeURIComponent(token)}` : ''); link.hidden = false; }
+    } catch {}
   }
 
   async function onShow() {

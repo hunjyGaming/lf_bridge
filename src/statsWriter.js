@@ -4,9 +4,9 @@ const fs = require('fs');
 const path = require('path');
 const { readable } = require('./eventCatalog');
 const {
-  FAMILIES, DEFAULT_FAMILY, FAMILY_DEFAULT_PROFILE, counterColumns, statFields,
+  FAMILIES, FAMILY_DEFAULT_PROFILE, counterColumns, statFields,
   csvColumns, profileFields, profileSort, profileOf, withProfile,
-  normProfile, resolveModeWithProfile, SM5_OFFICIAL_FIELDS, snake,
+  normFamily, normProfile, resolveModeWithProfile, SM5_OFFICIAL_FIELDS, snake,
 } = require('./gameModes');
 
 /**
@@ -668,10 +668,10 @@ class StatsWriter {
     const body = rows.map((r) => cols.map((c) => csvCell(r[c], delim)).join(delim)).join('\r\n');
     if (append) {
       const exists = fs.existsSync(file);
-      const chunk = (exists ? '' : (this.cfg.bom ? '﻿' : '') + cols.join(delim) + '\r\n') + body + (body ? '\r\n' : '');
+      const chunk = (exists ? '' : (this.cfg.bom ? '\uFEFF' : '') + cols.join(delim) + '\r\n') + body + (body ? '\r\n' : '');
       fs.appendFileSync(file, chunk);
     } else {
-      const chunk = (this.cfg.bom ? '﻿' : '') + cols.join(delim) + '\r\n' + body + (body ? '\r\n' : '');
+      const chunk = (this.cfg.bom ? '\uFEFF' : '') + cols.join(delim) + '\r\n' + body + (body ? '\r\n' : '');
       const tmp = `${file}.tmp`;
       fs.writeFileSync(tmp, chunk);
       fs.renameSync(tmp, file);
@@ -683,7 +683,7 @@ class StatsWriter {
     let text = '';
     try { text = fs.readFileSync(file, 'utf8'); } catch { return []; }
     const delim = this.cfg.delimiter;
-    const lines = text.replace(/^﻿/, '').split(/\r?\n/).filter(Boolean);
+    const lines = text.replace(/^\uFEFF/, '').split(/\r?\n/).filter(Boolean);
     if (lines.length < 2) return [];
     const header = splitCsv(lines[0], delim);
     const out = [];
@@ -871,7 +871,7 @@ class StatsWriter {
       const buf = this.readFile(name);
       if (!buf) continue;
       const delim = this.cfg.delimiter;
-      const lines = buf.toString('utf8').replace(/^﻿/, '').split(/\r?\n/).filter(Boolean);
+      const lines = buf.toString('utf8').replace(/^\uFEFF/, '').split(/\r?\n/).filter(Boolean);
       if (lines.length < 2) continue;
       const header = splitCsv(lines[0], delim);
       return lines.slice(1).map((l) => {
@@ -886,12 +886,6 @@ class StatsWriter {
 }
 
 // ---- helpers ----
-
-/** Normalize an untrusted family name. Anything unknown -> the default family. */
-function normFamily(family) {
-  const f = String(family == null ? '' : family).trim().toLowerCase();
-  return f === FAMILIES.LASERBALL ? FAMILIES.LASERBALL : (f === FAMILIES.SM5 ? FAMILIES.SM5 : DEFAULT_FAMILY);
-}
 
 /** A defensive copy of `state.mode`, or null when the state carries none. */
 function pickMode(state) {
@@ -932,8 +926,32 @@ function fallbackMode(state) {
 /** Unambiguous composite key for the player/mode history map. */
 function modeMapKey(id, modeKey) { return JSON.stringify([String(id), String(modeKey)]); }
 
+/**
+ * Cells that a spreadsheet would run as a FORMULA instead of reading as text.
+ *
+ * Excel, LibreOffice and Google Sheets all treat a cell beginning with `=`,
+ * `+`, `-`, `@`, a tab or a CR as a formula — including `=cmd|'…'!A0`, the DDE
+ * form that pops a "start external program?" box. Every text cell we write can
+ * carry a value from the TDF stream, and a PLAYER NAME is chosen by the player
+ * (his Laserforce codename), so this is reachable from outside: name yourself
+ * `=cmd|…` once and the name lands in `all_players_<family>.csv`, which the
+ * operator opens in German Excel (`delimiter: ';'`, `bom: true` — the file is
+ * written for exactly that).
+ */
+const CSV_FORMULA_START = /^[=+\-@\t\r]/;
+/** A leading `-` is normal for a NEGATIVE NUMBER and must stay untouched. */
+const CSV_NUMERIC = /^-?\d+(?:[.,]\d+)?(?:[eE][+-]?\d+)?$/;
+
+/**
+ * One CSV cell. Quotes what the format requires, and additionally prefixes a
+ * single quote to anything a spreadsheet would otherwise execute. The
+ * apostrophe is the conventional "this is text" marker: Excel and LibreOffice
+ * hide it, and a CSV reader that does not care sees one extra leading
+ * character on cells that could never have been a legitimate number.
+ */
 function csvCell(v, delim) {
-  const s = v == null ? '' : String(v);
+  let s = v == null ? '' : String(v);
+  if (CSV_FORMULA_START.test(s) && !CSV_NUMERIC.test(s)) s = `'${s}`;
   return /["\r\n]/.test(s) || s.includes(delim) ? `"${s.replace(/"/g, '""')}"` : s;
 }
 function splitCsv(line, delim) {
@@ -982,8 +1000,5 @@ module.exports = {
   StatsWriter,
   playerColumns, totalColumns, tailColumns, familyProfile,
   HEAD_COLS, RESULT_COLS, TAIL_COLS, EVENT_COLS, MATCH_COLS, PLAYER_MODE_COLS,
-  // kept for compatibility with anything that imported the old constant names
-  PLAYER_COLS: playerColumns(FAMILIES.LASERBALL),
-  TOTAL_COLS: totalColumns(FAMILIES.LASERBALL),
   csvCell, splitCsv,
 };

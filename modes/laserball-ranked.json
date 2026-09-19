@@ -1,0 +1,11 @@
+{
+  "beschreibung": "Laserball Ranked. Missionsnummer 28 ist die einzige öffentlich belegte Laserball-Nummer.",
+  "schluessel": "laserball_ranked",
+  "anzeigename": "Laserball Ranked",
+  "missionsnummern": [
+    28
+  ],
+  "familie": "laserball",
+  "profil": "laserball",
+  "hinweis": "Ihre weiteren Laserball-Varianten haben eigene Nummern. Sind sie gemessen, gehören sie zusätzlich in \"missionsnummern\", z. B. [28, 31]. \"familie\": \"laserball\" nur eintragen, wenn im Inspektor 11xx-Codes aufgetaucht sind."
+}

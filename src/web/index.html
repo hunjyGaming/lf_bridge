@@ -94,6 +94,22 @@
     </div>
     <div class="stat-cols" id="stat-cols"></div>
 
+    <!-- Beobachtung „Hinterherlaufen": ein VERDACHT, keine Feststellung.
+         Gelistet wird, wer mehrmals hintereinander dieselbe Person getroffen
+         hat. Spieler- und Zielnamen kommen aus dem TCP-Feed und werden
+         ausschliesslich per textContent gesetzt (src/web/app.js, renderChase).
+         Ist niemand auffaellig, steht das ausdruecklich da — eine leere
+         Tabelle ohne Erklaerung waere schlechter. -->
+    <section class="chase-wrap" id="chase-wrap" aria-label="Beobachtung Hinterherlaufen">
+      <div class="live-tools">
+        <span class="eyebrow">Beobachtung · wer bleibt an derselben Person dran?</span>
+        <span class="muted" id="chase-note"></span>
+      </div>
+      <p class="chase-lead" id="chase-lead"></p>
+      <p class="chase-caveat" id="chase-caveat" hidden></p>
+      <div class="chase-box" id="chase-box"></div>
+    </section>
+
     <!-- Legende: erklaert jede Kennzahl, die im aktuellen Spielmodus zu sehen
          ist. Inhalt kommt aus /api/modes (label + help) und wird neu gebaut,
          sobald sich der Spaltensatz aendert. -->

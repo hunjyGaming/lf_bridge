@@ -3,6 +3,7 @@
 const fs = require('fs');
 const path = require('path');
 const { isHash, hashPasswordSync } = require('./auth');
+const { reloadModes, modeConfigStatus } = require('./gameModes');
 
 /**
  * Configuration.
@@ -15,6 +16,13 @@ const { isHash, hashPasswordSync } = require('./auth');
  *
  * config.json is created on first run, git-ignored, written with mode 0600.
  * See docs/CONFIG.md for the full variable list.
+ *
+ * THE MODE FILES RIDE ALONG. `modes/*.json` is not part of config.json — it is
+ * hand-edited next to it and has its own validation (src/gameModes.js). But it
+ * is applied at exactly the same two moments: on `load()` and on every
+ * `update()` from the web console. Editing a mode file and hitting Save in the
+ * console is therefore enough; the service does not have to be restarted for a
+ * new mission number to be recognised. See docs/GAMEMODES.md.
  */
 
 function loadDotEnv() {
@@ -68,6 +76,33 @@ function defaults() {
     // Match engine
     engine: {
       emitUnknownEvents: true,     // emit a generic lf_event for every type-4 code the parser does not act on
+
+      // Verdacht „Hinterherlaufen" (docs/GAMEMODES.md, Abschnitt
+      // „Hinterherlaufen"). Reine Beobachtung — es wird nichts bestraft,
+      // nichts gespeichert und nichts am Spiel verändert.
+      chase: {
+        // Wieviele Treffer hintereinander auf DIESELBE Person, bevor das Paar
+        // in der Liste auftaucht. 0 oder 1 = Erkennung aus.
+        threshold: 3,
+        // Für welche ANZEIGEPROFILE die Erkennung läuft — nicht nach
+        // Missionsnummer und nicht nach Familie. Die Standard-Nummer der
+        // Anlage ist noch unbekannt; bis sie in modes/standard.json steht,
+        // laufen Standardspiele als Profil `sm5`. Zum Ausprobieren so lange
+        // `sm5` mit aufnehmen.
+        profiles: ['standard'],
+      },
+    },
+
+    // Verdacht „Hinterherlaufen" mitschreiben (docs/GAMEMODES.md).
+    // Vorgabe AN — anders als beim Roh-Mitschnitt, und mit Absicht: die Datei
+    // ist der eigentliche Zweck der Funktion („erstmal nur für die
+    // Auswertung"), sie wächst um wenige Kilobyte am Tag statt um Megabyte, und
+    // geschrieben wird einmal je Matchende statt laufend. Sie enthält
+    // Spielernamen und liegt darum unter data/ (per .gitignore nicht im Repo).
+    chaseLog: {
+      enabled: true,
+      dir: 'data/chase',
+      summary: true,               // zusätzlich die Tagesübersicht schreiben
     },
 
     // Human-readable append-only event-log file (docs/LOGGING.md)
@@ -111,6 +146,39 @@ function defaults() {
 
     // Optional allowlist for outbound targets: "host" or "host:port", "*.suffix" ok. [] = allow all
     outputAllow: [],
+
+    // MQTT out -> FunZone location server (docs/MQTT.md).
+    // OFF by default: without a broker on the hall PC this must cost nothing.
+    // NOTE there is no username/password here on purpose — see mqttCredentials()
+    // below. Broker credentials live in the environment and never in config.json.
+    mqtt: {
+      enabled: false,
+      url: 'mqtt://127.0.0.1:1883',
+      // The location server subscribes to exactly this literal topic and drops
+      // anything that is not it — no wildcard. Changing it cuts the link.
+      topic: '/decs/lfpassthrough',
+      // false = every message goes to `topic` and is told apart by its `event`
+      // field. That is the ONLY thing the location server can receive; true is
+      // for your own broker with a wildcard subscription.
+      topicSuffixes: false,
+      statusTopic: '',            // '' = the data topic (online notice + last will)
+      qos: 1,
+      retain: false,
+      clientId: '',               // '' = lf-bridge-<hostname>-<random>
+      reconnectSeconds: 5,
+      // Messages buffered in MEMORY while the broker is away. 0 = none, and
+      // that is the default on purpose: a memory buffer does not survive a
+      // restart, so `publish()` may not report a buffered message as delivered
+      // (src/mqtt.js). Retention belongs to the caller that has a disk queue —
+      // the mission report has one. Raise it only for an installation that has
+      // no such caller and wants best-effort catch-up; the oldest is dropped
+      // first and every drop is counted in getStatus().
+      queueMax: 0,
+      tlsInsecure: false,         // mqtts:// with a self-signed certificate
+      publishMatchStart: true,
+      publishMatchEnd: true,
+      publishStatus: true,        // online notice on connect + last will on death
+    },
 
     // Startup / IP-change notification — "which IP and port am I on?" (docs/NOTIFY.md)
     notify: {
@@ -166,6 +234,31 @@ function applyEnv(cfg, pins) {
   if (Ei('LF_MATCH_END_BLOCK_SECONDS') !== undefined) { cfg.matchEnd.endBlockSeconds = Ei('LF_MATCH_END_BLOCK_SECONDS'); P('matchEnd.endBlockSeconds', 1); }
 
   if (Eb('LF_EMIT_UNKNOWN_EVENTS') !== undefined) { cfg.engine.emitUnknownEvents = Eb('LF_EMIT_UNKNOWN_EVENTS'); P('engine.emitUnknownEvents', 1); }
+
+  if (Ei('LF_CHASE_STREAK') !== undefined) { cfg.engine.chase.threshold = Ei('LF_CHASE_STREAK'); P('engine.chase.threshold', 1); }
+  if (E('LF_CHASE_PROFILES')) { cfg.engine.chase.profiles = E('LF_CHASE_PROFILES').split(',').map((s) => s.trim()).filter(Boolean); P('engine.chase.profiles', 1); }
+  if (Eb('LF_CHASE_LOG_ENABLED') !== undefined) { cfg.chaseLog.enabled = Eb('LF_CHASE_LOG_ENABLED'); P('chaseLog.enabled', 1); }
+  if (E('LF_CHASE_LOG_DIR')) { cfg.chaseLog.dir = E('LF_CHASE_LOG_DIR'); P('chaseLog.dir', 1); }
+  if (Eb('LF_CHASE_LOG_SUMMARY') !== undefined) { cfg.chaseLog.summary = Eb('LF_CHASE_LOG_SUMMARY'); P('chaseLog.summary', 1); }
+
+  // ---- MQTT out (docs/MQTT.md) ----
+  // LF_MQTT_USERNAME / LF_MQTT_PASSWORD are NOT read here on purpose: they must
+  // never end up in cfg, because cfg is what gets written to config.json and
+  // handed to the console. See mqttCredentials().
+  if (Eb('LF_MQTT_ENABLED') !== undefined) { cfg.mqtt.enabled = Eb('LF_MQTT_ENABLED'); P('mqtt.enabled', 1); }
+  if (E('LF_MQTT_URL')) { cfg.mqtt.url = E('LF_MQTT_URL'); P('mqtt.url', 1); }
+  if (E('LF_MQTT_TOPIC')) { cfg.mqtt.topic = E('LF_MQTT_TOPIC'); P('mqtt.topic', 1); }
+  if (Eb('LF_MQTT_TOPIC_SUFFIXES') !== undefined) { cfg.mqtt.topicSuffixes = Eb('LF_MQTT_TOPIC_SUFFIXES'); P('mqtt.topicSuffixes', 1); }
+  if (process.env.LF_MQTT_STATUS_TOPIC !== undefined) { cfg.mqtt.statusTopic = process.env.LF_MQTT_STATUS_TOPIC; P('mqtt.statusTopic', 1); }
+  if (Ei('LF_MQTT_QOS') !== undefined) { cfg.mqtt.qos = Ei('LF_MQTT_QOS'); P('mqtt.qos', 1); }
+  if (Eb('LF_MQTT_RETAIN') !== undefined) { cfg.mqtt.retain = Eb('LF_MQTT_RETAIN'); P('mqtt.retain', 1); }
+  if (E('LF_MQTT_CLIENT_ID')) { cfg.mqtt.clientId = E('LF_MQTT_CLIENT_ID'); P('mqtt.clientId', 1); }
+  if (Ei('LF_MQTT_RECONNECT_SECONDS') !== undefined) { cfg.mqtt.reconnectSeconds = Ei('LF_MQTT_RECONNECT_SECONDS'); P('mqtt.reconnectSeconds', 1); }
+  if (Ei('LF_MQTT_QUEUE_MAX') !== undefined) { cfg.mqtt.queueMax = Ei('LF_MQTT_QUEUE_MAX'); P('mqtt.queueMax', 1); }
+  if (Eb('LF_MQTT_TLS_INSECURE') !== undefined) { cfg.mqtt.tlsInsecure = Eb('LF_MQTT_TLS_INSECURE'); P('mqtt.tlsInsecure', 1); }
+  if (Eb('LF_MQTT_MATCH_START') !== undefined) { cfg.mqtt.publishMatchStart = Eb('LF_MQTT_MATCH_START'); P('mqtt.publishMatchStart', 1); }
+  if (Eb('LF_MQTT_MATCH_END') !== undefined) { cfg.mqtt.publishMatchEnd = Eb('LF_MQTT_MATCH_END'); P('mqtt.publishMatchEnd', 1); }
+  if (Eb('LF_MQTT_STATUS') !== undefined) { cfg.mqtt.publishStatus = Eb('LF_MQTT_STATUS'); P('mqtt.publishStatus', 1); }
 
   if (Eb('LF_EVENTLOG_ENABLED') !== undefined) { cfg.eventLog.enabled = Eb('LF_EVENTLOG_ENABLED'); P('eventLog.enabled', 1); }
   if (E('LF_EVENTLOG_DIR')) { cfg.eventLog.dir = E('LF_EVENTLOG_DIR'); P('eventLog.dir', 1); }
@@ -312,6 +405,22 @@ function normalize(raw) {
 
   c.engine.emitUnknownEvents = bool(raw.engine?.emitUnknownEvents, d.engine.emitUnknownEvents);
 
+  // 0 und 1 heißen beide „aus": eine Serie von einem Treffer wäre keine Serie.
+  c.engine.chase.threshold = clampInt(raw.engine?.chase?.threshold, d.engine.chase.threshold, 0, 50);
+  // Profilnamen sind kleingeschrieben und kurz (`standard`, `sm5`, `laserball`
+  // sowie eigene aus modes/). Alles andere fliegt raus, die Liste ist begrenzt.
+  c.engine.chase.profiles = Array.isArray(raw.engine?.chase?.profiles)
+    ? raw.engine.chase.profiles
+      .filter((s) => typeof s === 'string')
+      .map((s) => s.trim().toLowerCase().replace(/[^a-z0-9_-]/g, '').slice(0, 40))
+      .filter(Boolean)
+      .slice(0, 16)
+    : d.engine.chase.profiles.slice();
+
+  c.chaseLog.enabled = bool(raw.chaseLog?.enabled, d.chaseLog.enabled);
+  c.chaseLog.dir = str(raw.chaseLog?.dir, d.chaseLog.dir).trim() || d.chaseLog.dir;
+  c.chaseLog.summary = bool(raw.chaseLog?.summary, d.chaseLog.summary);
+
   c.eventLog.enabled = bool(raw.eventLog?.enabled, d.eventLog.enabled);
   c.eventLog.dir = str(raw.eventLog?.dir, d.eventLog.dir).trim() || d.eventLog.dir;
   c.eventLog.rotate = (['daily', 'match', 'none'].includes(raw.eventLog?.rotate)) ? raw.eventLog.rotate : d.eventLog.rotate;
@@ -345,9 +454,75 @@ function normalize(raw) {
     ? raw.outputAllow.filter((s) => typeof s === 'string' && s.length && s.length < 300).map((s) => s.trim().toLowerCase()).slice(0, 50)
     : d.outputAllow;
 
+  c.mqtt = normalizeMqtt(raw.mqtt, d.mqtt);
+
   c.notify = normalizeNotify(raw.notify, d.notify);
 
   return c;
+}
+
+/**
+ * Broker URL. Only the schemes the `mqtt` package actually speaks; anything
+ * else falls back to the default, because a typo here would otherwise produce
+ * a reconnect loop against nothing.
+ */
+const MQTT_SCHEMES = ['mqtt:', 'mqtts:', 'tcp:', 'ssl:', 'tls:', 'ws:', 'wss:'];
+function validMqttUrl(u, fallback) {
+  try {
+    const x = new URL(String(u));
+    return MQTT_SCHEMES.includes(x.protocol) ? x.toString().replace(/\/$/, '') : fallback;
+  } catch { return fallback; }
+}
+
+/**
+ * A publish topic, never a subscription: `+` and `#` are wildcards and must not
+ * appear, and MQTT forbids the NUL character outright. An empty result falls
+ * back so we can never publish to "".
+ */
+function mqttTopic(v, fallback) {
+  const s = String(typeof v === 'string' ? v : '').trim();
+  if (!s) return fallback;
+  if (/[+#\x00]/.test(s)) return fallback;
+  return s.slice(0, 300);
+}
+
+function normalizeMqtt(raw, d) {
+  raw = raw && typeof raw === 'object' ? raw : {};
+  const m = structuredClone(d);
+  m.enabled = bool(raw.enabled, d.enabled);
+  m.url = validMqttUrl(raw.url, d.url);
+  m.topic = mqttTopic(raw.topic, d.topic);
+  m.topicSuffixes = bool(raw.topicSuffixes, d.topicSuffixes);
+  // '' is a legal value here and means "use the data topic"
+  m.statusTopic = typeof raw.statusTopic === 'string' && !raw.statusTopic.trim() ? '' : mqttTopic(raw.statusTopic, d.statusTopic);
+  m.qos = clampInt(raw.qos, d.qos, 0, 2);
+  m.retain = bool(raw.retain, d.retain);
+  m.clientId = str(raw.clientId, d.clientId).trim().slice(0, 96);
+  m.reconnectSeconds = clampInt(raw.reconnectSeconds, d.reconnectSeconds, 1, 3600);
+  // 0 (the default) = buffer nothing at all; the ceiling keeps a broker outage
+  // from eating RAM in the installations that do raise it
+  m.queueMax = clampInt(raw.queueMax, d.queueMax, 0, 10000);
+  m.tlsInsecure = bool(raw.tlsInsecure, d.tlsInsecure);
+  m.publishMatchStart = bool(raw.publishMatchStart, d.publishMatchStart);
+  m.publishMatchEnd = bool(raw.publishMatchEnd, d.publishMatchEnd);
+  m.publishStatus = bool(raw.publishStatus, d.publishStatus);
+  return m;
+}
+
+/**
+ * Broker credentials — deliberately NOT part of `config.data`.
+ *
+ * Everything in `config.data` is written to `config.json` and handed to the web
+ * console by `GET /api/config`. A broker password has no business in either, so
+ * it is read straight from the environment at the moment it is needed and never
+ * stored anywhere else. src/mqtt.js is the only caller, `getStatus()` only ever
+ * reports WHETHER credentials exist.
+ */
+function mqttCredentials() {
+  return {
+    username: process.env.LF_MQTT_USERNAME || '',
+    password: process.env.LF_MQTT_PASSWORD || '',
+  };
 }
 
 function normalizeNotify(raw, d) {
@@ -393,6 +568,8 @@ class Config {
     this.file = file || path.resolve(process.cwd(), 'config.json');
     this.data = defaults();
     this.envPins = [];
+    /** Last result of reading `modes/` — see `reloadModes()` / `modeStatus()`. */
+    this.modes = null;
   }
 
   load() {
@@ -407,8 +584,27 @@ class Config {
     const pins = new Set();
     this.data = applyEnv(normalize(fromFile), pins);
     this.envPins = [...pins];
+    this.reloadModes();
     if (!fs.existsSync(this.file)) this.save();
     return this.data;
+  }
+
+  /**
+   * Re-read `modes/*.json`. Problems are reported by gameModes itself (German,
+   * with the file name, on stderr) and kept in `this.modes` so a status view can
+   * show them. Never throws: a broken mode file leaves the built-in modes in
+   * place and must not stop the config from loading.
+   */
+  reloadModes() {
+    try { this.modes = reloadModes(); }
+    catch (_err) { try { this.modes = modeConfigStatus(); } catch { this.modes = null; } }
+    return this.modes;
+  }
+
+  /** The state of the mode files — for the status endpoint and the console. */
+  modeStatus() {
+    try { return this.modes || modeConfigStatus(); }
+    catch (_err) { return null; }
   }
 
   save() {
@@ -441,6 +637,9 @@ class Config {
     const pins = new Set();
     this.data = applyEnv(normalize(merged), pins);
     this.envPins = [...pins];
+    // A console save is the operator's "apply now" — re-read the mode files too,
+    // so a mission number added by hand takes effect without a restart.
+    this.reloadModes();
     this.save();
     return this.data;
   }
@@ -455,4 +654,4 @@ function deepMerge(base, patch) {
   return base;
 }
 
-module.exports = { Config, defaults, normalize };
+module.exports = { Config, defaults, normalize, mqttCredentials };
