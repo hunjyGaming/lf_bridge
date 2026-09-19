@@ -17,7 +17,7 @@ Ordner (Standard): `data/stats/` neben dem Programm. Änderbar per `.env`
 - [Spalten: Spieler-Zeilen](#spalten-spieler-zeilen)
 - [Leere Zellen sind Absicht](#leere-zellen-sind-absicht)
 - [Zeilensortierung](#zeilensortierung)
-- [`stats_source`, `score_source` und `accuracy_source`](#stats_source-score_source-und-accuracy_source)
+- [`stats_source`, `score_source`, `accuracy_source` und `team_score_source`](#stats_source-score_source-accuracy_source-und-team_score_source)
 - [Spalten: `totals_<familie>.csv`](#spalten-totals_familiecsv)
 - [Spalten: `matches.csv`](#spalten-matchescsv)
 - [`player_modes.csv` — wer hat wann welchen Modus gespielt](#player_modescsv--wer-hat-wann-welchen-modus-gespielt)
@@ -195,8 +195,8 @@ Fünf Blöcke, immer in dieser Reihenfolge:
 | Spalte | Bezeichnung | Bedeutung |
 |---|---|---|
 | `score` | Punkte | Punktestand **dieses Spielers** |
-| `team_score` | Punkte eigenes Team | Endstand des eigenen Teams |
-| `opp_score` | Punkte bestes Gegnerteam | Endstand des stärksten Gegnerteams |
+| `team_score` | Punkte eigenes Team | Endstand des eigenen Teams. **Im Standardmodus von lf_live aus den Spielerpunkten summiert** — siehe `team_score_source` |
+| `opp_score` | Punkte bestes Gegnerteam | Endstand des stärksten Gegnerteams, gleiche Herkunft |
 | `result` | Spielausgang | `win` / `loss` / `draw`, aus `team_score` gegen `opp_score` |
 | `duration_s` | Spieldauer (Sekunden) | tatsächlich gespielte Zeit in Sekunden |
 
@@ -252,9 +252,15 @@ Die wichtigsten Paare, damit die Richtung klar ist:
 
 ### Block 5 — Herkunft (immer die letzten Spalten)
 
-`stats_source`, `score_source` und — in den Profilen `standard` und `sm5`, die
-eine Trefferquote führen — `accuracy_source`.
-[Was die Werte heißen](#stats_source-score_source-und-accuracy_source).
+`stats_source`, `score_source`, — in den Profilen `standard` und `sm5`, die
+eine Trefferquote führen — `accuracy_source`, und ganz zuletzt
+`team_score_source`.
+[Was die Werte heißen](#stats_source-score_source-accuracy_source-und-team_score_source).
+
+> **`team_score_source` ist ANGEHÄNGT, nicht einsortiert.** Es steht als
+> allerletzte Spalte hinter `accuracy_source` (bzw. hinter `score_source`, wo
+> es keine Trefferquote gibt). Alle bisherigen Spaltennamen und ihre
+> Reihenfolge sind unverändert — vorhandene Auswertungen laufen weiter.
 
 ---
 
@@ -299,9 +305,9 @@ zuerst** — sie steht in `src/gameModes.js` neben den Spalten des Profils
 
 ---
 
-## `stats_source`, `score_source` und `accuracy_source`
+## `stats_source`, `score_source`, `accuracy_source` und `team_score_source`
 
-Drei Spalten, die sonst niemand versteht — deshalb ausführlich:
+Vier Spalten, die sonst niemand versteht — deshalb ausführlich:
 
 ### `stats_source` — Bezeichnung: **Herkunft der Zähler**
 
@@ -343,8 +349,33 @@ Wer ehrlich auswerten will, filtert auf `accuracy_source == "tdf7"`.
 | `tdf` | **Punkte von der Anlage.** Laserforce hat während des Matches Punktestände gemeldet (TDF-Zeilentyp 5); das sind die offiziellen Werte. |
 | `internal` | **Eigenzählung.** Es kam keine einzige Punktezeile an; lf_live hat Laserball-Tore selbst gezählt. Bei SM5 bleibt der Punktestand dann bei 0. |
 
-Da `result` aus `team_score` und `opp_score` abgeleitet wird, sagt
-`score_source` indirekt auch, wie belastbar Sieg/Niederlage in dieser Zeile sind.
+`score_source` bezieht sich auf die Spalte `score` — den Punktestand **dieses
+Spielers**. Für die Teamzahlen dahinter gilt die nächste Spalte.
+
+### `team_score_source` — Bezeichnung: **Herkunft der Teampunkte**
+
+Die Spalte, die zur Ehrlichkeit dazugehört: `team_score`, `opp_score` und damit
+`result` sind nicht in jedem Modus Zahlen der Anlage.
+
+| Wert | Bedeutung |
+|---|---|
+| `tdf` | **Teampunkte von der Anlage.** Laserforce hat Punktestände auf eine Team-Kennung gemeldet (TDF-Zeilentyp 5). Das ist der Laserball-Fall. |
+| `derived` | **Von lf_live summiert.** Die Anlage rechnet in diesem Modus nur je Spieler ab, also hat lf_live die Spielerpunkte je Team addiert. Die Zahl ist korrekt, aber **unsere Rechnung, nicht die der Anlage.** Das ist der Normalfall im Standardmodus (Nummer 7). |
+| `internal` | **Eigenzählung.** Keine verwertbaren Punktezeilen; es zählen die selbst gezählten Laserball-Tore. |
+
+**Warum es diese Spalte gibt.** An vier echten Mitschnitten des Standardmodus
+(19.09.2026) gemessen schickt die Anlage dort **keine einzige** Team-Punktezeile
+— 5551 Typ-5-Zeilen, alle je Spieler. Bis diese Spalte eingeführt wurde, standen
+in `team_score`/`opp_score` deshalb Nullen und in `result` durchweg `draw`. Seit
+`derived` steht dort die Summe der Spielerpunkte, ausdrücklich gekennzeichnet.
+
+Wer nur Zahlen der Anlage auswerten will, filtert auf
+`team_score_source == "tdf"`. Wer den Spielausgang auswerten will, nimmt alles
+außer `internal` — `derived` ist so verlässlich wie die Spielerpunkte, aus denen
+es gerechnet ist.
+
+Hintergrund und Messung:
+[LASERFORCE.md](LASERFORCE.md#nicht-jede-anlage-meldet-teampunkte--teamscoresource).
 
 ---
 
@@ -400,13 +431,21 @@ deshalb für beide Familien gemeinsam.
 | `winner_score` | höchster Teamstand |
 | `score_source` | `tdf` oder `internal`, wie oben |
 | `events` | Anzahl der aufgezeichneten Ereignisse |
+| `exit_codes` | die Typ-6-Exit-Codes dieses Matches, durch `\|` getrennt — reine Diagnose |
+| `end_source` | woran das Matchende erkannt wurde |
+| `team_score_source` | **angehängt** — `tdf`, `derived` oder `internal`, [wie oben](#team_score_source--bezeichnung-herkunft-der-teampunkte). Sagt, ob `scores`, `winner_team` und `winner_score` von der Anlage kommen oder unsere Summe sind |
 
 Beispiel:
 
 ```
-match_id;date;started_at;ended_at;duration_s;mode_key;mode_label;mode_number;family;profile;players;teams;scores;winner_team;winner_score;score_source;events
-lb1;2026-09-16;2026-09-16T10:46:38.377Z;2026-09-16T10:46:38.378Z;600;laserball_ranked;Laserball Ranked;28;laserball;laserball;8;2;Rot:5 | Blau:3;Rot;5;tdf;412
+match_id;date;started_at;ended_at;duration_s;mode_key;mode_label;mode_number;family;profile;players;teams;scores;winner_team;winner_score;score_source;events;exit_codes;end_source;team_score_source
+lb1;2026-09-16;2026-09-16T10:46:38.377Z;2026-09-16T10:46:38.378Z;600;laserball_ranked;Laserball Ranked;28;laserball;laserball;8;2;Rot:5 | Blau:3;Rot;5;tdf;412;;0101;tdf
+st1;2026-09-19;2026-09-19T10:46:50.000Z;2026-09-19T10:54:50.100Z;480;standard;| Standard LZ - 2 Teams |;7;sm5;standard;30;3;Blaues Team:75310 | Rotes Team:79550 | Neutral:0;Rotes Team;79550;tdf;9181;;0101;derived
 ```
+
+Die zweite Zeile ist ein echtes Standardspiel vom 19.09.2026: `score_source`
+steht auf `tdf` (die Spielerpunkte kamen von der Anlage), `team_score_source`
+auf `derived` (die Teamsumme ist unsere).
 
 ---
 

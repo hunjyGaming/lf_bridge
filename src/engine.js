@@ -149,8 +149,19 @@ const SM5_COUNTERS = {
 // numerically.
 const CHASE_TAG_CODES = new Set(['0205', '0206']);
 
-/** Tags in a row on the same person before the pair is listed. */
-const CHASE_THRESHOLD_DEFAULT = 3;
+/**
+ * Tags in a row on the same person before the pair is listed.
+ *
+ * MEASURED, not chosen: over the operator's four real standard games of
+ * 19.09.2026 a threshold of 3 was reached at least once per match by 32 %-63 %
+ * of ALL players — as a list of conspicuous behaviour that is worthless. At 5
+ * it is 0 %-5 % (docs/GAMEMODES.md). 5 is therefore the default here as well,
+ * so the fallback matches `src/config.js` / `.env.example`: the service passes
+ * the configured value in through `setChaseConfig()`, but an engine built on
+ * its own (tests, the location-server integration) sees only this constant, and
+ * two different defaults for one thing is a trap.
+ */
+const CHASE_THRESHOLD_DEFAULT = 5;
 
 /**
  * DISPLAY PROFILES the detection runs for — not mission numbers and not the
@@ -240,6 +251,26 @@ function durationMs(raw) {
 
 /** Object keys that must never be written from stream data. */
 const UNSAFE_KEYS = new Set(['__proto__', 'prototype', 'constructor']);
+
+/**
+ * ADDITIVE — how long (in MATCH time, not wall time) the engine waits after the
+ * first PLAYER score line before it commits to summing the team scores itself.
+ *
+ * Why a wait at all: in Laserball the arena sends the team score line and the
+ * player score line of one and the same goal under the SAME `time` stamp, and
+ * nothing promises which of the two crosses the wire first. Without a pause the
+ * label would read `derived` for a few milliseconds and then flip to `tdf` —
+ * exactly the flicker the display must never show. Inside the window the state
+ * stays on `internal`, which is what a match looks like in its first seconds
+ * anyway: no points yet, 0:0, and honest about it.
+ *
+ * Measured against the real recordings, score lines arrive within seconds of
+ * each other, so five seconds of match time is far more than the arena needs
+ * and still invisible against an eight-minute mission. The window is measured
+ * on the stream's own clock (`elapsedTime`), never on `Date.now()`, so a replay
+ * of a recording produces exactly the same result as the live match did.
+ */
+const TEAM_SCORE_SETTLE_MS = 5000;
 
 /**
  * Exit code of a type-6 line, kept as the RAW token the arena sent (`01`, `02`,
@@ -511,6 +542,19 @@ class Engine extends EventEmitter {
       durationKnown: false,   // false -> the UI counts UP instead of down
       remainingMs: null,      // derived: durationKnown ? duration - elapsed : null
       scoreSource: 'internal', // 'internal' (own count) | 'tdf' (type-5 lines)
+      // ---- additive: WHERE THE TEAM SCORE ON SCREEN COMES FROM -------------
+      // `gameState.scores[teamId]` carries the value to display in ALL three
+      // cases — nobody outside this engine adds anything up any more.
+      //   'tdf'      the arena reported team points itself (type-5 line whose
+      //              entity is a team index — Laserball).
+      //   'derived'  WE summed them from the player scores, because the arena
+      //              sends per-player type-5 lines only (Standard, SM5). Our
+      //              arithmetic, not the arena's — see `teamScoreDerived`.
+      //   'internal' no usable type-5 lines (yet); the old own count applies
+      //              (Laserball goals), and this is also the state inside the
+      //              settling window described at TEAM_SCORE_SETTLE_MS.
+      // The value only ever moves internal -> derived -> tdf, never back.
+      teamScoreSource: 'internal',
       // ---- additive: how and when the match ended ----------------------
       // null while a match is running and before the first match ever ran.
       endReason: null,        // 'mission_end'|'watchdog'|'stream_lost'|'next_match'|'shutdown'
@@ -530,6 +574,7 @@ class Engine extends EventEmitter {
     };
     this._resetEndDetection();
     this._resetChase();
+    this._resetTeamScoreSource();
     this.livePassesStream = [];
     this.playerStatusMap = {};
     this._eventSeq = 0;
@@ -728,6 +773,12 @@ class Engine extends EventEmitter {
     gs.endReason = reason;
     gs.endSource = endSource;
     gs.endedAt = Date.now();
+    // ADDITIVE: the match is over, so the settling window has nothing left to
+    // wait for — a mission that ended within its first seconds still gets its
+    // summed team score. This has to stand BEFORE the `match_end` event below
+    // carries `scores` out to the report and the CSV.
+    this._teamScoreSettled = true;
+    try { this._syncTeamScoreSource(); } catch (_err) { /* the own count stays */ }
     this.livePassesStream = [];
     this._stopEndWatch();
     this._streamLostAt = null;
@@ -806,6 +857,10 @@ class Engine extends EventEmitter {
     } catch (_err) {
       /* derived fields are best effort */
     }
+    // ADDITIVE: the single choke-point for the team score. It runs BEFORE the
+    // other syncs so anything reading `gameState.scores` afterwards — the API,
+    // the report, the CSV — sees the value that belongs on screen.
+    try { this._syncTeamScoreSource(); } catch (_err) { /* best effort, the own count stays */ }
     this._syncAccuracy();
     this._syncChase();
   }
@@ -1359,26 +1414,157 @@ class Engine extends EventEmitter {
       const value = toInt(this.tdfSchema.get('5', 'new', cols, 5, tabCols));
       if (value == null || entityRaw == null) return;
 
-      const pid = Engine.cleanId(String(entityRaw));
-      if (pid && Object.prototype.hasOwnProperty.call(gs.players, pid) && gs.players[pid]) {
-        gs.players[pid].score = value;
+      const { kind, key } = Engine.classifyScoreEntity(entityRaw, gs.players);
+
+      if (kind === 'player') {
+        gs.players[key].score = value;
+        gs.scoreSource = 'tdf';
+        // Evidence that the arena reports PER PLAYER. On its own this is not yet
+        // enough to start summing — see _syncTeamScoreSource().
+        if (!this._sawPlayerScoreLine) {
+          this._sawPlayerScoreLine = true;
+          this._firstPlayerScoreAt = typeof gs.elapsedTime === 'number' ? gs.elapsedTime : 0;
+        }
+        this._touch();
+        return;
+      }
+
+      if (kind === 'entity') {
+        // A scoring NON-player entity: a target, a generator, a beacon. It is
+        // still a type-5 line, so the arena is the score authority — but its
+        // points belong to nobody. They are neither a player score nor a team
+        // score, and above all they must not invent a team out of the number
+        // behind the `@` (a `@91` gallery target used to land in `scores['91']`).
         gs.scoreSource = 'tdf';
         this._touch();
         return;
       }
+
+      if (kind !== 'team') return;
       // team score — only for a plausible team key, so a hostile feed cannot
       // grow gameState.scores without bound (same guard as the type-2 branch).
-      const key = String(entityRaw).trim();
       if (!/^\d{1,2}$/.test(key) || UNSAFE_KEYS.has(key)) return;
       const known = Object.prototype.hasOwnProperty.call(gs.teams, key)
         || Object.prototype.hasOwnProperty.call(gs.scores, key);
       if (!known && Object.keys(gs.scores).length >= 32) return;
       gs.scores[key] = value;
       gs.scoreSource = 'tdf';
+      // The arena reports team points itself. This wins over any sum of ours,
+      // now and for the rest of the match.
+      this._sawTeamScoreLine = true;
       this._touch();
     } catch (_err) {
       /* score authority is best effort; the own count stays as fallback */
     }
+  }
+
+  /**
+   * ADDITIVE. What a type-5 `entity` token IS. Three outcomes, and the order of
+   * the tests is the whole point:
+   *
+   *   'player'  the token resolves to a known entry of `gameState.players`.
+   *             Checked FIRST, so the documented precedence is unchanged: an
+   *             entity that is both a player id and a plausible team index is
+   *             read as the player.
+   *   'entity'  the token carries an arena prefix (`#` member, `@` guest vest
+   *             or non-player entity) but is not a known player. A team index
+   *             NEVER carries a prefix — the arena writes it bare (`0`, `1`) —
+   *             so the prefix alone already rules a team out. This is what
+   *             keeps the targets, generators and beacons of the standard mode
+   *             (they all sit in team 2 "Neutral") out of the team score.
+   *   'team'    a bare token: the team index.
+   *
+   * Pure function of its inputs, no state, never throws.
+   */
+  static classifyScoreEntity(entityRaw, players) {
+    const raw = String(entityRaw == null ? '' : entityRaw).trim();
+    if (!raw) return { kind: 'none', key: '' };
+    const id = Engine.cleanId(raw);
+    const map = players && typeof players === 'object' ? players : {};
+    if (id && Object.prototype.hasOwnProperty.call(map, id) && map[id]) {
+      return { kind: 'player', key: id };
+    }
+    if (raw[0] === '#' || raw[0] === '@') return { kind: 'entity', key: id };
+    return { kind: 'team', key: raw };
+  }
+
+  /** Per-match bookkeeping behind `gameState.teamScoreSource`. */
+  _resetTeamScoreSource() {
+    this._sawTeamScoreLine = false;
+    this._sawPlayerScoreLine = false;
+    this._firstPlayerScoreAt = null;
+    this._teamScoreSettled = false;
+    if (this.gameState) this.gameState.teamScoreSource = 'internal';
+  }
+
+  /**
+   * ADDITIVE. Decide where the team score on screen comes from, and — in the
+   * `derived` case — compute it. Runs from `_syncDerived()`, so every `_touch()`
+   * and every `snapshot()` sees a consistent state and NOBODY outside this
+   * engine has to add anything up (contract: `gameState.scores[teamId]` always
+   * carries the value to display).
+   *
+   * The ladder is monotone, internal -> derived -> tdf, and never runs backwards:
+   * a team score line that arrives late still wins, but a match that has once
+   * been told "the arena reports team points" never falls back to our own sum.
+   */
+  _syncTeamScoreSource() {
+    const gs = this.gameState;
+    if (this._sawTeamScoreLine) {
+      // The arena's own number is already in `gs.scores` — nothing to compute.
+      gs.teamScoreSource = 'tdf';
+      return;
+    }
+    if (gs.teamScoreSource === 'tdf') return;   // never walk back
+    if (!this._sawPlayerScoreLine) {
+      // Not a single usable type-5 line: the old own count owns `gs.scores`.
+      gs.teamScoreSource = 'internal';
+      return;
+    }
+    if (!this._teamScoreSettled) {
+      const first = this._firstPlayerScoreAt;
+      const now = typeof gs.elapsedTime === 'number' ? gs.elapsedTime : 0;
+      if (first == null || now - first < TEAM_SCORE_SETTLE_MS) {
+        // Still inside the settling window (see TEAM_SCORE_SETTLE_MS): a team
+        // score line for the very same moment may still be on its way.
+        gs.teamScoreSource = 'internal';
+        return;
+      }
+      this._teamScoreSettled = true;
+    }
+    gs.teamScoreSource = 'derived';
+    this._applyDerivedTeamScores();
+  }
+
+  /**
+   * ADDITIVE. Sum the player scores per team into `gameState.scores`.
+   *
+   * Left out on purpose, and each for a reason:
+   *  - a player without a team — there is no team to credit the points to;
+   *  - a team the type-2 lines never announced — we do not invent teams;
+   *  - every non-player entity — targets, generators and beacons are not in
+   *    `gameState.players` at all (the type-3 handler files only rows whose
+   *    entity-kind column says `player`), so their points, and the "Neutral"
+   *    team index 2 they sit in, can never reach a team total;
+   *  - a player whose score is not a number — a missing measurement, not a 0.
+   *
+   * A team that IS announced but has nobody in it keeps whatever it had (0 from
+   * the mission start): an empty team scored nothing, and saying so is right.
+   */
+  _applyDerivedTeamScores() {
+    const gs = this.gameState;
+    const sums = Object.create(null);
+    for (const pid of Object.keys(gs.players)) {
+      const p = gs.players[pid];
+      if (!p || typeof p !== 'object') continue;
+      const team = p.teamId == null ? '' : String(p.teamId).trim();
+      if (!team || UNSAFE_KEYS.has(team)) continue;
+      if (!Object.prototype.hasOwnProperty.call(gs.teams, team)) continue;
+      const v = p.score;
+      if (typeof v !== 'number' || !Number.isFinite(v)) continue;
+      sums[team] = (sums[team] || 0) + v;
+    }
+    for (const team of Object.keys(sums)) gs.scores[team] = sums[team];
   }
 
   /**
@@ -1632,6 +1818,9 @@ class Engine extends EventEmitter {
       // and `durationKnown` are NOT reset here — the type-1 line arrives BEFORE
       // 0100 and must survive it (contract C1).
       gameState.scoreSource = 'internal';
+      // ADDITIVE: and with it the question of where the TEAM score comes from.
+      // A match never inherits that answer from its predecessor either.
+      this._resetTeamScoreSource();
       this._familyInferred = false;
       // ADDITIVE: a running match has no end — and the end detection starts over.
       gameState.endReason = null;
@@ -1928,4 +2117,5 @@ class Engine extends EventEmitter {
 module.exports = {
   Engine, matchEndMs, MATCH_END_DEFAULTS, END_REASONS, END_SOURCES,
   CHASE_TAG_CODES, CHASE_THRESHOLD_DEFAULT, CHASE_THRESHOLD_MAX, CHASE_PROFILES_DEFAULT,
+  TEAM_SCORE_SETTLE_MS,
 };

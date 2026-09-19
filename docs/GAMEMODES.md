@@ -485,7 +485,7 @@ Eingestellt wird er hier:
 | Eintrag | Was es tut |
 |---|---|
 | `spieler` | Welche Kennzahlen in **jedem Spielerblock** stehen, in dieser Reihenfolge. Namen aus [Spaltenbeschriftungen](#spaltenbeschriftungen). Höchstens **64**. |
-| `uebersicht` | Welche Blöcke der Missionsübersicht mitgehen. Erlaubt sind genau sechs: `teams`, `sieger`, `ende`, `punktequelle`, `dauer`, `spielerzahl`. |
+| `uebersicht` | Welche Blöcke der Missionsübersicht mitgehen. Erlaubt sind genau sechs: `teams`, `sieger`, `ende`, `punktequelle`, `dauer`, `spielerzahl`. `punktequelle` liefert `scoreSource` **und** `teamScoreSource` — wer den Block abschaltet, bekommt die Herkunft trotzdem: sie hängt als `scoreDerived` an jedem Teameintrag und am `winner`. |
 | `namen` | `false` lässt die **Spielernamen** weg; dann verlässt nur noch die Kennung den Rechner. Vorgabe `true`. |
 
 **Ein Feld aufnehmen heißt: seinen Namen dazuschreiben.** Mehr ist nicht zu tun.
@@ -1065,6 +1065,39 @@ das Tor-Ereignis und der `goals`-Zähler bleiben davon völlig unberührt.
 damit ein Match nicht die Autorität des Vormatches erbt. Das Feld steht im
 Snapshot und in `GET /api/status`.
 
+### `teamScoreSource` — wer den **Team**stand gerechnet hat
+
+`scoreSource` beantwortet nur, ob überhaupt Typ-5-Zeilen kamen. Es beantwortet
+nicht, ob darunter eine **Team**zeile war — und genau daran hing der Befund aus
+dem echten Betrieb: im Standardmodus (Nummer 7) schickt die Anlage Typ-5-Zeilen
+ausschließlich je Spieler. An vier Mitschnitten vom 19.09.2026 gemessen: 5551
+Typ-5-Zeilen, davon **0** auf eine Team-Kennung. `scores` blieb leer, die
+Live-Ansicht zeigte 0:0 und jeder Bericht meldete `draw`. In Laserball **kommen**
+die Teampunkte von der Anlage.
+
+Seither summiert die Engine die Teampunkte aus den Spielerpunkten, **wenn und
+nur wenn** die Anlage keine Teamzeile schickt:
+
+| Wert | Heißt | Typischer Fall |
+|---|---|---|
+| `tdf` | Die **Anlage** hat Teampunkte gemeldet. | Laserball |
+| `derived` | **Wir** haben sie aus den Spielerpunkten summiert — unsere Rechnung. | Standard, SM5 |
+| `internal` | Keine verwertbaren Typ-5-Zeilen (bisher); die Eigenzählung greift. | Laserball-Tore, und die ersten Sekunden jedes Matches |
+
+`gameState.scores[teamId]` trägt in **allen drei** Fällen den anzuzeigenden
+Wert — **niemand außerhalb der Engine summiert noch selbst.** Die Reihenfolge
+ist einbahnig (`internal` → `derived` → `tdf`, nie zurück), Nicht-Spieler-
+Entities und Spieler ohne bekanntes Team fließen nicht ein, und nach der ersten
+Spieler-Punktezeile liegt ein Zeitfenster von 5 s Spielzeit, damit das
+Kennzeichen nicht flackert. Die Einzelheiten und die Messung stehen in
+[LASERFORCE.md, Typ-5 im Detail](LASERFORCE.md#nicht-jede-anlage-meldet-teampunkte--teamscoresource).
+
+**Ehrlich bleiben:** eine summierte Zahl ist unsere Rechnung, nicht die der
+Anlage. Sie ist deshalb überall als solche gekennzeichnet — in der API
+(`match.teamScoreSource`, `match.teamScoreDerived`, `teams[].scoreDerived`), im
+Missionsbericht (`match.teamScoreSource`, `teams[].scoreDerived`,
+`winner.scoreDerived`) und in der CSV (Spalte `team_score_source`).
+
 ---
 
 ## Die Spieluhr
@@ -1137,7 +1170,9 @@ der Migrationshinweis für Altdaten: [STATS.md](STATS.md).
 ### API
 
 `GET /api/status` liefert unter `match` zusätzlich `mode`, `durationKnown`,
-`remainingMs` und `scoreSource`; `GET /api/state` dieselben Felder im Snapshot.
+`remainingMs` und `scoreSource`; `GET /api/state` dieselben Felder im Snapshot,
+dazu `teamScoreSource` (das `/api/status` **nicht** führt — wer den Teamstand
+anzeigt, nimmt `/api/state`, `/api/teams` oder `/api/display`).
 Der Endpunkt `GET /api/modes` gibt die Registry (jeder Eintrag jetzt mit
 `profile`), den aktuell erkannten Modus — dessen `mode.profile` — und die
 Scoreboard-Spalten zurück. Details: [API.md](API.md#get-apimodes).
@@ -1357,24 +1392,26 @@ dort von selbst — ohne Codeänderung. Das ist der ganze Sinn der Profile.
 `threshold` ist die Schwelle; **0 und 1 schalten die Erkennung ab** (eine Serie
 aus einem Treffer wäre keine Serie). Obergrenze 50.
 
-### Ehrlich: was die Zahl 3 an echten Daten bedeutet
+### Ehrlich: was die Schwelle an echten Daten bedeutet
 
 Gemessen an den vier Mitschnitten, je Match der Anteil der Spieler, die
 mindestens einmal gelistet wurden:
 
 | Schwelle | Match 1 (30 Sp.) | Match 2 (40 Sp.) | Match 3 (41 Sp.) | Match 4 (30 Sp.) |
 |---|---|---|---|---|
-| **3** (Vorgabe) | 19 (63 %) | 14 (35 %) | 13 (32 %) | 17 (57 %) |
+| 3 (frühere Vorgabe) | 19 (63 %) | 14 (35 %) | 13 (32 %) | 17 (57 %) |
 | 4 | 3 (10 %) | 1 (3 %) | 3 (7 %) | 6 (20 %) |
-| 5 | 1 (3 %) | 0 | 2 (5 %) | 1 (3 %) |
+| **5** (Vorgabe) | 1 (3 %) | 0 | 2 (5 %) | 1 (3 %) |
 | 6 | 0 | 0 | 1 (2 %) | 1 (3 %) |
 
-**Bei Schwelle 3 landet also ein Drittel bis fast zwei Drittel aller Spieler
-irgendwann in der Liste.** Ein einzelner Eintrag ist damit Alltag und kein
-Hinweis auf irgendetwas. Wer die Liste als Auffälligkeitsliste lesen will,
-sollte **4 oder 5** einstellen. Die Vorgabe bleibt bei 3, weil der Betreiber
-sie so bestellt hat und weil eine zu empfindliche Einstellung, die man sieht,
-besser ist als eine zu stumpfe, die man für kaputt hält.
+**Bei Schwelle 3 landete ein Drittel bis fast zwei Drittel aller Spieler
+irgendwann in der Liste.** Ein einzelner Eintrag war damit Alltag und kein
+Hinweis auf irgendetwas. Die Vorgabe steht deshalb auf **5** — dort sind es
+0–5 %, und ein Eintrag bedeutet wieder etwas. Die Zahl steht gleichlautend in
+`src/config.js`, in `.env.example` und als Rückfallwert
+(`CHASE_THRESHOLD_DEFAULT`) in `src/engine.js`; der Rückfallwert wirkt überall
+dort, wo eine Engine ohne Konfiguration entsteht (Tests, die
+Locationserver-Einbindung).
 
 ### Grenzen der Erkennung — was sie nicht sieht, und wann sie danebenliegt
 
@@ -1493,7 +1530,7 @@ Im Stil der übrigen Doku: hier steht ehrlich, was **nicht** belegt ist.
 | **Trefferquote live** | Weil nur der Nenner unvollständig ist, fällt die Live-Quote systematisch **zu hoch** aus. Sie ist deshalb als Näherung gekennzeichnet (`accuracyIsEstimate`) und wird nach dem Typ-7-Block amtlich. Wie groß der Fehler an einer echten Anlage ist, ist **nicht** gemessen. | bekannte Grenze |
 | **Modus-Nummer „Standard"** | **Geschlossen für diese Halle:** `7`, gemessen an vier Roh-Mitschnitten vom 19.09.2026 und in `modes/standard.json` eingetragen. Für jede andere Anlage bleibt sie offen — die Nummer ist keine Laserforce-Konstante. | geschlossen (lokal) |
 | **Kein Typ-7-Block im Standardmodus** | Gemessen: in vier vollständigen Standardspielen kommt der amtliche Endblock nie. Leben, Munition und die amtliche Trefferquote bleiben dort dauerhaft leer; gezeigt werden die Live-Zähler (`statsSource: "live"`). → [eigener Abschnitt](#warum-im-standardmodus-leben-munition-und-trefferquote-leer-bleiben) | **gemessen, dauerhafte Grenze** |
-| **Teamstand im Standardmodus** | Gemessen: die Anlage schickt in Modus 7 keine Punktezeile auf eine Team-Kennung, nur je Spieler. Der Teamstand bleibt deshalb 0:0 und der Missionsbericht meldet `draw`. Die Spielerpunkte stimmen exakt. Ob der Teamstand die Summe der Spielerpunkte ist, ist **nicht belegt** und wird nicht gerechnet. | **offen, mit Auswirkung** |
+| **Teamstand im Standardmodus** | Gemessen: die Anlage schickt in Modus 7 keine Punktezeile auf eine Team-Kennung, nur je Spieler. lf_live summiert den Teamstand deshalb selbst aus den Spielerpunkten und kennzeichnet ihn mit `teamScoreSource: 'derived'` — Live-Ansicht, Bericht und CSV zeigen wieder einen Sieger. **Dass die Anlage intern genauso rechnet, ist damit nicht belegt**: es ist unsere Summe, und sie ist überall als solche markiert. Weicht sie je von einer offiziellen Zahl ab, gewinnt die offizielle (`tdf`). | **gelöst, Herkunft gekennzeichnet** |
 | **Profil-Spalten ohne Neustart** | Eine neue **Modus-Nummer** greift nach einem Speichern in der Konsole sofort. Ändert jemand dagegen die **Spalten** eines Profils in `modes/profile/*.json`, zeigt die Web-Konsole sie erst nach einem Neustart: `GET /api/modes` löst die Profilliste beim Programmstart einmal auf. | bekannte Grenze |
 | **Modus-Fehler in der Web-Konsole** | Beanstandungen an den Modus-Dateien stehen im Log und in `modeConfigStatus()`, aber noch nicht im Status-Endpunkt und damit nicht in der Konsolenoberfläche. Dafür müsste `/api/status` das Feld mitliefern. | offen |
 | **Bedeutung der elf amtlichen Typ-7-Felder** | `livesLeft` und `shotsLeft` sind aus den Namen klar. Für `medicHits`, `ownMedicHits`, `medicNukes`, `scoutRapid`, `lifeBoost`, `ammoBoost`, `nukesCancelled`, `ownNukeCancels`, `shot3Hit` ist die Bedeutung aus der lfstats-Spezifikation erschlossen und nicht gegen eine Anlage geprüft. Die Zahlen werden roh durchgereicht. | unbestätigt |
@@ -1503,7 +1540,7 @@ Im Stil der übrigen Doku: hier steht ehrlich, was **nicht** belegt ist.
 | **Keine Typ-1-Zeile** | Sendet eine Anlage gar keine Typ-1-Zeile, bleibt der Modus dauerhaft `unknown`. Eine Möglichkeit, die Familie von Hand zu erzwingen, gibt es bewusst (noch) nicht. | bewusst offen |
 | **Beschreibung endet auf einer Zahl** | Kommt ein Stream **ohne** Tabulatoren **und ohne** Schema-Zeilen, und endet die Missionsbeschreibung auf einer Zahl, kann dieses letzte Token verlorengehen. Mit Tabulator oder mit Schema-Zeile korrekt. | bekannte Grenze |
 | **„Hinterherlaufen" ist ein Verdacht** | Die Erkennung sieht nur Treffer, keine Position, keine Entfernung und keine Absicht. Verfolgen ohne zu treffen bleibt unsichtbar; Duelle, gute Spieler und kleine Matches erzeugen Fehlalarme. → [eigener Abschnitt](#grenzen-der-erkennung--was-sie-nicht-sieht-und-wann-sie-danebenliegt) | **bekannte Grenze, gemessen** |
-| **Schwelle 3 ist empfindlich** | Gemessen an vier echten Standardspielen: 32–63 % aller Spieler erreichen sie mindestens einmal je Match. Als Auffälligkeitsliste taugt eher 4 oder 5. Die Vorgabe 3 ist die Bestellung des Betreibers, keine Messempfehlung. | **gemessen** |
+| **Schwelle 3 war zu empfindlich** | Gemessen an vier echten Standardspielen: 32–63 % aller Spieler erreichten sie mindestens einmal je Match. Die Vorgabe steht seither auf **5** (0–5 %). Wer 3 einstellt, bekommt eine Liste, in der ein Eintrag nichts bedeutet. | **gemessen** |
 | **`0208` = Eigenbeschuss** | Erschlossen, nicht aus der Protokolldoku: 6 von 6 beobachteten Vorkommen waren teamintern, bei 1120 von 1120 gegnerischen `0205`/`0206`. Sechs Fälle sind eindeutig, aber wenige. Der zusätzliche Team-Vergleich in `_noteTag()` fängt den Fall auch dann ab, wenn die Deutung falsch sein sollte. | **erschlossen, klein belegt** |
 | **`0D06` „blastet"** | Als Flächenwirkung erkannt (ein Actor, mehrere Ziele im selben Zeitstempel), Bedeutung sonst unbelegt. Zählt für „Hinterherlaufen" nicht mit. | unbestätigt |
 

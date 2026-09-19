@@ -96,6 +96,23 @@ const RESULT_COLS = ['score', 'team_score', 'opp_score', 'result', 'duration_s']
  */
 const TAIL_COLS = ['stats_source', 'score_source'];
 const ACCURACY_SOURCE_COL = 'accuracy_source';
+/**
+ * ADDITIVE, and APPENDED — never inserted. `score_source` already says whether
+ * type-5 lines arrived at all; this one says where the number in `team_score` /
+ * `opp_score`, and with it `result`, actually comes from:
+ *   `tdf`      the arena reported team points itself (Laserball)
+ *   `derived`  lf_live summed them from the player scores, because the arena
+ *              reports per player only (standard mode, SM5) — OUR arithmetic
+ *   `internal` no usable type-5 lines, the bridge's own count
+ * It goes at the very END of every row, behind `accuracy_source`, so the
+ * existing names and their order are untouched for a reader that already
+ * evaluates these files.
+ */
+const TEAM_SCORE_SOURCE_COL = 'team_score_source';
+const TEAM_SCORE_SOURCES = ['tdf', 'derived', 'internal'];
+/** Normalize whatever the state carries to one of the three contract values. */
+const teamScoreSourceOf = (state) =>
+  (TEAM_SCORE_SOURCES.includes(state && state.teamScoreSource) ? state.teamScoreSource : 'internal');
 
 /**
  * Player-object fields that must land in the CSV as an EMPTY cell when they are
@@ -114,6 +131,9 @@ const MATCH_COLS = [
   'players', 'teams', 'scores', 'winner_team', 'winner_score', 'score_source', 'events',
   // Appended, never inserted: existing consumers read these files by position.
   'exit_codes', 'end_source',
+  // `scores`, `winner_team` and `winner_score` above are only as authoritative
+  // as this column says — see TEAM_SCORE_SOURCE_COL.
+  'team_score_source',
 ];
 
 /** "Which player played which mode, and when" — the mode history per player. */
@@ -182,7 +202,9 @@ function profileHasAccuracy(profile) {
 
 /** Provenance block of a profile — always the last columns of a player row. */
 function tailColumns(profile) {
-  return profileHasAccuracy(profile) ? TAIL_COLS.concat([ACCURACY_SOURCE_COL]) : TAIL_COLS.slice();
+  const base = profileHasAccuracy(profile) ? TAIL_COLS.concat([ACCURACY_SOURCE_COL]) : TAIL_COLS.slice();
+  // Appended last, for every profile alike — see TEAM_SCORE_SOURCE_COL.
+  return base.concat([TEAM_SCORE_SOURCE_COL]);
 }
 
 /**
@@ -245,6 +267,7 @@ class StatsWriter {
       scores: { ...(state.scores || {}) },
       mode: state.mode ? { ...state.mode } : null,
       scoreSource: state.scoreSource,
+      teamScoreSource: state.teamScoreSource,
     };
     this._noteMode(state);
     if (this.cfg.enabled && this.cfg.writeLive && this._match && !this._liveTimer) {
@@ -359,6 +382,10 @@ class StatsWriter {
     const durationS = Math.round((state.elapsedTime || 0) / 1000);
     const scores = state.scores || {};
     const scoreSource = state.scoreSource === 'tdf' ? 'tdf' : 'internal';
+    // The engine has already put the value to display into `state.scores`,
+    // whoever computed it — this writer never sums anything itself, it only
+    // records WHO did (contract: gameState.teamScoreSource).
+    const teamScoreSource = teamScoreSourceOf(state);
     const profile = profileOf(mode);
     // Fill the union of the match profile's block and the family file's block:
     // the same row object is written to the per-match file (match profile) and
@@ -386,6 +413,7 @@ class StatsWriter {
         stats_source: p.statsSource === 'tdf7' ? 'tdf7' : 'live',
         score_source: scoreSource,
         accuracy_source: p.accuracySource === 'tdf7' ? 'tdf7' : 'live',
+        team_score_source: teamScoreSource,
       };
       // Counter block. A field the arena has not measured YET (the type-7-only
       // values, and the hit rate of a player who never fired) stays EMPTY —
@@ -458,6 +486,7 @@ class StatsWriter {
       winner_team: tied || !entries.length ? '' : best.name,
       winner_score: entries.length ? Math.max(...entries.map((e) => e.score)) : '',
       score_source: state.scoreSource === 'tdf' ? 'tdf' : 'internal',
+      team_score_source: teamScoreSourceOf(state),
       events: m.events.length,
       // Diagnostics for the match-end path (see docs/LASERFORCE.md): which type-6
       // exit codes the arena actually sent, and what ended the match.

@@ -328,12 +328,14 @@ bemerkt, bis die Monatsauswertung nicht stimmt.
     "durationMs": 600000, "durationS": 600,
     "durationKnown": true, "plannedDurationMs": 600000,
     "teams": [
-      { "teamId": "0", "name": "Rot Team",  "color": "#ef4444", "score": 850 },
-      { "teamId": "1", "name": "Blau Team", "color": "#3b82f6", "score": 640 }
+      { "teamId": "0", "name": "Rot Team",  "color": "#ef4444", "score": 850, "scoreDerived": true },
+      { "teamId": "1", "name": "Blau Team", "color": "#3b82f6", "score": 640, "scoreDerived": true }
     ],
-    "winner": { "teamId": "0", "name": "Rot Team", "score": 850 },
+    "winner": { "teamId": "0", "name": "Rot Team", "score": 850, "scoreDerived": true },
     "draw": false,
     "scoreSource": "tdf",
+    "teamScoreSource": "derived",
+    "teamScoreDerived": true,
     "end": { "reason": "mission_end", "source": "0101",
              "exitCodes": { "4108331": "01", "1002": "01" },
              "exitCodesSeen": ["01"] },
@@ -383,7 +385,9 @@ bemerkt, bis die Monatsauswertung nicht stimmt.
 | `mode.family` | `sm5` (Schüsse, Treffer) oder `laserball` (Tore, Pässe). Bestimmt, welche Zahlen es überhaupt gibt. |
 | `mode.profile` | Welcher Spaltensatz — und damit, welche Felder in den Spielerblöcken stehen. |
 | `winner` / `draw` | Siegerteam, oder `null` bei `draw: true`. Beides `null`/`false` heißt: keine Punkte gemeldet. |
-| `scoreSource` | `tdf` = Punkte von der Anlage. `internal` = **von lf_live selbst gezählt**, weil die Anlage keine geschickt hat. |
+| `scoreSource` | `tdf` = Punkte von der Anlage. `internal` = **von lf_live selbst gezählt**, weil die Anlage keine geschickt hat. Bezieht sich auf die **Spieler**punkte. |
+| `teamScoreSource` | Woher die **Team**zahlen in `teams[].score` und `winner.score` kommen: `tdf` = von der Anlage gemeldet (Laserball) · `derived` = **von lf_live aus den Spielerpunkten summiert**, weil die Anlage im Standardmodus nur je Spieler abrechnet · `internal` = Eigenzählung. Die Zahl ist in allen Fällen die anzuzeigende — wer sie weiterverarbeitet, sollte aber wissen, wer gerechnet hat. |
+| `teamScoreDerived` | Dieselbe Aussage als Boolean. Steht zusätzlich als `scoreDerived` an **jedem** Teameintrag und am `winner`, damit keine Zahl ohne ihre Herkunft weiterwandert. |
 | `end.reason` | `mission_end` (die Anlage hat `0101` geschickt) · `watchdog` · `stream_lost` · `next_match` · `shutdown`. Alles außer `mission_end` heißt: das Ende wurde **erschlossen**, das Match kann unvollständig sein. |
 | `end.source` | Woran es erkannt wurde. |
 | `end.exitCodes` | Rohe Typ-6-Exitcodes je Spieler. Reine Diagnose — sie entscheiden nichts. |

@@ -835,6 +835,225 @@ try {
 } catch (err) { failed++; console.error(`  FAIL  engine.scoreAuthority\n        ${err.stack}`); }
 
 try {
+  // ── Teampunkte, wenn die Anlage keine meldet ──────────────────────────────
+  // Der Befund aus dem echten Betrieb: im Standardmodus (Nummer 7,
+  // „| Standard LZ - 2 Teams |") schickt die Anlage Typ-5-Zeilen AUSSCHLIESSLICH
+  // je Spieler, nie je Team — gemessen an vier Mitschnitten vom 19.09.2026,
+  // zusammen 5551 Typ-5-Zeilen, davon 0 auf eine Team-Kennung. `scores` blieb
+  // deshalb leer, jeder Bericht meldete `draw`, die Live-Ansicht 0:0.
+  // In Laserball ist es umgekehrt: dort MELDET die Anlage Teampunkte, und daran
+  // darf sich nichts ändern.
+  const { buildMatchReport } = require('../src/matchReport');
+  const { buildDisplay } = require('../src/apiServer');
+  const OFF = { watchdogMs: 0, streamLostMs: 0, endBlockMs: 0 };
+  const feed = (lines) => feedEngine(lines, { matchEnd: OFF });
+  const STD_HEAD = [
+    '1\t7\t| Standard LZ - 2 Teams |\t20260919104649\t480000\t-1000',
+    ';2/team\tindex\tdesc\tcolour-enum\tcolour-desc\tcolour-rgb',
+    '2\t0\tBlaues Team\t12\tIce\t#00A0FF',
+    '2\t1\tRotes Team\t11\tFire\t#FF5000',
+    '2\t2\tNeutral\t0\tNone\t#808080',
+    '4\t0000000\t0100\t* Missionsbeginn *',
+    ';3/entity-start\ttime\tid\ttype\tdesc\tteam\tlevel\tcategory\tbattlesuit\tmemberId',
+    '3\t0000001\t#aA1bB2cC\tplayer\tAnna\t0\t1\t0\tUnderground\t21-101-10001',
+    '3\t0000001\t#bB7kQ2xR\tplayer\tBert\t0\t3\t0\tBalu\t21-101-10002',
+    '3\t0000002\t#cC4nW9tL\tplayer\tCleo\t1\t2\t0\tLoki\t21-101-10003',
+    '3\t0000002\t#dD1sE5vM\tplayer\tDora\t1\t0\t0\tCyborg\t21-101-10004',
+    // Nicht-Spieler-Entities. Sie tragen an dieser Anlage Team-Index 2
+    // („Neutral") — und ihre Kennung trägt ein `@`, nie eine blanke Zahl.
+    '3\t0000003\t@91\tgallery-target\tPunktestation Zufall\t2\t0\t0\tPunktestation Zufall\t',
+    '3\t0000003\t@30\tgenerator-target\tGenerator\t2\t0\t0\tGenerator\t',
+    ';5/score\ttime\tentity\told\tdelta\tnew',
+  ];
+
+  // 1) Das Zeitfenster: das Kennzeichen darf nicht springen, sobald die erste
+  //    Zeile eintrifft. Bis die Frage entschieden ist, bleibt es auf `internal`
+  //    — genau das, was ein Match in seinen ersten Sekunden ohnehin ist.
+  let e = feed([...STD_HEAD, '5\t0010000\t#aA1bB2cC\t0\t110\t110']).eng;
+  assert.strictEqual(e.snapshot().teamScoreSource, 'internal',
+    'die erste Spieler-Punktezeile allein entscheidet noch nichts');
+  assert.strictEqual(e.snapshot().scores['0'], 0, 'und der Teamstand steht noch bei 0');
+  e.processLogLine('5\t0012000\t#cC4nW9tL\t0\t90\t90');   // 2 s später
+  assert.strictEqual(e.snapshot().teamScoreSource, 'internal', 'nach 2 s immer noch nicht');
+  e.processLogLine('4\t0014999\t0900\t#aA1bB2cC\t erzielt ein Achievement');
+  assert.strictEqual(e.snapshot().teamScoreSource, 'internal',
+    'eine Millisekunde vor Fensterende auch nicht — die Grenze ist scharf');
+  e.processLogLine('4\t0015000\t0900\t#bB7kQ2xR\t erzielt ein Achievement');
+  assert.strictEqual(e.snapshot().teamScoreSource, 'derived',
+    'erst wenn das Fenster abgelaufen ist, summieren wir');
+  assert.strictEqual(e.snapshot().scores['0'], 110, 'und zwar aus den Spielerpunkten');
+  assert.strictEqual(e.snapshot().scores['1'], 90, 'für beide Teams');
+
+  // 2) Ein ganzes Standardspiel: die Summe stimmt, der Sieger steht fest, und
+  //    weder die Nicht-Spieler-Entities noch ein Spieler ohne bekanntes Team
+  //    fließen ein.
+  const full = feed([...STD_HEAD,
+    // Ein Spieler in einem Team, das keine Typ-2-Zeile angekündigt hat.
+    '3\t0000004\t#eE2fF6wN\tplayer\tEmil\t7\t1\t0\tGandalf\t21-101-10005',
+    '5\t0010000\t#aA1bB2cC\t0\t110\t110',
+    '5\t0011000\t#bB7kQ2xR\t0\t250\t250',
+    '5\t0012000\t#cC4nW9tL\t0\t90\t90',
+    '5\t0013000\t#dD1sE5vM\t0\t-50\t-50',
+    '5\t0014000\t#eE2fF6wN\t0\t9999\t9999',
+    // Eine Punktestation, die Punkte macht. Sie gehört niemandem.
+    '5\t0015000\t@91\t0\t4000\t4000',
+    '5\t0016000\t@30\t0\t4000\t4000',
+    '5\t0100000\t#aA1bB2cC\t110\t400\t510',
+    '4\t0480100\t0101\t* Missionsende *',
+  ]).state;
+  assert.strictEqual(full.teamScoreSource, 'derived', 'die Anlage hat keine Teampunkte gemeldet');
+  assert.strictEqual(full.scores['0'], 760, 'Blau = 510 + 250');
+  assert.strictEqual(full.scores['1'], 40, 'Rot = 90 + (-50); negative Punkte zählen mit');
+  assert.strictEqual(full.scores['2'], 0, 'Neutral bleibt 0 — dort spielt niemand');
+  assert.strictEqual(full.scores['7'], undefined, 'ein unbekanntes Team wird nicht erfunden');
+  assert.strictEqual(full.scores['91'], undefined, 'und eine Punktestation erst recht nicht');
+  assert.strictEqual(full.scores['30'], undefined, 'auch der Generator wird kein Team');
+  assert.strictEqual(Object.keys(full.players).length, 5, 'genau die fünf Spieler, keine Ziele');
+  assert.strictEqual(full.scoreSource, 'tdf', 'Typ-5-Zeilen kamen ja — nur eben keine für Teams');
+
+  // 3) Der Bericht: Sieger und `draw` beruhen jetzt auf einer echten Zahl.
+  const rep = buildMatchReport(full, {});
+  assert.strictEqual(rep.match.winner && rep.match.winner.name, 'Blaues Team', 'der Sieger steht im Bericht');
+  assert.strictEqual(rep.match.winner.score, 760, 'mit seiner Punktzahl');
+  assert.strictEqual(rep.match.draw, false, 'und es ist ausdrücklich kein Unentschieden');
+  assert.strictEqual(rep.match.teamScoreSource, 'derived', 'das Kennzeichen steht in der Übersicht');
+  assert.strictEqual(rep.match.teamScoreDerived, true, 'als ausdrückliches Ja/Nein');
+  assert.strictEqual(rep.match.winner.scoreDerived, true, 'und hängt AN der Zahl, nicht nur daneben');
+  assert.ok(rep.match.teams.every((t) => t.scoreDerived === true), 'an jeder einzelnen Teamzahl');
+  assert.strictEqual(rep.players.find((p) => p.playerId === 'aA1bB2cC').result, 'win', 'Blau gewinnt');
+  assert.strictEqual(rep.players.find((p) => p.playerId === 'cC4nW9tL').result, 'loss', 'Rot verliert');
+
+  // 4) Die API reicht dasselbe durch — der Anzeige-Agent baut darauf auf.
+  const disp = buildDisplay(full);
+  assert.strictEqual(disp.match.teamScoreSource, 'derived', 'die API nennt die Herkunft');
+  assert.strictEqual(disp.match.teamScoreDerived, true, 'und markiert sie als unsere Rechnung');
+  assert.ok(String(disp.match.teamScoreSourceLabel).length > 0, 'mit einem Klartext-Etikett');
+  assert.strictEqual(disp.teams.find((t) => t.id === '0').score, 760, 'die Zahl steht in der Teamliste');
+  assert.ok(disp.teams.every((t) => t.scoreDerived === true), 'jede Teamkachel trägt die Markierung selbst');
+
+  // 5) Ein echtes Unentschieden bleibt eins.
+  const tie = feed([...STD_HEAD,
+    '5\t0010000\t#aA1bB2cC\t0\t300\t300', '5\t0011000\t#cC4nW9tL\t0\t300\t300',
+    '4\t0480100\t0101\t* Missionsende *']).state;
+  assert.strictEqual(tie.scores['0'], 300, 'gleiche Summen');
+  assert.strictEqual(buildMatchReport(tie, {}).match.draw, true, 'und dann steht `draw` zu Recht');
+
+  // 6) Eine SPÄTE Team-Punktezeile gewinnt — und der Weg zurück ist versperrt.
+  const late = feed([...STD_HEAD,
+    '5\t0010000\t#aA1bB2cC\t0\t110\t110',
+    '4\t0016000\t0900\t#aA1bB2cC\t erzielt ein Achievement']);
+  assert.strictEqual(late.state.teamScoreSource, 'derived', 'zuerst summieren wir');
+  assert.strictEqual(late.state.scores['0'], 110, 'mit unserer Zahl');
+  late.eng.processLogLine('5\t0020000\t0\t0\t7000\t7000');
+  assert.strictEqual(late.eng.snapshot().teamScoreSource, 'tdf', 'dann meldet sich doch die Anlage');
+  assert.strictEqual(late.eng.snapshot().scores['0'], 7000, 'und ihre Zahl gewinnt');
+  late.eng.processLogLine('5\t0030000\t#bB7kQ2xR\t0\t500\t500');
+  assert.strictEqual(late.eng.snapshot().teamScoreSource, 'tdf', 'danach wird nie wieder selbst summiert');
+  assert.strictEqual(late.eng.snapshot().scores['0'], 7000, 'die Zahl der Anlage bleibt stehen');
+
+  // 7) Laserball: die Teampunkte KOMMEN von der Anlage. Kein Summieren, und
+  //    kein Flackern, obwohl die Spielerzeile des Tores zuerst eintrifft.
+  const LB_HEAD = [
+    '1\t28\tLaserball Ranked\t0\t900\t0',
+    '2\t0\tRot\t1\tRed\t#ff0000', '2\t1\tBlau\t4\tBlue\t#0000ff',
+    '4\t0\t0100',
+    '3\t100\t#aA1bB2cC\tplayer\tAnna\t0\t3\t0', '3\t100\t#bB7kQ2xR\tplayer\tBert\t1\t3\t0',
+    ';5/score\ttime\tentity\told\tdelta\tnew',
+  ];
+  const lb = feed([...LB_HEAD,
+    // Spielerzeile und Teamzeile desselben Tores, gleicher Zeitstempel,
+    // Spieler zuerst — genau der Fall, für den es das Zeitfenster gibt.
+    '5\t10000\t#aA1bB2cC\t0\t100\t100', '5\t10000\t0\t0\t1\t1', '4\t10000\t1101\t#aA1bB2cC',
+    '5\t60000\t#bB7kQ2xR\t0\t100\t100', '5\t60000\t1\t0\t1\t1', '4\t60000\t1101\t#bB7kQ2xR',
+    '5\t120000\t#aA1bB2cC\t100\t100\t200', '5\t120000\t0\t1\t1\t2', '4\t120000\t1101\t#aA1bB2cC',
+    '4\t300000\t0101\t* Missionsende *',
+  ]).state;
+  assert.strictEqual(lb.teamScoreSource, 'tdf', 'in Laserball meldet die Anlage die Teampunkte');
+  assert.strictEqual(lb.scores['0'], 2, 'und ihre Tore stehen da, nicht unsere Punktsumme');
+  assert.strictEqual(lb.scores['1'], 1, 'für beide Teams');
+  assert.strictEqual(lb.players.aA1bB2cC.score, 200, 'die Spielerpunkte laufen unverändert mit');
+  assert.strictEqual(lb.players.aA1bB2cC.goals, 2, 'und die Tore ebenso');
+
+  // 8) Laserball ohne jede Typ-5-Zeile: die Eigenzählung bleibt, wie sie war.
+  const lbOwn = feed([...LB_HEAD, '4\t10000\t1101\t#aA1bB2cC', '4\t20000\t1101\t#aA1bB2cC']).state;
+  assert.strictEqual(lbOwn.teamScoreSource, 'internal', 'ohne Typ-5 zählt lf_live selbst');
+  assert.strictEqual(lbOwn.scores['0'], 2, 'und zwar genau wie bisher');
+
+  // 9) Ein Match, das INNERHALB des Zeitfensters endet, bekommt seine Summe
+  //    trotzdem — sonst stünde im Bericht eine 0.
+  const short = feed([...STD_HEAD,
+    '5\t0010000\t#aA1bB2cC\t0\t110\t110',
+    '4\t0011000\t0101\t* Missionsende *']).state;
+  assert.strictEqual(short.teamScoreSource, 'derived', 'am Schlusspfiff ist die Frage entschieden');
+  assert.strictEqual(short.scores['0'], 110, 'und die Summe steht');
+
+  // 10) `0100` erbt nichts vom Vormatch.
+  const reused = feed([...STD_HEAD,
+    '5\t0010000\t#aA1bB2cC\t0\t110\t110', '4\t0016000\t0900\t#aA1bB2cC\t x']);
+  assert.strictEqual(reused.state.teamScoreSource, 'derived', 'Match 1 summiert');
+  reused.eng.processLogLine('4\t0\t0100');
+  assert.strictEqual(reused.eng.snapshot().teamScoreSource, 'internal', '0100 setzt das Kennzeichen zurück');
+  assert.strictEqual(reused.eng.snapshot().scores['0'], 0, 'und die Punkte auf 0');
+
+  console.log('  ok    engine.teamScoreSource');
+} catch (err) { failed++; console.error(`  FAIL  engine.teamScoreSource\n        ${err.stack}`); }
+
+try {
+  // Die CSV eines echten Standardspiels: `team_score`, `opp_score` und `result`
+  // beruhten bisher auf leeren Teampunkten — jeder war „draw" mit 0:0. Jetzt
+  // steht die summierte Zahl drin, ausdrücklich als unsere gekennzeichnet.
+  const { Engine } = require('../src/engine');
+  const { StatsWriter, splitCsv } = require('../src/statsWriter');
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'lfteamscore-'));
+  const quiet = { debug() {}, info() {}, warn() {}, error() {} };
+  const eng = new Engine({ logger: null, matchEnd: { watchdogMs: 0, streamLostMs: 0, endBlockMs: 0 } });
+  const sw = new StatsWriter({
+    logger: quiet,
+    getConfig: () => ({ csv: { enabled: true, dir, delimiter: ',', bom: false, writeEvents: false, writeLive: false } }),
+  });
+  eng.on('change', () => sw.onChange(eng.gameState));
+  eng.on('event', (e) => sw.onEvent(e));
+  eng.on('match_start', () => sw.onMatchStart(eng.snapshot()));
+  eng.on('match_end', () => sw.onMatchEnd(eng.snapshot()));
+
+  [
+    '1\t7\t| Standard LZ - 2 Teams |\t20260919104649\t480000\t-1000',
+    '2\t0\tBlaues Team\t12\tIce\t#00A0FF', '2\t1\tRotes Team\t11\tFire\t#FF5000',
+    '4\t0000000\t0100\t* Missionsbeginn *',
+    ';3/entity-start\ttime\tid\ttype\tdesc\tteam\tlevel\tcategory\tbattlesuit\tmemberId',
+    '3\t0000001\t#aA1bB2cC\tplayer\tAnna\t0\t1\t0\tUnderground\t21-101-10001',
+    '3\t0000001\t#cC4nW9tL\tplayer\tCleo\t1\t2\t0\tLoki\t21-101-10003',
+    ';5/score\ttime\tentity\told\tdelta\tnew',
+    '5\t0010000\t#aA1bB2cC\t0\t900\t900',
+    '5\t0011000\t#cC4nW9tL\t0\t400\t400',
+    '4\t0480100\t0101\t* Missionsende *',
+  ].forEach((l) => eng.processLogLine(l));
+
+  const read = (name) => {
+    const lines = fs.readFileSync(path.join(dir, name), 'utf8').split(/\r?\n/).filter(Boolean);
+    const head = splitCsv(lines[0], ',');
+    return lines.slice(1).map((l) => {
+      const c = splitCsv(l, ','); const o = {}; head.forEach((h, i) => (o[h] = c[i])); return o;
+    });
+  };
+  const rows = read('all_players_sm5.csv');
+  const anna = rows.find((r) => r.name === 'Anna');
+  const cleo = rows.find((r) => r.name === 'Cleo');
+  assert.strictEqual(anna.team_score, '900', 'die summierten Teampunkte stehen in der Spielerzeile');
+  assert.strictEqual(anna.opp_score, '400', 'und die des Gegners auch');
+  assert.strictEqual(anna.result, 'win', 'damit stimmt das Ergebnis');
+  assert.strictEqual(cleo.result, 'loss', 'auf beiden Seiten');
+  assert.strictEqual(anna.team_score_source, 'derived', 'gekennzeichnet als unsere Rechnung');
+  assert.strictEqual(anna.score_source, 'tdf', 'die Spielerpunkte selbst kamen aber von der Anlage');
+  const m = read('matches.csv')[0];
+  assert.strictEqual(m.winner_team, 'Blaues Team', 'matches.csv nennt den Sieger');
+  assert.strictEqual(m.winner_score, '900', 'mit seiner Punktzahl');
+  assert.strictEqual(m.team_score_source, 'derived', 'und sagt dazu, von wem die Zahl ist');
+  fs.rmSync(dir, { recursive: true, force: true });
+  console.log('  ok    statsWriter.teamScoreSource');
+} catch (err) { failed++; console.error(`  FAIL  statsWriter.teamScoreSource\n        ${err.stack}`); }
+
+try {
   // Type-7 official end block (contract C4).
   const SM5_BASE = [
     '1\t5\tSpace Marines 5\t20260916094500\t900\t0',
@@ -1108,6 +1327,23 @@ try {
   assert.deepStrictEqual(matches.map((r) => r.mode_key), ['laserball_ranked', 'sm5'], 'mode_key per match');
   assert.deepStrictEqual(matches.map((r) => r.score_source), ['internal', 'tdf'], 'score authority per match');
   assert.strictEqual(new Set(matches.map((r) => r.match_id)).size, 2, 'two distinct match ids');
+
+  // ADDITIVE: `team_score_source` says whether the team points behind
+  // `team_score`/`opp_score`/`result` are the arena's or our own sum. It is
+  // APPENDED at the very end of every file — the operator already evaluates
+  // these files, so no existing name and no existing position may move.
+  assert.deepStrictEqual(matches.map((r) => r.team_score_source), ['internal', 'tdf'],
+    'team score authority per match');
+  for (const f of ['matches.csv', 'all_players_sm5.csv', 'all_players_laserball.csv']) {
+    assert.strictEqual(headOf(f).slice(-1)[0], 'team_score_source', `${f}: the new column is the LAST one`);
+    assert.strictEqual(headOf(f).filter((c) => c === 'team_score_source').length, 1, `${f}: exactly once`);
+  }
+  assert.strictEqual(headOf('matches.csv').slice(-2)[0], 'end_source',
+    'matches.csv: the column before it is still `end_source`');
+  assert.strictEqual(headOf('all_players_sm5.csv').slice(-2)[0], 'accuracy_source',
+    'player rows: the column before it is still `accuracy_source`');
+  assert.strictEqual(headOf('all_players_laserball.csv').slice(-2)[0], 'score_source',
+    'laserball rows have no accuracy_source, so `score_source` stays their last old column');
 
   // the player rows went to the right file
   const lbRows = rowsOf('all_players_laserball.csv');
@@ -1999,8 +2235,13 @@ try {
     // als Profil `standard`. Die Profilliste hier führt `sm5` trotzdem mit, weil
     // dieser Test nur die fachliche Regel prüft und nicht davon abhängen soll,
     // welche Nummern der Betreiber gerade eingetragen hat.
+    // Die Schwelle wird hier AUSDRÜCKLICH auf 3 gestellt, obwohl die Vorgabe
+    // der Engine inzwischen 5 ist: dieser Test prüft die fachliche Regel
+    // („n Treffer hintereinander auf dieselbe Person"), nicht die Vorgabe. Ein
+    // Test, der still an einer Vorgabe hängt, verschleiert deren Änderung —
+    // deshalb steht die Zahl hier im Test und nicht in der Engine.
     const mk = (chase) => {
-      const e = new Engine({ logger: null, matchEnd: OFF, chase: { profiles: ['standard', 'sm5'], ...(chase || {}) } });
+      const e = new Engine({ logger: null, matchEnd: OFF, chase: { profiles: ['standard', 'sm5'], threshold: 3, ...(chase || {}) } });
       ['1 7 Standard LZ - 2 Teams 0 480000 0', '2 0 Rot 5 solid #ef4444', '2 1 Blau 5 solid #38bdf8', '4 0 0100',
         '3 10 event #aA1bB2cC player Anna 0 3 1',
         '3 10 event #bB7kQ2xR player Bert 1 3 1',
@@ -2189,7 +2430,8 @@ try {
       }), 'utf8');
       process.env.LF_MODES_DIR = dir;
       gm.reloadModes({ quiet: true });
-      const e2 = new Engine({ logger: null, matchEnd: OFF });
+      // Schwelle ausdrücklich, aus demselben Grund wie in `mk()` oben.
+      const e2 = new Engine({ logger: null, matchEnd: OFF, chase: { threshold: 3 } });
       ['1 7 Standard LZ - 2 Teams 0 480000 0', '4 0 0100',
         '3 10 event #aA1bB2cC player Anna 0 3 1', '3 10 event #bB7kQ2xR player Bert 1 3 1']
         .forEach((l) => e2.processLogLine(l));
@@ -2212,7 +2454,9 @@ try {
     const { Engine } = require('../src/engine');
     const { buildDisplay } = require('../src/apiServer');
     const OFF = { watchdogMs: 0, streamLostMs: 0, endBlockMs: 0 };
-    const eng = new Engine({ logger: null, matchEnd: OFF, chase: { profiles: ['standard', 'sm5'] } });
+    // Schwelle ausdrücklich gesetzt: geprüft wird, dass die API sie DURCHREICHT,
+    // nicht welche Zahl die Engine als Vorgabe mitbringt.
+    const eng = new Engine({ logger: null, matchEnd: OFF, chase: { profiles: ['standard', 'sm5'], threshold: 3 } });
     ['1 7 Standard LZ - 2 Teams 0 480000 0', '2 0 Rot 5 solid #ef4444', '2 1 Blau 5 solid #38bdf8', '4 0 0100',
       '3 10 event #aA1bB2cC player Anna 0 3 1', '3 10 event #bB7kQ2xR player Bert 1 3 1']
       .forEach((l) => eng.processLogLine(l));
