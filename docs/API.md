@@ -248,6 +248,12 @@ Stream-Server, `envPins`, Match-Kurzinfo. Für Monitoring.
 `mode` ist `null`, solange die Engine noch gar keinen Zustand hat. Alle vorher
 vorhandenen Felder sind unverändert geblieben.
 
+> **Achtung, `scores` in diesem Endpunkt trägt kein Herkunftskennzeichen.** Die
+> Zahl ist die richtige — im Standardmodus ist sie aber **von lf_live aus den
+> Spielerpunkten summiert**, nicht von der Anlage gemeldet. Ob das so ist, sagt
+> `teamScoreSource`, und das liefern `GET /api/display`, `GET /api/state` und
+> `GET /api/teams`. Wer den Teamstand anzeigt, holt ihn bitte dort.
+
 #### Matchende — `endReason` / `endedAt`
 
 Rein additiv, und ebenso in `/api/state` (`gameState.endReason`,
@@ -332,7 +338,7 @@ demselben Snapshot gebaut, plus der Angabe, wo der Tagesmitschrieb liegt.
 
 ```jsonc
 {
-  "threshold": 3,                 // Treffer hintereinander auf dieselbe Person
+  "threshold": 5,                 // Treffer hintereinander auf dieselbe Person
   "watched": true,                // läuft die Erkennung im gerade erkannten Modus?
   "profiles": ["standard"],       // Anzeigeprofile, für die sie läuft
   "count": 2,
@@ -355,8 +361,8 @@ Spielmodus wird gar nicht geschaut" — das ist etwas völlig anderes als „nie
 auffällig". Und `lowSignal: true` heißt, dass so wenige Spieler in der Arena
 sind, dass eine Serie auf dieselbe Person rechnerisch unvermeidlich ist.
 
-Was die Erkennung sieht und was nicht, und warum eine Schwelle von 3 an echten
-Daten ein Drittel bis die Hälfte aller Spieler listet:
+Was die Erkennung sieht und was nicht, und warum die Vorgabe von 3 auf 5
+angehoben wurde (bei 3 landeten 32–63 % aller Spieler in der Liste):
 [GAMEMODES.md, „Hinterherlaufen"](GAMEMODES.md#verdacht-hinterherlaufen).
 
 ### `GET /api/modes`
@@ -835,6 +841,10 @@ ob ein Token gesetzt ist oder wie nah das gesendete dran war, steht nicht drin.
   "durationKnown": true,         // false => Uhr HOCHzählen
   "remainingMs": 597000,         // fertig gerechnet; null wenn !durationKnown
   "scoreSource": "tdf",          // 'tdf' | 'internal'
+  // Woher der TEAMstand in `scores` kommt: 'tdf' = von der Anlage gemeldet |
+  // 'derived' = von lf_live aus den Spielerpunkten SUMMIERT (Standardmodus,
+  // SM5) | 'internal' = Eigenzählung. Nie selbst eine Teamsumme rechnen.
+  "teamScoreSource": "tdf",
   "players": {
     "1001": {
       "id": "1001", "name": "Mara", "teamId": "0",
@@ -860,7 +870,7 @@ ob ein Token gesetzt ist oder wie nah das gesendete dran war, steht nicht drin.
   // ---- Verdacht „Hinterherlaufen" (additiv) ----
   // Ein VERDACHT, keine Feststellung. Kumulativ fürs laufende Match: wer die
   // Schwelle einmal erreicht hat, bleibt bis zum nächsten Missionsstart drin.
-  "chaseThreshold": 3,           // Treffer hintereinander auf dieselbe Person; 0/1 = aus
+  "chaseThreshold": 5,           // Treffer hintereinander auf dieselbe Person; 0/1 = aus
   "chaseProfiles": ["standard"], // Anzeigeprofile, für die überhaupt geschaut wird
   "chaseWatched": true,          // läuft die Erkennung im GERADE erkannten Modus?
   "chasing": [
@@ -920,7 +930,7 @@ laufenden Spiel — siehe
 | `status` | Hardware-Status eines Spielers (Log-Typ 9) |
 | `round_start` | Laserball-Rundenstart (`1105`) |
 | `reset` | zusätzlich: explizite Reset-Codes `110B` / `110C` (neben dem aus `1104`+Status abgeleiteten Reset) |
-| `score` | Score-Zeile (Log-Typ 5): trägt `teamId`, `old`, `new`, `delta`. Das Event selbst ist unverändert — die Zeile setzt jetzt zusätzlich `gameState.scores` bzw. `players[id].score` und `scoreSource`. |
+| `score` | Score-Zeile (Log-Typ 5): trägt `teamId`, `old`, `new`, `delta`. Das Event selbst ist unverändert — die Zeile setzt jetzt zusätzlich `gameState.scores` bzw. `players[id].score`, `scoreSource` und `teamScoreSource`. **`teamId` ist der rohe Wert der Zeile** und kann auch eine Spieler- oder Entity-Kennung sein; welcher Fall vorlag, sagt `teamScoreSource`, nicht dieses Event. |
 | `match_summary` | Entity-Ende / Abschluss-Zeile (Log-Typ 6): trägt `entityId`, `exitCode`, `score`, `cols` |
 | `mode_change` | **neu.** Der Spielmodus wurde erkannt oder zur Laufzeit korrigiert. Trägt `mode` und `previousMode`. Kategorie `match` |
 | `sm5_stats` | **neu.** Die offizielle SM5-Endstatistik eines Spielers (Log-Typ 7) traf ein. Trägt `actorId` und `stats` (die Rohwerte der Anlage). Kategorie `player`. Kommt **vor** `match_end` |
@@ -1009,6 +1019,15 @@ Spielern. **Nichts ist weggekürzt** — so viele Felder sind es, und nicht mehr
     },
     "scoreSource": "internal",   // 'tdf' = Punkte von der Anlage | 'internal' = von der Bridge mitgezählt
     "scoreSourceLabel": "von der Bridge mitgezählt",
+    // ---- Woher der TEAMstand in teams[].score kommt (additiv) ----
+    // 'tdf'      die Anlage hat Teampunkte gemeldet (Laserball)
+    // 'derived'  lf_live hat sie aus den Spielerpunkten SUMMIERT, weil die
+    //            Anlage nur je Spieler abrechnet (Standardmodus, SM5)
+    // 'internal' keine verwertbaren Punktezeilen; die Eigenzählung greift
+    // NIE selbst eine Teamsumme rechnen — die Engine hat es schon getan.
+    "teamScoreSource": "derived",
+    "teamScoreSourceLabel": "von lf_live aus den Spielerpunkten summiert",
+    "teamScoreDerived": true,    // Kurzform: „diese Zahl ist unsere Rechnung"
     "end": {                     // alles null, solange das Match läuft
       "reason": null,            // 'mission_end'|'watchdog'|'stream_lost'|'next_match'|'shutdown'
       "reasonLabel": null,       // derselbe Grund, ausgeschrieben auf Deutsch
@@ -1021,9 +1040,12 @@ Spielern. **Nichts ist weggekürzt** — so viele Felder sind es, und nicht mehr
   // Immer ein ARRAY, nie eine Map — und immer nach Team-id sortiert, damit
   // "links/rechts" über das ganze Match gleich bleibt. Funktioniert mit 1 bis 7
   // Teams genauso wie mit einem einzigen.
+  // `scoreDerived: true` heißt: diese Punktzahl hat lf_live aus den
+  // Spielerpunkten summiert, die Anlage hat sie nicht gemeldet. Die Markierung
+  // hängt AN jeder Zahl, damit sie auch der sieht, der nur die Teamliste liest.
   "teams": [
-    { "id": "0", "name": "Rote Kugeln",  "color": "#ef4444", "score": 1, "players": 1, "rank": 1 },
-    { "id": "1", "name": "Blaue Kugeln", "color": "#3b82f6", "score": 0, "players": 0, "rank": 2 }
+    { "id": "0", "name": "Rote Kugeln",  "color": "#ef4444", "score": 1, "scoreDerived": false, "players": 1, "rank": 1 },
+    { "id": "1", "name": "Blaue Kugeln", "color": "#3b82f6", "score": 0, "scoreDerived": false, "players": 0, "rank": 2 }
   ],
   "teamCount": 2,                // Länge von teams[] — KANN Teams aus einem früheren Match enthalten
   "teamsWithPlayers": 2,         // davon die, in denen gerade jemand steht  <-- das ist meist die Zahl, die du willst
@@ -1173,6 +1195,10 @@ Der Dienst schummelt nicht: jede Zahl sagt, woher sie kommt.
 |---|---|---|
 | `match.scoreSource` | `tdf` | die Punkte kommen **von der Anlage** — verlässlich |
 | | `internal` | die Bridge hat **selbst mitgezählt**, weil die Anlage keine Punktezeilen schickt |
+| `match.teamScoreSource` | `tdf` | der **Team**stand kommt von der Anlage (Laserball) |
+| | `derived` | der Teamstand ist **unsere Summe** der Spielerpunkte — die Anlage rechnet im Standardmodus nur je Spieler ab. Als solche kennzeichnen. |
+| | `internal` | keine verwertbaren Punktezeilen; die Bridge zählt selbst mit |
+| `teams[].scoreDerived` | `true` | dieselbe Aussage, direkt an der einzelnen Zahl |
 | `players[].statsSource` | `live` | laufend mitgezählt — eine **Untergrenze**, die Anlage meldet nicht jeden Schuss |
 | | `tdf7` | die **amtliche Endabrechnung** der Anlage ist da |
 | `players[].officialStats` | `true` | dito, als Boolean zum Abfragen |
@@ -1234,11 +1260,13 @@ Spaltenliste ist die Erlaubnis; alles andere kann je nach Modus fehlen.
 - `match.active`, `match.matchId`
 - `match.mode.{number,key,label,family,profile,known,source}`
 - `match.clock.{direction,displayMs,elapsedMs,remainingMs,durationMs,durationKnown,running}`
-- `match.scoreSource`, `match.end.{reason,source,at}`
-- `teams[].{id,name,color,score,players,rank}`, `teamCount`, `playerCount`
+- `match.scoreSource`, `match.teamScoreSource`, `match.teamScoreDerived`,
+  `match.end.{reason,source,at}`
+- `teams[].{id,name,color,score,scoreDerived,players,rank}`, `teamCount`, `playerCount`
 - `columns[].{key,label,short,format}`
 - `players[].{id,name,teamId,score,rank,stats,statsSource}`
-- die Werte von `reason`, `source`, `scoreSource`, `statsSource`, `format`
+- die Werte von `reason`, `source`, `scoreSource`, `teamScoreSource`,
+  `statsSource`, `format`
 
 **Kann sich noch ändern** — benutzbar, aber bitte nicht tragend:
 

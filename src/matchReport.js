@@ -446,17 +446,30 @@ function buildMatchReport(state, opts) {
 
   // ---- teams and winner ---------------------------------------------------
   const scores = s.scores && typeof s.scores === 'object' ? s.scores : {};
+  // ADDITIVE — where the team score came from. 'tdf' = the arena reported team
+  // points itself; 'derived' = lf_live summed them from the player scores
+  // because the arena reports per player only (standard mode); 'internal' = no
+  // usable type-5 lines, the bridge's own count. The engine has already put the
+  // value to use into `scores` in all three cases — this report never sums
+  // anything itself. `scoreDerived` travels ON every single number below, so a
+  // backend cannot read a total of ours and take it for the arena's.
+  const teamScoreSource = ['tdf', 'derived', 'internal'].includes(s.teamScoreSource)
+    ? s.teamScoreSource : 'internal';
+  const teamScoreDerived = teamScoreSource === 'derived';
   const teamIds = [...new Set(Object.keys(s.teams || {}).concat(Object.keys(scores)))];
   const teams = teamIds.map((id) => ({
     teamId: String(id),
     name: cleanText(String(s.teams?.[id]?.name || `Team ${id}`), 64),
     color: cleanText(String(s.teams?.[id]?.color || ''), 32) || null,
     score: numOrNull(scores[id]),
+    scoreDerived: teamScoreDerived,
   }));
   const scored = teams.filter((t) => t.score !== null);
   const best = scored.length ? Math.max(...scored.map((t) => t.score)) : null;
   const leaders = best === null ? [] : scored.filter((t) => t.score === best);
-  const winner = leaders.length === 1 ? { teamId: leaders[0].teamId, name: leaders[0].name, score: leaders[0].score } : null;
+  const winner = leaders.length === 1
+    ? { teamId: leaders[0].teamId, name: leaders[0].name, score: leaders[0].score, scoreDerived: teamScoreDerived }
+    : null;
   const draw = leaders.length > 1;
 
   // ---- overview -----------------------------------------------------------
@@ -484,7 +497,14 @@ function buildMatchReport(state, opts) {
   }
   if (wants('teams')) match.teams = teams;
   if (wants('sieger')) { match.winner = winner; match.draw = draw; }
-  if (wants('punktequelle')) match.scoreSource = s.scoreSource === 'tdf' ? 'tdf' : 'internal';
+  if (wants('punktequelle')) {
+    match.scoreSource = s.scoreSource === 'tdf' ? 'tdf' : 'internal';
+    // ADDITIVE and separate on purpose: `scoreSource` says whether type-5 lines
+    // arrived at all, `teamScoreSource` says whether the TEAM number in
+    // `teams[].score`/`winner.score` is the arena's or ours.
+    match.teamScoreSource = teamScoreSource;
+    match.teamScoreDerived = teamScoreDerived;
+  }
   if (wants('ende')) {
     match.end = {
       reason: s.endReason || null,

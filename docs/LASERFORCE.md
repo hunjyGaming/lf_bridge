@@ -171,7 +171,7 @@ identische Ergebnisse.
 | `2` | team | `2  index  desc…  colour-enum  colour-desc  [#rgb]` — `#rgb` ab v2.004 | je Team 1×, „Neutral" zuletzt | → `teams[index] = {name, color}` |
 | `3` | entity-start | `3  time  id  type  desc  team  level  category  [battlesuit]  [memberId]` — `battlesuit` ab v2.003, `memberId` in späten 2.006 | je Entity 1×, **nach `0100`** | wenn die Spalte `type` den Wert `player` trägt → Spieler anlegen; `level`/`category`/`battlesuit`/`memberId` werden **jetzt gemerkt**. Zur Spalte statt zum Wort: [Typ-3 im Detail](#typ-3-login-nach-0100-im-detail) |
 | `4` | **event** | `4  time  code  <actor>  <verb…>  <target>` | laufend | siehe Code-Tabellen |
-| `5` | score | `5  time  entity  old  delta  new` | begleitet jedes werterelevante Typ-4-Event | **Punktestand-Autorität** für alle Modi → `scores` / `players[id].score`, `scoreSource='tdf'`. Details: [Typ-5 im Detail](#typ-5-score-im-detail) |
+| `5` | score | `5  time  entity  old  delta  new` | begleitet jedes werterelevante Typ-4-Event | **Punktestand-Autorität** für alle Modi → `scores` / `players[id].score`, `scoreSource='tdf'`. Meldet die Anlage **keine** Teamzeilen (Standardmodus — gemessen), summiert lf_live `scores` aus den Spielerpunkten und kennzeichnet das mit `teamScoreSource='derived'`. Details: [Typ-5 im Detail](#typ-5-score-im-detail) |
 | `6` | entity-end | `6  time  id  type  score` — `type` = Exit-Code, Zuordnung **unbestätigt**, siehe [Exit-Codes](#die-exit-codes-der-typ-6-zeile--unbestätigt) | je Entity 1× (am Ende oder bei Elimination mitten im Spiel) | → `match_summary`-Ereignis (informativ, verändert den Zustand nicht); Exit-Code wird in `exitCodes` festgehalten |
 | `7` | sm5-stats | `7  id  <23 benannte Felder>` = 24 Felder + Typ-Spalte | je Entity 1× — **in Laserball nicht vorhanden und, gemessen, auch im Standardmodus (Nummer 7) nicht** | **offizielle Endstatistik** → `players[id].official`, überschreibt die SM5-Live-Zähler, `statsSource='tdf7'`. Details: [Typ-7 im Detail](#typ-7-sm5-endblock-im-detail) |
 | `8` | — | nicht dokumentiert / nicht beobachtet | — | – |
@@ -433,10 +433,20 @@ Punktestand der Anlage**. Sie wurde früher nur als Info-Ereignis durchgereicht;
 der Punktestand wurde selbst gezählt. **Jetzt ist sie die Autorität** — für alle
 Modi, nicht nur für SM5.
 
-- `entity` kann ein **Team-Index** oder eine **Spieler-ID** sein. lf_live
-  unterscheidet das an der bekannten Spielerliste: ist `entity` eine bekannte
-  Spieler-ID, landet `new` als Spieler-Punktestand, sonst als Team-Punktestand.
-  Beides wird parallel geführt.
+- `entity` kann ein **Team-Index**, eine **Spieler-ID** oder eine
+  **Nicht-Spieler-Entity** sein. lf_live unterscheidet in dieser Reihenfolge:
+  1. Ist `entity` eine bekannte **Spieler-ID**, landet `new` als
+     Spieler-Punktestand. Diese Prüfung steht zuerst, damit die dokumentierte
+     Vorrangregel gilt: eine Kennung, die zugleich ein plausibler Team-Index
+     wäre, ist der Spieler.
+  2. Trägt die Kennung ein **Präfix** (`#` Mitglied, `@` Gastweste oder
+     Nicht-Spieler-Entity), ist sie **nie** ein Team — ein Team-Index schreibt
+     die Anlage blank (`0`, `1`). Punkte einer Punktestation, eines Generators
+     oder eines Beacons gehören also niemandem: sie landen weder bei einem
+     Spieler noch bei einem Team. (Vorher wurde aus `@91` das Phantom-Team
+     `91`.)
+  3. Eine blanke Kennung ist der **Team-Index**.
+  Spieler- und Teampunkte werden parallel geführt.
 - Gelesen wird die Spalte `new` (Schema zuerst, sonst Position 5), nicht `delta`.
 - Ab der ersten Typ-5-Zeile steht `scoreSource` auf `tdf`. `0100` setzt es
   wieder auf `internal` zurück, damit ein Match nicht die Autorität des
@@ -451,6 +461,67 @@ Modi, nicht nur für SM5.
 Gegen einen feindlichen Feed ist ein Team-Punktestand nur für einen plausiblen
 Team-Schlüssel (ein- oder zweistellig, maximal 32 verschiedene) zulässig — dieselbe
 Schutzgrenze wie bei Typ 2.
+
+### Nicht jede Anlage meldet Teampunkte — `teamScoreSource`
+
+**Gemessen, nicht angenommen.** In vier Mitschnitten des Standardmodus
+(19.09.2026, Nummer 7, `| Standard LZ - 2 Teams |`) stehen zusammen **5551
+Typ-5-Zeilen — und nicht eine einzige auf einer Team-Kennung.** Die Anlage
+rechnet dort ausschließlich je Spieler ab. `gameState.scores` blieb deshalb
+leer: die Live-Ansicht zeigte 0:0, und jeder Missionsbericht meldete `draw` ohne
+Sieger, obwohl die Einzelpunkte exakt stimmten. In **Laserball** ist es anders —
+dort meldet die Anlage Teampunkte, und daran ändert sich nichts.
+
+lf_live summiert die Teampunkte deshalb **genau dann** aus den Spielerpunkten,
+wenn die Anlage keine Teamzeile schickt. Wer die Zahl geliefert hat, steht in
+`gameState.teamScoreSource`:
+
+| Wert | Heißt | Typischer Fall |
+|---|---|---|
+| `tdf` | Die **Anlage** hat Teampunkte per Typ-5-Zeile gemeldet. | Laserball |
+| `derived` | **Wir** haben sie aus den Spielerpunkten summiert. Unsere Rechnung, nicht die der Anlage. | Standard, SM5 |
+| `internal` | Keine verwertbaren Typ-5-Zeilen (bisher) — die alte Eigenzählung greift. | Laserball-Tore, und die ersten Sekunden jedes Matches |
+
+`gameState.scores[teamId]` trägt in **allen drei** Fällen den anzuzeigenden
+Wert. **Niemand außerhalb der Engine summiert noch selbst.**
+
+Was in die Summe einfließt, und was ausdrücklich nicht:
+
+- **Ja:** jeder Spieler mit einem Team, das eine Typ-2-Zeile angekündigt hat.
+  Negative Punktestände zählen mit — sie sind echt.
+- **Nein:** Nicht-Spieler-Entities. Ziele, Generatoren und Beacons stehen gar
+  nicht erst in `gameState.players` (der Typ-3-Pfad legt nur Zeilen an, deren
+  `type`-Spalte `player` sagt), und ihr Team-Index 2 („Neutral") bekommt so
+  auch keine Punkte.
+- **Nein:** ein Spieler ohne Team oder in einem Team, das nie angekündigt
+  wurde. Teams werden nicht erfunden.
+- **Nein:** ein Spieler ohne Punktestand. Das ist eine fehlende Messung, keine 0.
+
+**Die Reihenfolge ist einbahnig:** `internal` → `derived` → `tdf`, nie zurück.
+Kommt später doch eine Team-Punktezeile, gewinnt sie sofort und für den Rest
+des Matches. Ein `0100` setzt alles zurück, damit ein Match die Antwort nicht
+vom Vormatch erbt.
+
+#### Das Zeitfenster am Matchanfang
+
+In den ersten Sekunden gibt es weder Spieler- noch Teampunkte — es ist also
+noch gar nicht entschieden, welcher Fall vorliegt. In Laserball schickt die
+Anlage die Spielerzeile und die Teamzeile **desselben Tores unter demselben
+Zeitstempel**, und nichts garantiert, welche zuerst über die Leitung geht. Ohne
+Wartezeit stünde das Kennzeichen kurz auf `derived` und kippte dann auf `tdf` —
+genau das Flackern, das die Anzeige nie zeigen darf.
+
+Deshalb wartet die Engine nach der ersten **Spieler**-Punktezeile
+`TEAM_SCORE_SETTLE_MS` = **5000 ms Spielzeit**, bevor sie sich aufs Summieren
+festlegt. Innerhalb des Fensters bleibt das Kennzeichen auf `internal` und der
+Stand bei 0:0 — was ein Match in seinen ersten Sekunden ohnehin ist. Eine
+Team-Punktezeile beendet das Fenster sofort mit `tdf`; das Matchende beendet es
+ebenfalls, damit auch ein Spiel, das innerhalb des Fensters abbricht, seine
+Summe bekommt.
+
+Gemessen wird auf der **Uhr des Streams** (`elapsedTime`), nie auf
+`Date.now()`: eine Wiedergabe eines Mitschnitts liefert damit exakt dasselbe
+Ergebnis wie das Match live.
 
 ---
 
@@ -981,7 +1052,7 @@ Endabrechnung.
 | Zeile 1 (Mission) | `mode` (Nummer, Familie, Anzeigename) + `missionDesc`; `duration` und `durationKnown`; `mode_change`-Event |
 | Zeile 2 | `teams[index] = {name, color}` |
 | Zeile 3 (Spalte `type` = `player`) | Spieler angelegt; `player_join`-Event; zusätzlich `level`, `category`, `roleLabel`, `battlesuit`, `memberId` und die Zählerfelder der Familie |
-| Zeile 5 (Score) | **autoritativer Punktestand** → `scores[team]` bzw. `players[id].score`, `scoreSource='tdf'`; zusätzlich weiterhin das `score`-Event mit `teamId`/`old`/`new`/`delta` |
+| Zeile 5 (Score) | **autoritativer Punktestand** → `scores[team]` bzw. `players[id].score`, `scoreSource='tdf'`; zusätzlich weiterhin das `score`-Event mit `teamId`/`old`/`new`/`delta`. Schickt die Anlage keine Teamzeile, wird `scores[team]` aus den Spielerpunkten **summiert** — `teamScoreSource` sagt, wer gerechnet hat |
 | Zeile 6 (Entity-Ende) | `match_summary`-Event mit `entityId`/`exitCode`/`score` (informativ, kein Zustandswechsel); der Exit-Code wird in `exitCodes`/`exitCodesSeen` festgehalten; zählt zusätzlich zur [Erkennung der Endabrechnung](#endabrechnung--einzelne-elimination) — **nie allein** |
 | Zeile 7 (SM5-Endblock) | `players[id].official` (Rohwerte), überschreibt die SM5-Live-Zähler, `statsSource='tdf7'`, `sm5_stats`-Event; setzt die Frist der [Endabrechnung](#endabrechnung--einzelne-elimination) |
 | Zeile 9 | `players[id].status`; `status`-Event |
@@ -990,7 +1061,7 @@ Endabrechnung.
 
 | TDF | → lf_live |
 |---|---|
-| `0100` | `match_start`; `players`/`ballHolderId`/`events` geleert, Scores → 0, neue `matchId`, `scoreSource` → `internal`. **`mode` und `duration` bleiben stehen** (Typ 1 kam davor) |
+| `0100` | `match_start`; `players`/`ballHolderId`/`events` geleert, Scores → 0, neue `matchId`, `scoreSource` und `teamScoreSource` → `internal`. **`mode` und `duration` bleiben stehen** (Typ 1 kam davor) |
 | `0101` | `match_end` mit `reason: mission_end`; Ball frei; `endReason`/`endedAt` gesetzt |
 | `1100` | `pass`; `passesDone/Received++`; Ball→target; Assist-Fenster (10 s) |
 | `1109` | `clear`; `clearsDone/Received++`; Ball→target; Assist-Fenster |
@@ -1084,7 +1155,7 @@ Es ist **erwartet**, dass diese Liste Lücken hat. Alles hier ist entweder nicht
 | **Zweite Zahl der Beobachtung (`1095`, Laserball)** | Der Betreiber nannte für Laserball eine Zahl `1095`. Ob Entity-Kennung oder Exit-Code, ist aus der Angabe **nicht** ableitbar. Hier wird nicht geraten; die Mitschnitte müssen es zeigen. | offen |
 | **Typ-6 am Matchende** | Dass am regulären Ende **jede** verbliebene Entity eine Typ-6-Zeile schickt, stammt aus der Spezifikation, nicht aus einer Messung der eigenen Anlage. Die Vollständigkeitsregel steht und fällt damit. Trifft es nicht zu, wird die Endabrechnung nicht erkannt und der Watchdog beendet das Match später — nie früher. | unbestätigt |
 | **`exitCodes` bleibt im Standardmodus leer** | Folge der gemessenen Reihenfolge: der Typ-6-Block kommt **hinter** dem `0101` und läuft damit in ein bereits beendetes Match. `_noteEntityEnd()` steigt dort aus, `exitCodes`/`exitCodesSeen` bleiben leer. Die Zeilen selbst werden weiterhin als `match_summary`-Ereignis ausgegeben. Beide Felder sind **rein diagnostisch** und entscheiden nichts — deshalb bleibt es so. | **gemessen** |
-| **Teamstand im Standardmodus** | **Gemessen: die Anlage schickt in Modus 7 keine einzige Typ-5-Zeile auf eine TEAM-Kennung** — alle 5551 Punktezeilen der vier Mitschnitte nennen einen Spieler. `gameState.scores` je Team bleibt deshalb auf 0, und der Missionsbericht meldet folgerichtig 0:0 und `draw`. Die Spielerpunkte stimmen dagegen exakt (141 von 141 Spielern deckungsgleich mit der letzten Typ-5-Zeile ihrer Kennung). Dass der Teamstand die Summe der Spielerpunkte wäre, legen die Typ-6-Zeilen nahe (dort steht je Spieler ein Score), ist aber **nicht belegt** — und wird deshalb nicht gerechnet. | **offen, mit Auswirkung** |
+| **Teamstand im Standardmodus** | **Gemessen: die Anlage schickt in Modus 7 keine einzige Typ-5-Zeile auf eine TEAM-Kennung** — alle 5551 Punktezeilen der vier Mitschnitte nennen einen Spieler. Die Spielerpunkte stimmen dagegen exakt (141 von 141 Spielern deckungsgleich mit der letzten Typ-5-Zeile ihrer Kennung). lf_live **summiert den Teamstand deshalb selbst** aus den Spielerpunkten und kennzeichnet ihn mit `teamScoreSource: 'derived'` → [Typ-5 im Detail](#nicht-jede-anlage-meldet-teampunkte--teamscoresource). Damit stimmen Live-Ansicht, Sieger und `draw` wieder. **Dass die Anlage intern genauso rechnet, bleibt unbelegt** — es ist unsere Summe, überall als solche markiert, und eine später doch eintreffende Teamzeile gewinnt. | **gelöst, Herkunft gekennzeichnet** |
 | **`0D05` (Blast ohne Deaktivierung)** | **Ein einziges** Vorkommen in vier Mitschnitten. Die Deutung als nicht-deaktivierender Gegenpart zu `0D06` ist plausibel (gleiches Verb, Gegnerteam, Ziel bleibt in Zustand 0), bei n=1 aber nicht belegt. | unbestätigt |
 | **Wirkung der Ränge (`0E00`)** | Dass ein Spieler zum „Held", „Schütze", „Unsterblicher" oder „Raketenliebhaber" befördert wird, ist belegt. **Was der Rang bewirkt, nicht.** Einziger Anhaltspunkt: 4 der 7 Held-Beförderungen liegen auf demselben Zeitstempel wie ein `0402` (Unverwundbarkeit) desselben Spielers — 3 nicht. Zu wenig. | unbestätigt |
 | **`0208`/`0D06` in den Live-Zählern** | Eigenbeschuss und Blast fließen bewusst **nicht** in `shotsFired`/`shotsHit`/`deactivations` ein. Wie die Anlage sie selbst verbucht, stünde in ihrer Endabrechnung — die es in diesem Modus nicht gibt (kein Typ 7). Damit fehlt jeder Prüfstein, und geraten wird nicht. | bewusst offen |

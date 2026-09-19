@@ -83,12 +83,14 @@ function defaults() {
       chase: {
         // Wieviele Treffer hintereinander auf DIESELBE Person, bevor das Paar
         // in der Liste auftaucht. 0 oder 1 = Erkennung aus.
-        threshold: 3,
+        // 5 statt 3: an vier echten Standardspielen der Anlage erreichten bei 3
+        // zwischen 32 % und 63 % aller Spieler die Schwelle mindestens einmal je
+        // Match - als Auffaelligkeitsliste wertlos. Bei 5 sind es 0-5 %.
+        threshold: 5,
         // Für welche ANZEIGEPROFILE die Erkennung läuft — nicht nach
-        // Missionsnummer und nicht nach Familie. Die Standard-Nummer der
-        // Anlage ist noch unbekannt; bis sie in modes/standard.json steht,
-        // laufen Standardspiele als Profil `sm5`. Zum Ausprobieren so lange
-        // `sm5` mit aufnehmen.
+        // Missionsnummer und nicht nach Familie: Modus 7 steht inzwischen in
+        // modes/standard.json und zieht das Profil `standard`, weitere
+        // Standard-Varianten brauchen dort nur ihre Nummer.
         profiles: ['standard'],
       },
     },

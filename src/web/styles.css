@@ -319,8 +319,13 @@ header.app {
 @media (prefers-reduced-motion: reduce) { .led.live { animation: none; } }
 
 /* ---------- signal flow (signature) ----------
-   a single hairline rail runs the width of the strip; the three stages
-   sit on it; a packet travels the rail on every event. */
+   a single hairline rail runs the width of the strip; the three stages sit on
+   it. The rail lights up STEADILY while data is coming in — it does not move.
+   Es gab hier einmal einen Lichtpunkt, der bei JEDEM Ereignis ueber die
+   Leitung lief. Bei 40 Spielern waren das gemessen 56 Animationsneustarts je
+   Sekunde: Flackern ohne Informationsgewinn. Was gefragt war, ist eine einzige
+   Auskunft — kommen gerade Daten? — und die steht jetzt als ruhiger Zustand in
+   `.link` (siehe unten), nicht als Bewegung. */
 .flow {
   display: flex; align-items: stretch; gap: 0;
   padding: 2px var(--s-6) var(--s-6); position: relative;
@@ -359,26 +364,55 @@ header.app {
   flex: 1 1 34px; min-width: 26px; align-self: center; height: 20px;
   position: relative; margin: 0 -1px; z-index: 1;
 }
-.wire::after {   /* the lit segment while streaming */
+/* Die Leitung leuchtet, solange Daten kommen — unbewegt. Nur die Deckkraft
+   blendet auf, und das hoechstens einmal je Sekunde (`.flow.live`). */
+.wire::after {
   content: ""; position: absolute; left: 0; right: 0; top: 50%; height: 1px;
   transform: translateY(-.5px);
-  background: linear-gradient(90deg, transparent, color-mix(in srgb, var(--accent) 70%, transparent), transparent);
-  background-size: 40% 100%; background-repeat: no-repeat; background-position: -50% 0;
-  opacity: 0; transition: opacity .3s;
+  background: linear-gradient(90deg, transparent, color-mix(in srgb, var(--accent) 60%, transparent), transparent);
+  opacity: 0; transition: opacity .6s;
 }
-.flow.streaming .wire::after { opacity: 1; animation: drift 1.7s linear infinite; }
-@keyframes drift { to { background-position: 150% 0; } }
-.wire .pulse {
-  position: absolute; top: 50%; left: 0; width: 6px; height: 6px; margin: -3px 0 0 -3px;
-  border-radius: 50%; background: var(--accent-hi);
-  box-shadow: 0 0 10px var(--accent), 0 0 3px #fff; opacity: 0;
+.flow.live .wire::after { opacity: 1; }
+@media (prefers-reduced-motion: reduce) { .wire::after { transition: none; } }
+
+/* ---------- Verbindungsanzeige ----------
+   Die Antwort auf genau eine Frage: kommen gerade Daten von der Anlage?
+   Drei Zustaende mit Ampelcharakter, dazu die Ereignisrate als Zahl. Der Punkt
+   atmet langsam und IMMER GLEICH schnell, solange Daten fliessen — das ist das
+   Hauszeichen fuer „lebt" (siehe `.led.live`) und haengt bewusst NICHT an der
+   Ereignisrate. Gesetzt wird das alles hoechstens einmal je Sekunde. */
+.link {
+  display: inline-flex; align-items: center; gap: var(--s-3);
+  margin-top: var(--s-3); min-width: 0;
 }
-.wire.fire .pulse { animation: travel .55s cubic-bezier(.4,0,.6,1); }
-@keyframes travel { 0% { left: 0; opacity: 1; } 85% { opacity: 1; } 100% { left: 100%; opacity: 0; } }
+.link-dot {
+  width: 7px; height: 7px; border-radius: 50%; flex: none;
+  background: var(--ink-3); transition: background .3s, box-shadow .3s;
+}
+.link-text {
+  font: 400 11px var(--mono); color: var(--ink-2);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.link-rate {
+  font: 400 11px var(--mono); color: var(--ink-3); flex: none;
+  font-variant-numeric: tabular-nums;
+}
+.link-rate:not(:empty)::before { content: "·"; margin-right: var(--s-3); color: var(--edge); }
+/* Daten fliessen */
+.link.flow .link-dot {
+  background: var(--ok); box-shadow: 0 0 0 3px color-mix(in srgb, var(--ok) 18%, transparent);
+  animation: breathe-ok 2.4s ease-in-out infinite;
+}
+.link.flow .link-text { color: var(--ink); }
+@keyframes breathe-ok { 50% { box-shadow: 0 0 0 5px color-mix(in srgb, var(--ok) 7%, transparent); } }
+/* verbunden, aber seit einer Weile still */
+.link.idle .link-dot { background: var(--warn); box-shadow: 0 0 0 3px color-mix(in srgb, var(--warn) 18%, transparent); }
+.link.idle .link-text { color: var(--warn); }
+/* gar keine Verbindung */
+.link.off .link-dot { background: var(--ink-3); box-shadow: none; }
 @media (prefers-reduced-motion: reduce) {
-  .flow.streaming .wire::after { animation: none; opacity: .5; background-position: 30% 0; }
-  .wire.fire .pulse { animation: none; opacity: 0; }
-  .wire.fire::after { animation: none; opacity: 1; }
+  .link.flow .link-dot { animation: none; }
+  .link-dot { transition: none; }
 }
 
 /* ---------- tabs — channel selector ---------- */
@@ -524,6 +558,13 @@ sup.ss.ok { color: var(--ok); }
 /* Trefferquote: live nur geschätzt, und zwar nach oben. Gleiche Zurückhaltung
    wie LIVE/OFFIZIELL, nur eine Nuance leiser. */
 sup.ss.est { color: var(--ink-3); }
+/* Herkunft der Teamsumme, an der grossen Zahl in der Kopfleiste. Die Zahl ist
+   bis 62 px gross; die Marke bleibt klein und haengt oben an, damit sie die
+   Ziffern nicht mitwachsen laesst und die Grundlinie nicht verschiebt. */
+.tc-score sup.ss {
+  vertical-align: top; position: relative; top: .15em;
+  letter-spacing: .06em; color: var(--ink-3);
+}
 
 /* ---------- live — Werkzeugleiste über den Spielerwerten ---------- */
 .live-tools {
@@ -951,8 +992,9 @@ dialog .eyebrow { color: var(--accent); }
   .flow::before { display: none; }
   .wire { flex-basis: 100%; height: 10px; margin: 0; }
   .wire::after { display: none; }
-  .wire .pulse { display: none; }
   .node { min-width: 0; flex: 1 1 46%; }
+  /* Schmal bleibt nur der Zustand stehen, die Rate muss weichen. */
+  .link { flex-wrap: wrap; }
   .grid2 { grid-template-columns: 1fr; }
   main { padding: var(--s-5) var(--s-4) var(--s-8); }
 

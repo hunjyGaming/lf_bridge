@@ -156,6 +156,24 @@ const SCORE_SOURCE_LABEL = {
   tdf: 'von der Anlage gemeldet',
   internal: 'von der Bridge mitgezählt',
 };
+/**
+ * Where the TEAM score on screen comes from. `derived` is deliberately worded
+ * as OUR arithmetic: the arena never sent that number, lf_live added it up from
+ * the player scores because the arena reports per player only (standard mode).
+ * A display that shows the number without this label is claiming an authority
+ * it does not have — see docs/API.md.
+ */
+const TEAM_SCORE_SOURCE_LABEL = {
+  tdf: 'von der Anlage gemeldet',
+  derived: 'von lf_live aus den Spielerpunkten summiert',
+  internal: 'von der Bridge mitgezählt',
+};
+const TEAM_SCORE_SOURCES = ['tdf', 'derived', 'internal'];
+/** Normalize whatever the state carries to one of the three contract values. */
+function teamScoreSourceOf(s) {
+  const v = s && s.teamScoreSource;
+  return TEAM_SCORE_SOURCES.includes(v) ? v : 'internal';
+}
 /** Where a player's counters come from. */
 const STATS_SOURCE_LABEL = {
   live: 'laufend mitgezählt (Untergrenze)',
@@ -302,11 +320,18 @@ function buildDisplay(s, { withPlayers = true, now = Date.now() } = {}) {
     const t = String(p.teamId);
     headcount.set(t, (headcount.get(t) || 0) + 1);
   }
+  // ADDITIVE: every team score carries its own provenance, so the number is
+  // never shown without it — even by a consumer that reads the team list alone
+  // and never looks at `match.teamScoreSource`.
+  const teamScoreSource = teamScoreSourceOf(s);
+  const teamScoreDerived = teamScoreSource === 'derived';
   const teamsPlain = teamIds.map((id) => ({
     id,
     name: (s.teams[id] && s.teams[id].name) || `Team ${id}`,
     color: (s.teams[id] && s.teams[id].color) || null,
     score: num0((s.scores || {})[id]),
+    /** true = OUR sum of the player scores, not a number the arena reported. */
+    scoreDerived: teamScoreDerived,
     players: headcount.get(id) || 0,
   }));
   // Rank is by score; the ARRAY ORDER stays by id, so a display that just walks
@@ -416,6 +441,18 @@ function buildDisplay(s, { withPlayers = true, now = Date.now() } = {}) {
       },
       scoreSource: s.scoreSource || 'internal',
       scoreSourceLabel: SCORE_SOURCE_LABEL[s.scoreSource || 'internal'] || null,
+      /**
+       * ADDITIVE — where the TEAM score in `teams[].score` comes from, and the
+       * only field that answers it. 'tdf' = the arena sent team points itself
+       * (Laserball). 'derived' = lf_live summed them from the player scores
+       * because the arena reports per player only (standard mode, SM5).
+       * 'internal' = no usable type-5 lines, the bridge's own count applies.
+       * Never compute a team total yourself — the engine already did.
+       */
+      teamScoreSource,
+      teamScoreSourceLabel: TEAM_SCORE_SOURCE_LABEL[teamScoreSource] || null,
+      /** shorthand for "mark this number as ours": teamScoreSource === 'derived' */
+      teamScoreDerived,
       end: {
         reason: orNull(s.endReason),
         reasonLabel: s.endReason ? (END_REASON_LABEL[s.endReason] || s.endReason) : null,
@@ -1261,7 +1298,10 @@ class ApiServer {
 
   _get(p, url, res) {
     if (p === '/api/state') return this._json(res, 200, { data: this.engine.snapshot() });
-    if (p === '/api/teams') { const s = this.engine.snapshot(); return this._json(res, 200, { data: { teams: s.teams, scores: s.scores, missionActive: s.missionActive } }); }
+    // ADDITIVE: `teamScoreSource` travels WITH the scores — this endpoint hands
+    // out bare numbers, and a bare number must not pass for the arena's when it
+    // is our own sum of the player scores.
+    if (p === '/api/teams') { const s = this.engine.snapshot(); return this._json(res, 200, { data: { teams: s.teams, scores: s.scores, teamScoreSource: teamScoreSourceOf(s), missionActive: s.missionActive } }); }
     if (p === '/api/players') return this._json(res, 200, { data: Object.values(this.engine.snapshot().players) });
     if (p === '/api/events') {
       const since = parseInt(url.searchParams.get('since') || '0', 10) || 0;

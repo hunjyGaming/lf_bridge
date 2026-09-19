@@ -202,7 +202,7 @@ document.querySelectorAll('.tabs button').forEach((b) => b.addEventListener('cli
   if (b.dataset.tab === 'raw') { loadCapture(); drawRawView(); }
   // Die Wertetabellen werden nur gebaut, solange der Live-Bereich zu sehen ist
   // — beim Zurückkommen holt ein Bild alles nach.
-  if (b.dataset.tab === 'live') { boardsDue = true; schedulePaint(); }
+  if (b.dataset.tab === 'live') boardsNow();
   // Die Live-Rohzeilen werden nur angefordert, solange der Bereich offen ist.
   syncRawTap();
 }));
@@ -224,13 +224,19 @@ function connectWs() {
   ws = new WebSocket(`${proto}://${location.host}/ws${q}`);
   // Nach einem Verbindungsabriss muss der Dienst wieder erfahren, dass hier
   // jemand auf die Rohzeilen schaut — sonst bleibt die Live-Ansicht stumm.
-  ws.onopen = () => { rawTapSent = null; syncRawTap(); };
-  ws.onclose = () => { setChip('chip-lf', 'off', 'Laserforce'); rawTapSent = null; setTimeout(connectWs, 2000); };
+  ws.onopen = () => { rawTapSent = null; linkServiceUp = true; linkDue = true; syncRawTap(); };
+  ws.onclose = () => {
+    setChip('chip-lf', 'off', 'Laserforce');
+    rawTapSent = null;
+    // Der Dienst ist weg — die Verbindungsanzeige darf nicht stehenbleiben.
+    linkServiceUp = false; linkDue = true; schedulePaint();
+    setTimeout(connectWs, 2000);
+  };
   ws.onerror = () => ws.close();
   ws.onmessage = (e) => {
     const m = JSON.parse(e.data);
     if (m.type === 'state') renderLive(m.data);
-    else if (m.type === 'event') { pushFeed(m.data); events.add(m.data); fireFlow(); }
+    else if (m.type === 'event') { pushFeed(m.data); events.add(m.data); noteEvent(); }
     else if (m.type === 'raw') pushRawBatch(m);
   };
 }
@@ -252,6 +258,15 @@ function connectWs() {
 let paintRaf = 0, paintTimer = null;
 let boardsDue = false;
 const PAINT_FALLBACK_MS = 100;
+// Wie oft die Wertetabellen hoechstens neu gebaut werden. Der Dienst schickt
+// den Zustand fuenfmal je Sekunde; eine Tabelle mit 30 Zeilen fuenfmal je
+// Sekunde neu aufzubauen ist nicht nur die teuerste Einzelarbeit der Anzeige,
+// es ist auch nicht lesbar — Zahlen, die fuenfmal je Sekunde springen, kann
+// niemand nebenbei ablesen. Zweimal je Sekunde ist prompt und ruhig.
+const BOARDS_MIN_MS = 500;
+let boardsAt = 0, boardsTimer = null;
+/** Beim naechsten Bild sofort bauen, ohne auf den Takt zu warten. */
+function boardsNow() { boardsAt = 0; boardsDue = true; schedulePaint(); }
 function schedulePaint() {
   if (document.hidden) return;
   if (!paintRaf) paintRaf = requestAnimationFrame(paintFrame);
@@ -262,18 +277,27 @@ function paintFrame() {
   if (paintTimer) { clearTimeout(paintTimer); paintTimer = null; }
   if (document.hidden) return;
   flushFeed();
-  flushFlow();
+  flushLink();
   flushRawLive();
   if (boardsDue) {
-    boardsDue = false;
-    // Die Tabellen gehoeren in den Live-Bereich; ist ein anderer Reiter offen,
-    // gibt es nichts zu zeigen. Der Umschalter oben holt das nach.
-    if (lastState && $('tab-live').classList.contains('active')) {
-      renderBoards(lastState);
-      // Bewusst NEBEN renderBoards und nicht darin: renderBoards kehrt bei
-      // „jeder gegen jeden" und ohne Teams frueh zurueck, die Beobachtung soll
-      // aber in jeder Aufteilung zu sehen sein.
-      renderChase(lastState);
+    // Gebuendelt je Bild wie bisher, zusaetzlich aber nicht oefter als
+    // BOARDS_MIN_MS. Faellt ein Bild deswegen aus, holt ein Zeitgeber es nach —
+    // liegenbleiben darf nichts.
+    const wait = BOARDS_MIN_MS - (Date.now() - boardsAt);
+    if (wait > 0) {
+      if (!boardsTimer) boardsTimer = setTimeout(() => { boardsTimer = null; schedulePaint(); }, wait);
+    } else {
+      boardsDue = false;
+      boardsAt = Date.now();
+      // Die Tabellen gehoeren in den Live-Bereich; ist ein anderer Reiter offen,
+      // gibt es nichts zu zeigen. Der Umschalter oben holt das nach.
+      if (lastState && $('tab-live').classList.contains('active')) {
+        renderBoards(lastState);
+        // Bewusst NEBEN renderBoards und nicht darin: renderBoards kehrt bei
+        // „jeder gegen jeden" und ohne Teams frueh zurueck, die Beobachtung soll
+        // aber in jeder Aufteilung zu sehen sein.
+        renderChase(lastState);
+      }
     }
   }
 }
@@ -282,42 +306,135 @@ document.addEventListener('visibilitychange', () => {
   // Rohzeilen zu schicken. Beim Zurückkommen wird wieder angefordert.
   syncRawTap();
   if (document.hidden) return;
-  boardsDue = true;
-  schedulePaint();
+  // Beim Zurueckkommen holt EIN Bild alles nach — ohne auf den Bautakt der
+  // Tabellen zu warten, sonst stuende die Anzeige noch eine halbe Sekunde alt da.
+  linkDue = true;
+  boardsNow();
 });
 
-// ---------------- signal flow ----------------
-// Der Lichtpunkt auf der Leitung wird je Bild hoechstens einmal neu gestartet —
-// oefter kann ihn niemand sehen, denn der Browser zeichnet nicht haeufiger. Der
-// Neustart laeuft ueber die laufende Animation selbst; der alte Weg (Klasse ab,
-// `offsetWidth` lesen, Klasse dran) erzwang dafuer jedes Mal eine komplette
-// Layout-Rechnung und war unter Last der teuerste Einzelposten der Oberflaeche.
-let flowDue = false, flowOffT = null;
-function fireFlow() { flowDue = true; schedulePaint(); }
-function flushFlow() {
-  if (!flowDue) return;
-  flowDue = false;
-  for (const id of ['wire-a', 'wire-b']) {
-    const w = $(id);
-    if (!w) continue;
-    const dot = w.querySelector('.pulse');
-    const anims = (w.classList.contains('fire') && dot && dot.getAnimations) ? dot.getAnimations() : [];
-    if (anims.length) {
-      // laeuft schon: einfach an den Anfang zuruecksetzen — kein Layout noetig
-      for (const a of anims) { try { a.currentTime = 0; a.play(); } catch {} }
-    } else {
-      w.classList.remove('fire'); void w.offsetWidth; w.classList.add('fire');
-    }
-  }
-  clearTimeout(flowOffT);
-  flowOffT = setTimeout(() => {
-    for (const id of ['wire-a', 'wire-b']) $(id)?.classList.remove('fire');
-  }, 700);
+// ---------------- Verbindungsanzeige ----------------
+// Hier lief einmal bei JEDEM Ereignis ein Lichtpunkt ueber die Leitung. Bei den
+// Spielerzahlen der Halle ist das kein Informationsgewinn, sondern Flackern:
+// ein echtes Match hat ueber tausend Deaktivierungen und mehrere tausend
+// Fehlschuesse, gemessen wurden 56 Animationsneustarts JE SEKUNDE. Dazu zwang
+// jeder davon den Browser zu Stilarbeit mitten im Nachrichtenfluss.
+//
+// Gefragt war die Antwort auf genau eine Frage — kommen gerade Daten von der
+// Anlage? Die steht jetzt als ruhiger Zustand mit Ampelcharakter da, dazu die
+// Ereignisrate als ZAHL. Die Zahl traegt weiter als jede Bewegung: sie sagt
+// nicht nur „es kommt etwas", sondern auch wieviel, und wer sie eine Weile
+// beobachtet, sieht einen Einbruch, den ein Blitzen nie verraten haette.
+//
+//     ●  Daten fliessen        ~14 Ereignisse/s
+//     ●  keine Daten           seit 12 s
+//     ●  nicht verbunden
+//
+// Drei Eigenschaften machen das aus:
+//   * Ein Ereignis erhoeht NUR einen Zaehler — kein DOM, kein Layout, kein
+//     Zeichenauftrag. Die Kosten je Ereignis sind eine Ganzzahladdition.
+//   * Gezeichnet wird ueber einen Sekundentakt, nicht ueber das Ereignis.
+//     Der Zustand faellt darum VON SELBST auf „keine Daten", wenn nichts mehr
+//     kommt, statt auf das naechste Ereignis zu warten.
+//   * Der Takt laeuft ueber schedulePaint() wie alles andere: gebuendelt je
+//     Bild, und im Hintergrund-Tab gar nicht.
+// Der Punkt atmet langsam mit fester Dauer (CSS `breathe-ok`, 2,4 s) — das
+// Hauszeichen fuer „lebt", bewusst unabhaengig von der Ereignisrate und unter
+// `prefers-reduced-motion` abgeschaltet.
+
+/** Ueber soviele Sekunden wird die Ereignisrate gemittelt. */
+const LINK_RATE_WINDOW = 5;
+/** So lange ohne Zeile von der Anlage gilt als „keine Daten". Etwas mehr als
+ *  der 3-Sekunden-Statusabruf, sonst kippte die Anzeige bei ruhigem Spiel hin
+ *  und her. */
+const LINK_IDLE_MS = 4000;
+
+const linkBuckets = new Array(LINK_RATE_WINDOW).fill(0);
+let linkBucket = 0;          // Ereignisse in der laufenden Sekunde
+let linkLastEventAt = 0;     // letzter `event`-Frame (Uhr dieses Rechners)
+let linkLastLineAt = 0;      // letzte Zeile der Anlage laut Statusabruf
+let linkConnected = false;   // TCP-Verbindung zur Anlage steht
+let linkServiceUp = false;   // WebSocket zum Dienst steht
+let linkDue = true;
+// Was zuletzt wirklich im DOM steht — geschrieben wird nur, was sich aendert.
+const linkShown = { cls: '', text: '', rate: '', lit: null, live: null };
+
+/**
+ * Ein Ereignis ist eingetroffen. Bewusst das Billigste, was geht: diese
+ * Funktion laeuft mehrere hundert Mal je Sekunde und darf nichts anfassen,
+ * was den Browser zu Stil- oder Layout-Arbeit zwingt.
+ */
+function noteEvent() { linkBucket++; linkLastEventAt = Date.now(); }
+
+/** „seit 12 s" / „seit 2:05 min" — Text fuer die Stille. */
+function linkAgo(ms) {
+  const secs = Math.max(0, Math.round(ms / 1000));
+  if (secs < 90) return `seit ${secs} s`;
+  return `seit ${Math.floor(secs / 60)}:${String(secs % 60).padStart(2, '0')} min`;
 }
+
+// Der Sekundentakt. Er laeuft immer — auch wenn gar nichts mehr hereinkommt,
+// denn genau dann muss die Anzeige ja umspringen.
+setInterval(() => {
+  linkBuckets.push(linkBucket);
+  linkBucket = 0;
+  if (linkBuckets.length > LINK_RATE_WINDOW) linkBuckets.shift();
+  linkDue = true;
+  schedulePaint();
+}, 1000);
+
+function flushLink() {
+  if (!linkDue) return;
+  linkDue = false;
+  const dot = $('link-state');
+  const txt = $('link-text');
+  const rate = $('link-rate');
+  if (!dot || !txt || !rate) return;
+
+  const last = Math.max(linkLastEventAt, linkLastLineAt);
+  const since = last ? Date.now() - last : Infinity;
+  const flowing = since < LINK_IDLE_MS;
+
+  let cls, text, rateText;
+  if (!linkServiceUp) {
+    // Nicht die Anlage fehlt, sondern der Dienst — das ist ein anderer Fehler
+    // und muss anders dastehen, sonst sucht der Betreiber am falschen Ende.
+    cls = 'off'; text = 'Konsole ohne Verbindung'; rateText = '';
+  } else if (flowing) {
+    const sum = linkBuckets.reduce((a, b) => a + b, 0);
+    const per = sum / linkBuckets.length;
+    cls = 'flow';
+    text = 'Daten fließen';
+    rateText = per >= 0.5 ? `~${per < 10 ? per.toFixed(1) : Math.round(per)} Ereignisse/s` : '';
+  } else if (linkConnected) {
+    cls = 'idle'; text = 'keine Daten'; rateText = linkAgo(since);
+  } else {
+    cls = 'off'; text = 'nicht verbunden'; rateText = '';
+  }
+
+  if (cls !== linkShown.cls) { linkShown.cls = cls; dot.className = 'link ' + cls; }
+  if (text !== linkShown.text) { linkShown.text = text; txt.textContent = text; }
+  if (rateText !== linkShown.rate) { linkShown.rate = rateText; rate.textContent = rateText; }
+  // Eingangs-Kachel und Leitung folgen demselben Zustand — und damit ebenfalls
+  // dem Sekundentakt statt dem Ereignis.
+  if (flowing !== linkShown.lit) {
+    linkShown.lit = flowing;
+    $('node-in').classList.toggle('lit', flowing);
+  }
+  const live = flowing && lastState != null && lastState.missionActive === true;
+  if (live !== linkShown.live) {
+    linkShown.live = live;
+    $('flow').classList.toggle('live', live);
+  }
+}
+
+// ---------------- signal flow ----------------
 function renderFlow(st) {
+  // Der Statusabruf liefert nur noch die EINGANGSGROESSEN der
+  // Verbindungsanzeige; gezeichnet wird sie im Sekundentakt (flushLink).
+  linkConnected = !!st.tcp.connected;
+  linkLastLineAt = num(st.tcp.lastLineAt);
+  linkDue = true;
   const feeding = st.tcp.connected || (st.tcp.lastLineAt && Date.now() - st.tcp.lastLineAt < 8000);
-  $('node-in').classList.toggle('lit', !!feeding);
-  $('flow').classList.toggle('streaming', !!feeding && st.match.active);
   $('in-sub').textContent = ':' + st.tcp.port;
   setChip('chip-lf', st.tcp.connected ? 'on' : (feeding ? 'live' : 'off'), 'Laserforce');
 
@@ -517,13 +634,52 @@ function renderMode(s) {
 
   const src = $('score-src');
   if (src) {
-    const tdf = s && s.scoreSource === 'tdf';
-    src.textContent = tdf ? 'Punkte: Anlage' : 'Punkte: Eigenzählung';
-    src.classList.toggle('own', !tdf);
-    src.title = tdf
-      ? 'Der Punktestand kommt aus den Typ-5-Zeilen der Anlage.'
-      : 'Punktestand aus der Eigenzählung von lf_live — bis die Anlage ihn selbst meldet.';
+    const k = teamScoreSource(s);
+    const t = TEAM_SCORE_SOURCE[k];
+    src.textContent = 'Punkte: ' + t.tag;
+    // Nur die Eigenzählung ist ein Vorbehalt. Eine Summe aus den offiziellen
+    // Spielerpunkten ist keiner — sie wird gekennzeichnet, nicht gewarnt.
+    src.classList.toggle('own', k === 'internal');
+    src.title = t.help;
   }
+}
+
+// ---------------- Herkunft der Teampunkte ----------------
+// Contract: `gameState.teamScoreSource` — 'tdf' | 'derived' | 'internal'.
+// Rein additiv: ein Dienst, der das Feld noch nicht kennt, liefert es nicht,
+// und dann gilt weiter das aeltere `scoreSource` ('tdf' | 'internal') wie
+// bisher. Der ANZUZEIGENDE Wert steht in jedem Fall schon fertig in
+// `scores[teamId]` bzw. `teams[id].score` — hier wird nichts nachgerechnet.
+const TEAM_SCORE_SOURCE = {
+  tdf: {
+    tag: 'Anlage',
+    help: 'Die Teampunkte kommen aus den Typ-5-Zeilen der Anlage.',
+  },
+  derived: {
+    tag: 'summiert',
+    mark: 'summiert',
+    help: 'Die Anlage meldet in diesem Spielmodus keine Teampunkte, sondern nur Punkte je Spieler. Die hier gezeigte Teamsumme ist die Summe der Einzelpunkte dieses Teams.',
+  },
+  internal: {
+    tag: 'Eigenzählung',
+    help: 'Punktestand aus der Eigenzählung von lf_live — bis die Anlage ihn selbst meldet.',
+  },
+};
+/**
+ * Welche Herkunft gilt? `teamScoreSource` gewinnt, weil es genau die Zahl
+ * beschreibt, die in der Kopfleiste steht. Fehlt es (aelterer Dienst) oder
+ * nennt es etwas Unbekanntes, faellt die Konsole auf das alte Feld zurueck.
+ */
+function teamScoreSource(s) {
+  const t = s && s.teamScoreSource;
+  if (typeof t === 'string' && Object.prototype.hasOwnProperty.call(TEAM_SCORE_SOURCE, t)) return t;
+  return (s && s.scoreSource === 'tdf') ? 'tdf' : 'internal';
+}
+/** Dezentes Kennzeichen an der Teamsumme — im Stil von `live` / `offiziell`. */
+function teamScoreMark(kind) {
+  const t = TEAM_SCORE_SOURCE[kind];
+  if (!t || !t.mark) return null;
+  return el('sup', { className: 'ss', title: t.help }, t.mark);
 }
 /** Dezentes Kennzeichen an SM5-Spielern: woher deren Zahlen stammen. */
 function statsMark(p) {
@@ -724,12 +880,17 @@ $('cols-toggle')?.addEventListener('click', () => {
 });
 
 /** Ein Teamblock in der Kopfleiste: Farbbalken, Name, Punktestand. */
-function teamCard(m, score) {
+function teamCard(m, score, srcKind) {
   const c = paintTeam(el('div', { className: 'team-card' }), m.color);
+  const sc = el('span', { className: 'tc-score' }, String(score));
+  // Ist die Zahl aus den Spielerpunkten summiert, steht das dezent daneben —
+  // genau wie `live` / `offiziell` an den Spielerwerten. Der Titel erklaert es.
+  const mark = teamScoreMark(srcKind);
+  if (mark) sc.append(mark);
   c.append(
     el('span', { className: 'tc-bar' }),
     el('span', { className: 'tc-name', title: m.name }, m.name),
-    el('span', { className: 'tc-score' }, String(score)));
+    sc);
   return c;
 }
 
@@ -792,7 +953,18 @@ function renderBoards(s) {
     return { id: t, name, color: safeColor(raw && raw.color, i) };
   });
   const byTeam = new Map(metas.map((m) => [m.id, m]));
-  const teamScore = (t) => (s.scores && s.scores[t] != null ? num(s.scores[t]) : 0);
+  // Der anzuzeigende Wert kommt FERTIG vom Dienst — in `scores[teamId]`, und
+  // falls der Dienst ihn (noch) nur am Team haengen hat, in `teams[id].score`.
+  // Hier wird nichts summiert: was die Konsole selbst rechnete, waere eine
+  // zweite Wahrheit neben der des Dienstes.
+  const rawTeamScore = (t) => {
+    if (s.scores && s.scores[t] != null) return s.scores[t];
+    const tm = s.teams && s.teams[t];
+    if (tm && typeof tm === 'object' && tm.score != null) return tm.score;
+    return null;
+  };
+  const teamScore = (t) => { const v = rawTeamScore(t); return v == null ? 0 : num(v); };
+  const scoreKind = teamScoreSource(s);
 
   const ffa = isFreeForAll(players, teamIds);
   // 2 Teams -> das gewohnte Gegenueber · 1 sowie 3–7 Teams -> Raster ·
@@ -812,7 +984,7 @@ function renderBoards(s) {
   // ---- Kopfleiste ----
   const head = $('score-teams');
   head.textContent = '';
-  const anyScore = teamIds.some((t) => s.scores && s.scores[t] != null);
+  const anyScore = teamIds.some((t) => rawTeamScore(t) != null);
   const ffaValue = anyScore ? ((p) => teamScore(String(p.teamId))) : ((p) => num(sortKey ? p[sortKey] : 0));
   const ranked = players.slice().sort((x, y) => ffaValue(y) - ffaValue(x));
 
@@ -829,7 +1001,7 @@ function renderBoards(s) {
       head.append(chip);
     });
   } else {
-    for (const m of metas) head.append(teamCard(m, teamScore(m.id)));
+    for (const m of metas) head.append(teamCard(m, teamScore(m.id), scoreKind));
   }
 
   // ---- Wertetabellen ----
@@ -1032,15 +1204,30 @@ function renderLegend(s, scols, sm5) {
   item('Blasse Zeile', 'Dieser Spieler ist gerade ausgeschieden und spielt nicht mit.', true);
   item('Punkte über den Tabellen', 'Der große Wert je Team ist der Spielstand, den die Anlage meldet. Wo sie noch keinen schickt, zählt lf_live selbst — das steht unter der Uhr.', true);
 }
+// Die Uhr wird fuenfmal je Sekunde neu gerechnet (jeder State-Frame), zeigt
+// aber nur Sekunden. Geschrieben wird darum nur, was sich wirklich geaendert
+// hat — und der Fortschrittsbalken hoechstens einmal je Sekunde: seine Blende
+// laeuft eine Sekunde, und wer ihn fuenfmal je Sekunde neu anspringen laesst,
+// setzt diese Blende dauernd neu an. Der Balken zitterte dann, statt zu gleiten.
+const clockShown = { clock: '', cap: '', prog: '' };
+let progAt = 0;
 function drawClock() {
   const ms = Math.max(0, num(clockMs));
-  $('clock').textContent = (clockUp ? '+' : '') + fmt(ms);
+  const t = (clockUp ? '+' : '') + fmt(ms);
+  if (t !== clockShown.clock) { clockShown.clock = t; $('clock').textContent = t; }
+  const capText = clockUp ? 'Laufzeit' : 'Restzeit';
   const cap = $('clock-cap');
-  if (cap) cap.textContent = clockUp ? 'Laufzeit' : 'Restzeit';
+  if (cap && capText !== clockShown.cap) { clockShown.cap = capText; cap.textContent = capText; }
   // No duration reported -> no progress to show. A bar that fills against an
   // invented length would be a lie, so it stays empty.
   const fill = $('mid-prog-fill');
-  if (fill) fill.style.width = (!clockUp && matchDur > 0) ? (Math.min(1, Math.max(0, 1 - ms / matchDur)) * 100).toFixed(1) + '%' : '0%';
+  if (!fill) return;
+  const w = (!clockUp && matchDur > 0) ? (Math.min(1, Math.max(0, 1 - ms / matchDur)) * 100).toFixed(1) + '%' : '0%';
+  if (w === clockShown.prog) return;
+  // Ein Sprung auf 0 % ist ein Matchwechsel und muss sofort durch.
+  if (w !== '0%' && Date.now() - progAt < 900) return;
+  clockShown.prog = w; progAt = Date.now();
+  fill.style.width = w;
 }
 function fmt(ms) { const t = Math.floor((ms || 0) / 1000); return `${Math.floor(t / 60)}:${String(t % 60).padStart(2, '0')}`; }
 // Der Verlauf zeigt die letzten 80 Zeilen. Die Ereignisse kommen einzeln

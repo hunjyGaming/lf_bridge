@@ -32,18 +32,30 @@
 
   <!-- signal flow — data path, visible end to end -->
   <section class="flow" id="flow" aria-label="Signalfluss">
+    <!-- Verbindungsanzeige: ein ruhiger Zustand, KEIN Blitz je Ereignis.
+         Der Zustandspunkt hat Ampelcharakter (fliesst / still / getrennt), der
+         Text nennt den Zustand, die Zahl daneben die Ereignisrate. Beides wird
+         hoechstens einmal je Sekunde neu gesetzt (src/web/app.js, flushLink);
+         ein einzelnes Ereignis erhoeht nur einen Zaehler. Nur der Zustandstext
+         ist ein Live-Bereich (`role="status"`); die Rate daneben wechselt jede
+         Sekunde und wuerde sonst dauernd vorgelesen. -->
     <div class="node" id="node-in">
       <span class="node-eyebrow">Eingang</span>
       <span class="node-title">Laserforce</span>
       <span class="node-sub" id="in-sub">:9000</span>
+      <span class="link" id="link-state">
+        <i class="link-dot" id="link-dot" aria-hidden="true"></i>
+        <span class="link-text" id="link-text" role="status">nicht verbunden</span>
+        <span class="link-rate" id="link-rate" aria-hidden="true"></span>
+      </span>
     </div>
-    <div class="wire" id="wire-a"><span class="pulse"></span></div>
+    <div class="wire" id="wire-a"></div>
     <div class="node" id="node-engine">
       <span class="node-eyebrow">Verarbeitung</span>
       <span class="node-title" id="engine-state">Leerlauf</span>
       <span class="node-sub" id="engine-sub">kein Match</span>
     </div>
-    <div class="wire" id="wire-b"><span class="pulse"></span></div>
+    <div class="wire" id="wire-b"></div>
     <div class="node node-out" id="node-out">
       <span class="node-eyebrow">Ausgänge</span>
       <span class="node-title" id="out-count">0 aktiv</span>
