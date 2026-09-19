@@ -1,7 +1,7 @@
 'use strict';
 
 const { EventEmitter } = require('events');
-const { describe, phrase, readable } = require('./eventCatalog');
+const { describe, phrase, readable, streamPhrase } = require('./eventCatalog');
 const { TdfSchema } = require('./tdfSchema');
 const {
   FAMILIES, FAMILY_DEFAULT_PROFILE, resolveModeWithProfile, withProfile,
@@ -30,6 +30,16 @@ const AUX_TYPE4 = {
   '0201': 'miss', '0202': 'miss',
   '0203': 'target_hit', '0204': 'target_destroy',
   '0205': 'player_hit', '0206': 'player_deactivate', '0209': 'warbot_deactivate',
+  // ADDITIVE — codes measured in the hall's own mode 7 ("Standard LZ - 2 Teams"),
+  // see docs/LASERFORCE.md. They used to surface as a generic `lf_event`; they
+  // now get a type, exactly like 0400/0500 did before. No counter, no state:
+  // `_emitAuxEvent` never mutates gameState.
+  '0208': 'player_hit',            // friendly fire (48/48 same team)
+  '0D05': 'player_hit',            // blast, target NOT deactivated — n=1, unverified
+  '0D06': 'player_deactivate',     // blast, target deactivated (75/78)
+  '0402': 'invulnerability', '0408': 'retaliation',
+  '0700': 'generator_critical', '0701': 'irradiated',
+  '0E00': 'promotion',
   '0300': 'missile_lock', '0301': 'missile_miss', '0303': 'missile_destroy',
   '0304': 'missile_miss', '0306': 'missile_hit', '0308': 'missile_hit',
   // SM5 codes that now also feed a live counter (C6) — they used to surface as
@@ -90,6 +100,80 @@ const SM5_COUNTERS = {
   '0901': { actor: ['achievements'] },
   '0902': { actor: ['rewards'] },
 };
+
+// ─── Verdacht „Hinterherlaufen" (chasing) ────────────────────────────────────
+//
+// A SUSPICION, never a finding. Per player we keep the run of consecutive
+// successful tags on the SAME opponent; once it reaches the threshold the pair
+// is listed. Nothing is punished, nothing is written anywhere, the match is not
+// affected in any way.
+//
+// WHAT COUNTS AS TAGGING A PERSON. Decided against four real recordings of
+// mode 7 ("Standard LZ - 2 Teams", 480 s, 30-41 players, 9k-14k lines each);
+// docs/GAMEMODES.md carries the same table with the counts.
+//   `0206` Player Deactivate — 1085-1573 per match: THE normal tag in a
+//                              standard game. Leaving it out would blind the
+//                              detection almost completely.
+//   `0205` Player Hit        — 30-46 per match, same line shape, same verb.
+//                              Rare here, but it is the same act.
+// Everything else is NOT part of the sequence: it neither counts nor breaks a
+// run, because the run is defined over successful OPPONENT tags only.
+//   `0208`          friendly fire    — 48 of 48 occurrences across all four
+//                                      recordings were between players of the
+//                                      SAME team, while `0205`/`0206` were
+//                                      cross-team in 5333 of 5333.
+//                                      Shooting your own side is not hunting an
+//                                      opponent. The same-team guard in
+//                                      `_noteTag()` is the second belt for it.
+//   `0D06` "blastet"         — one actor, SEVERAL targets on the same
+//                                      timestamp: an area effect (78 occurrences,
+//                                      all cross-team, 75 of them deactivating).
+//                                      Two of those on one timestamp are one
+//                                      button press, not two chases.
+//   `0201`/`0202`   misses           — the operator's rule says so explicitly.
+//   `0203`/`0204`   target hit/kill  — a target is not a person.
+//   `0209`          warbot           — has no actor at all.
+//   `0300`-`0308`   missiles         — excluded. A missile needs a lock-on and
+//                                      reaches across the arena, which is the
+//                                      opposite of running after somebody. In
+//                                      the recordings it is moot anyway:
+//                                      `0300` appears once in 9237 lines and
+//                                      `0306` not at all.
+//   actor === target                 — never a chase; guarded separately.
+//
+// Laserball (`1103`/`1104`) is deliberately NOT supported: the operator wants
+// the view for standard games only.
+//
+// Player ids in this mode are `#` plus eight alphanumeric characters
+// (`#aA1bB2cC`), NOT numbers — nothing below parses, compares or sorts them
+// numerically.
+const CHASE_TAG_CODES = new Set(['0205', '0206']);
+
+/** Tags in a row on the same person before the pair is listed. */
+const CHASE_THRESHOLD_DEFAULT = 3;
+
+/**
+ * DISPLAY PROFILES the detection runs for — not mission numbers and not the
+ * family. Since 19.09.2026 the arena's number for "Standard" is measured (`7`)
+ * and entered in `modes/standard.json`, so a standard game runs under profile
+ * `standard` and this list matches it out of the box. A mode whose number is
+ * NOT in `modes/` still runs under profile `sm5` and stays silent — add `sm5`
+ * to this list to cover those as well (docs/GAMEMODES.md).
+ */
+const CHASE_PROFILES_DEFAULT = ['standard'];
+
+/**
+ * Highest threshold the config may ask for. A threshold below 2 is nonsense
+ * (every single tag would be a "run"), so 0 and 1 both mean: switched off.
+ */
+const CHASE_THRESHOLD_MAX = 50;
+
+/**
+ * Hard ceiling on the per-player bookkeeping. One entry per ACTOR, so a real
+ * match never comes close; it exists so a hostile feed inventing actor ids
+ * cannot grow the map. Each entry is three numbers — no hit history is kept.
+ */
+const CHASE_MAX_ENTRIES = 128;
 
 /**
  * Positional fallback for the type-7 SM5 end block, used only when the stream
@@ -254,6 +338,8 @@ const TYPE_TO_CATEGORY = {
   team_resupply: 'player', penalty: 'player', sm5_stats: 'player',
   rapid_fire: 'special', nuke_activate: 'special', nuke_detonate: 'special',
   beacon_claim: 'special',
+  invulnerability: 'special', retaliation: 'special', generator_critical: 'special',
+  irradiated: 'combat', promotion: 'other',
   achievement: 'other', reward: 'other',
   block: 'combat',
   miss: 'combat', player_hit: 'combat', player_deactivate: 'combat',
@@ -382,13 +468,18 @@ function titleCaseType(s) {
  * structured fields and a plain-text `text` convenience string.
  */
 class Engine extends EventEmitter {
-  constructor({ logger, defaultDurationMs = 720000, emitUnknownEvents = true, matchEnd = null } = {}) {
+  constructor({ logger, defaultDurationMs = 720000, emitUnknownEvents = true, matchEnd = null, chase = null } = {}) {
     super();
     this.log = logger;
     this.defaultDurationMs = defaultDurationMs;
     /** Thresholds in ms; see MATCH_END_DEFAULTS. 0 switches that path off. */
     this.matchEnd = { ...MATCH_END_DEFAULTS };
     this.setMatchEndConfig(matchEnd);
+    /** „Hinterherlaufen": threshold + the display profiles it runs for. */
+    this.chase = {
+      threshold: CHASE_THRESHOLD_DEFAULT,
+      profiles: new Set(CHASE_PROFILES_DEFAULT),
+    };
     // Additive only: when true, every type-4 code the core parser does not act on
     // still surfaces as a generic `lf_event`. Never changes an existing branch.
     this.emitUnknownEvents = emitUnknownEvents !== false;
@@ -396,6 +487,8 @@ class Engine extends EventEmitter {
     /** Column names learned from the `;` schema-comment lines of the stream. */
     this.tdfSchema = new TdfSchema();
     this.reset();
+    // After reset(), because it publishes the values into gameState.
+    this.setChaseConfig(chase);
   }
 
   reset() {
@@ -428,8 +521,15 @@ class Engine extends EventEmitter {
       // but they are the value the recordings will have to be evaluated against.
       exitCodes: {},          // entityId -> raw exit token ('01', '02', '17', …)
       exitCodesSeen: [],      // the distinct codes of this match, sorted
+      // ---- additive: Verdacht „Hinterherlaufen" ------------------------
+      // A SUSPICION list, never a finding — see CHASE_TAG_CODES above.
+      chasing: [],            // [{playerId,playerName,teamId,targetId,targetName,targetTeamId,streak,lastAt}]
+      chaseThreshold: this.chase ? this.chase.threshold : CHASE_THRESHOLD_DEFAULT,
+      chaseProfiles: this.chase ? [...this.chase.profiles] : CHASE_PROFILES_DEFAULT.slice(),
+      chaseWatched: false,    // does the CURRENT display profile get watched at all?
     };
     this._resetEndDetection();
+    this._resetChase();
     this.livePassesStream = [];
     this.playerStatusMap = {};
     this._eventSeq = 0;
@@ -707,6 +807,7 @@ class Engine extends EventEmitter {
       /* derived fields are best effort */
     }
     this._syncAccuracy();
+    this._syncChase();
   }
 
   /**
@@ -745,6 +846,203 @@ class Engine extends EventEmitter {
         p.accuracyIsEstimate = !official;
         p.accuracySource = official ? 'tdf7' : 'live';
       }
+    } catch (_err) {
+      /* derived fields are best effort */
+    }
+  }
+
+  // ─── Verdacht „Hinterherlaufen" ───────────────────────────────────────────
+  //
+  // Memory: ONE entry per acting player, holding the last target, a counter and
+  // a timestamp. No hit history is kept — that is the whole point, the base
+  // load of this service was measured and must not move.
+  //
+  // Cost: the hot path is `_noteTag()`, which for a non-tag code is a single
+  // Set lookup and returns. For a tag it is two map lookups and three integer
+  // writes. It can never throw, and it never touches anything the parser owns.
+
+  /**
+   * Per-match bookkeeping. Never touches gameState.
+   *
+   * One fixed-size entry per acting player — no hit history, whatever happens:
+   *   targetId/streak/lastAt      the run going on RIGHT NOW
+   *   best/bestTargetId/flaggedAt the LONGEST run of this match, its target and
+   *                               when a listed run last advanced
+   *   runs                        how often a run reached the threshold
+   *
+   * Why `best` exists at all, and it is not a nicety: a run ends the moment the
+   * player tags somebody else, so a purely momentary list is almost always
+   * empty. Measured against the four real recordings, 32-63 % of all players
+   * reached the threshold at some point in a match, while at any single instant
+   * at most five were on a run — and at the final whistle usually none. A list
+   * that only knew the current run would show the operator almost nothing and
+   * would write an almost empty day log. So the published list is CUMULATIVE
+   * for the match: once a player is in it, he stays in it until the next
+   * mission start, and `open` says whether the run is still going.
+   */
+  _resetChase() {
+    this._chase = new Map();
+    this._chaseDirty = true;   // the published list has to be rebuilt
+  }
+
+  /**
+   * Apply threshold and watched profiles. `null`/unknown values keep the
+   * current ones, so a partial patch cannot silently switch the feature off.
+   * @returns {{threshold:number,profiles:string[]}} what is in force now
+   */
+  setChaseConfig(cfg) {
+    try {
+      const c = cfg && typeof cfg === 'object' ? cfg : {};
+      const n = Number(c.threshold);
+      if (Number.isFinite(n) && n >= 0) {
+        this.chase.threshold = Math.min(CHASE_THRESHOLD_MAX, Math.round(n));
+      }
+      if (Array.isArray(c.profiles)) {
+        const list = c.profiles
+          .map((p) => String(p == null ? '' : p).trim().toLowerCase())
+          .filter(Boolean).slice(0, 16);
+        this.chase.profiles = new Set(list);
+      }
+      const gs = this.gameState;
+      if (gs) {
+        gs.chaseThreshold = this.chase.threshold;
+        gs.chaseProfiles = [...this.chase.profiles];
+        this._chaseDirty = true;
+        this._syncChase();
+      }
+    } catch (_err) {
+      /* configuration must never break a running match */
+    }
+    return { threshold: this.chase.threshold, profiles: [...this.chase.profiles] };
+  }
+
+  /**
+   * Does the detection run for the mode on screen right now? Gated on the
+   * DISPLAY PROFILE, never on the mission number and never on the family — the
+   * arena's number for "Standard" is still unknown, and the profile is the one
+   * knob that will point at the right games once it is entered.
+   */
+  _chaseWatched() {
+    if (!(this.chase.threshold >= 2)) return false;
+    const mode = this.gameState.mode;
+    if (!mode) return false;
+    // Laserball is not supported and must stay unsupported even if somebody
+    // puts `laserball` into the profile list: the 11xx code set is a different
+    // game (a block is not a chase, and taking the ball off the carrier says
+    // more about who carries the ball than about who follows whom).
+    if (mode.family === FAMILIES.LASERBALL) return false;
+    const prof = typeof mode.profile === 'string' ? mode.profile : '';
+    return !!prof && this.chase.profiles.has(prof);
+  }
+
+  /**
+   * One type-4 event, already parsed. Raises or breaks the run of the acting
+   * player. Returns true when the PUBLISHED list may have changed, so the
+   * caller can push a state update — a run below the threshold changes nothing
+   * anybody can see and costs no push.
+   */
+  _noteTag(code, actorId, targetId) {
+    try {
+      if (!CHASE_TAG_CODES.has(code)) return false;
+      const gs = this.gameState;
+      if (!gs.missionActive) return false;
+      if (!this._chaseWatched()) return false;
+      if (!actorId || !targetId || actorId === targetId) return false;
+      const players = gs.players;
+      const a = Object.prototype.hasOwnProperty.call(players, actorId) ? players[actorId] : null;
+      const t = Object.prototype.hasOwnProperty.call(players, targetId) ? players[targetId] : null;
+      if (!a || !t) return false;
+      // Friendly fire is not hunting an opponent — it is not part of the run.
+      if (String(a.teamId) === String(t.teamId)) return false;
+
+      let e = this._chase.get(actorId);
+      if (!e) {
+        if (this._chase.size >= CHASE_MAX_ENTRIES) return false;
+        e = { targetId: null, streak: 0, lastAt: 0, best: 0, bestTargetId: null, flaggedAt: 0, runs: 0 };
+        this._chase.set(actorId, e);
+      }
+      const th = this.chase.threshold;
+      const wasOpen = e.streak >= th;
+      if (e.targetId === targetId) e.streak += 1;
+      else { e.targetId = targetId; e.streak = 1; }   // somebody else -> start over
+      e.lastAt = Date.now();
+      const isOpen = e.streak >= th;
+      if (!isOpen) {
+        // The run just broke. The player STAYS in the list (it is cumulative),
+        // only his `open` flag changes — and that has to be republished.
+        if (!wasOpen) return false;
+        this._chaseDirty = true;
+        return true;
+      }
+      // A run that has just reached the threshold is a new listed run.
+      if (e.streak === th) e.runs += 1;
+      e.flaggedAt = e.lastAt;
+      if (e.streak > e.best) { e.best = e.streak; e.bestTargetId = e.targetId; }
+      this._chaseDirty = true;
+      return true;
+    } catch (_err) {
+      return false;   // a suspicion must never disturb the parser
+    }
+  }
+
+  /**
+   * Build the published list from the counters. Only called when dirty.
+   *
+   * CUMULATIVE for the match: every player who reached the threshold at least
+   * once is in it. `streak` is his LONGEST run and `targetId` the target of
+   * that run; `runs` says how often a run reached the threshold at all, and
+   * `open` whether one is going on at this very moment.
+   */
+  _chaseList() {
+    const out = [];
+    const th = this.chase.threshold;
+    if (!(th >= 2)) return out;
+    const players = this.gameState.players;
+    for (const [pid, e] of this._chase) {
+      if (!e || e.best < th || !e.bestTargetId) continue;
+      const p = players[pid];
+      const t = players[e.bestTargetId];
+      if (!p || !t) continue;   // logged out / match restarted
+      out.push({
+        playerId: pid,
+        playerName: p.name,
+        teamId: p.teamId == null ? null : String(p.teamId),
+        targetId: e.bestTargetId,
+        targetName: t.name,
+        targetTeamId: t.teamId == null ? null : String(t.teamId),
+        /** the LONGEST run of this match on that target */
+        streak: e.best,
+        /** how often a run of this player reached the threshold */
+        runs: e.runs,
+        /** when a listed run of his last advanced */
+        lastAt: e.flaggedAt,
+        /** true while a run is still going right now */
+        open: e.streak >= th,
+      });
+    }
+    // Longest run first, then the most recent one — the order the operator
+    // would look at them in.
+    out.sort((x, y) => (y.streak - x.streak)
+      || (y.lastAt - x.lastAt)
+      || String(x.playerName).localeCompare(String(y.playerName)));
+    return out;
+  }
+
+  /** Keep `chasing` / `chaseWatched` in the snapshot in sync. Best effort. */
+  _syncChase() {
+    try {
+      const gs = this.gameState;
+      const watched = this._chaseWatched();
+      if (gs.chaseWatched !== watched) {
+        gs.chaseWatched = watched;
+        // Not watching this mode any more: drop the counters as well, so a mode
+        // change cannot leave a stale suspicion standing.
+        if (!watched) this._chase.clear();
+        this._chaseDirty = true;
+      }
+      if (!this._chaseDirty) return;
+      this._chaseDirty = false;
+      gs.chasing = this._chaseList();
     } catch (_err) {
       /* derived fields are best effort */
     }
@@ -830,7 +1128,7 @@ class Engine extends EventEmitter {
    * Never mutates gameState, never calls _touch(), never runs for a code in
    * HANDLED_TYPE4 — so it cannot affect any existing case. Must never throw.
    */
-  _emitAuxEvent(code, actorId, targetId) {
+  _emitAuxEvent(code, actorId, targetId, tail, tailExact) {
     try {
       if (!code || HANDLED_TYPE4.has(code)) return;
       const mapped = AUX_TYPE4[code];
@@ -843,6 +1141,27 @@ class Engine extends EventEmitter {
       if (a) { evt.actorName = a.name; evt.actorTeamId = a.teamId; }
       if (targetId) evt.targetId = targetId;
       if (t) { evt.targetName = t.name; evt.targetTeamId = t.teamId; }
+      // ── ADDITIVE. The arena ships the MEANING of its own codes as German
+      //    plain text in the same line ("… blastet …", "… aktiviert Vergeltung").
+      //    Every hall may define its own game modes, so the catalog can never be
+      //    complete — this turns an unlabelled code into a readable sentence
+      //    without guessing anything, because the words are the arena's own.
+      //    `phrase()` uses it ONLY where no catalog case knows the code, so it
+      //    can never override a documented wording.
+      if (Array.isArray(tail) && tail.length) {
+        const st = streamPhrase(tail, (id) => {
+          const p = this.gameState.players[safeKey(id)];
+          return p ? p.name : null;
+        });
+        if (st) evt.streamText = st;
+        // 0E00 carries the new rank as its own field between the two text parts.
+        if (code === '0E00' && tailExact) {
+          const rank = tail.find((v, i) => i > 0 && typeof v === 'string'
+            && v.trim() && v.trim()[0] !== '#' && v.trim()[0] !== '@'
+            && !/\s/.test(v));
+          if (rank) evt.rank = rank.trim().slice(0, 40);
+        }
+      }
       evt.text = phrase(evt);
       this._pushEvent(evt);
     } catch (_err) {
@@ -1320,6 +1639,9 @@ class Engine extends EventEmitter {
       gameState.endSource = null;
       gameState.exitCodes = {};
       gameState.exitCodesSeen = [];
+      // A suspicion belongs to ONE match and to nothing else.
+      gameState.chasing = [];
+      this._resetChase();
       this._resetEndDetection();
       this._startEndWatch();
 
@@ -1365,32 +1687,62 @@ class Engine extends EventEmitter {
     }
 
     if (type === '3') {
-      const typeIdx = cols.indexOf('player');
+      // ── ADDITIVE (docs/LASERFORCE.md, "Typ-3 im Detail"). The entity kind has
+      //    its OWN column in the schema:
+      //      ;3/entity-start  time  id  type  desc  team  level  category  …
+      //    Reading it there is exact. The old `cols.indexOf('player')` searched
+      //    the whole row for the WORD `player` and therefore also matched a
+      //    NON-player entity that happens to be NAMED "player" (the arena lets
+      //    an operator name targets freely) — it would then read the id one
+      //    token to the left of the name and create a bogus player. It also
+      //    depended on the whitespace split.
+      //    The schema path is taken only when the row can be lined up with the
+      //    schema (`_alignRow` returns the TAB columns, or folds the one field
+      //    that may contain spaces back together and insists on the exact
+      //    column count). Without a usable schema NOTHING changes: the old
+      //    `indexOf` runs on the old `cols`, byte for byte.
+      const aligned3 = this._alignRow('3', cols, tabCols);
+      const kindIdx = this.tdfSchema.indexOf('3', 'type');
+      let row = cols;
+      let typeIdx;
+      if (Array.isArray(aligned3) && kindIdx > 0 && kindIdx < aligned3.length) {
+        row = aligned3;
+        typeIdx = String(aligned3[kindIdx]).trim().toLowerCase() === 'player' ? kindIdx : -1;
+      } else {
+        typeIdx = cols.indexOf('player');
+      }
 
       if (typeIdx !== -1) {
         // The entity id becomes an object key in gameState.players. Same guard
         // the exit-code map already used (safeKey): a feed that calls an entity
         // `__proto__` would otherwise not add a player at all but replace the
         // PROTOTYPE of the whole player map.
-        const id = safeKey(cleanId(cols[typeIdx - 1]));
+        // `row` is the schema-aligned row when there was one, and the plain
+        // whitespace split otherwise — the index arithmetic below is unchanged.
+        const id = safeKey(cleanId(row[typeIdx - 1]));
         if (!id) return;
 
         // Find the signature Team/Level/Category cluster: three numbers in a row.
         let teamIdIdx = typeIdx + 1;
-        while (teamIdIdx < cols.length - 2) {
-          if (!isNaN(cols[teamIdIdx]) && !isNaN(cols[teamIdIdx + 1]) && !isNaN(cols[teamIdIdx + 2])) {
+        while (teamIdIdx < row.length - 2) {
+          if (!isNaN(row[teamIdIdx]) && !isNaN(row[teamIdIdx + 1]) && !isNaN(row[teamIdIdx + 2])) {
             break;
           }
           teamIdIdx++;
         }
 
-        const teamId = cols[teamIdIdx];
-        const lfName = cols.slice(typeIdx + 1, teamIdIdx).join(' ');
+        const teamId = row[teamIdIdx];
+        const lfName = row.slice(typeIdx + 1, teamIdIdx).join(' ');
 
         const dbInfo = dbPlayersMap[id];
         const finalName = cleanName(dbInfo ? dbInfo.nick : lfName);
         const finalAvatar = dbInfo ? dbInfo.avatar : null;
 
+        // NB: this `5` is NOT what keeps non-players out — measured at the real
+        // arena, Neutral is team index `2` there and the filter never fires
+        // (docs/LASERFORCE.md, "Neutral ist an dieser Anlage Team-Index 2").
+        // What carries the decision is the `type` column above. The filter
+        // stays because it costs nothing and covers an arena that does use 5.
         if (teamId !== '5') {
           this.log?.debug('engine', `Player logged in: ${finalName} (Team ${teamId})`);
           gameState.players[id] = {
@@ -1405,15 +1757,15 @@ class Engine extends EventEmitter {
           // Laserball counters above are always present and never renamed.
           try {
             const p = gameState.players[id];
-            const lvl = toInt(cols[teamIdIdx + 1]);
-            const cat = toInt(cols[teamIdIdx + 2]);
+            const lvl = toInt(row[teamIdIdx + 1]);
+            const cat = toInt(row[teamIdIdx + 2]);
             p.level = lvl == null ? null : lvl;
             p.category = cat == null ? null : cat;
             p.roleLabel = roleLabel(cat);
-            const aligned = this._alignRow('3', cols, tabCols);
-            const suit = this.tdfSchema.get('3', 'battlesuit', cols, undefined, aligned);
+            // The same aligned row the entity kind was read from, above.
+            const suit = this.tdfSchema.get('3', 'battlesuit', cols, undefined, aligned3);
             p.battlesuit = typeof suit === 'string' && suit.trim() ? suit.trim().slice(0, 32) : null;
-            const mem = this.tdfSchema.get('3', 'memberId', cols, undefined, aligned);
+            const mem = this.tdfSchema.get('3', 'memberId', cols, undefined, aligned3);
             p.memberId = typeof mem === 'string' && mem.trim() ? mem.trim().slice(0, 32) : null;
             p.score = 0;
             p.statsSource = 'live';
@@ -1454,7 +1806,13 @@ class Engine extends EventEmitter {
       //    Runs before the "no known actor" early-return so actor-less control
       //    codes are still visible. HANDLED_TYPE4 gates out every code an
       //    existing branch owns, so this cannot change an existing case.
-      this._emitAuxEvent(code, actorId, targetId);
+      //    ADDITIVE: the line's own tail (`;4/event  time  type  varies`) goes
+      //    along so an unknown code can be labelled with the arena's own words.
+      //    A TAB-split tail is exact; the whitespace fallback is good enough for
+      //    a sentence but not for reading a single field out of it.
+      const tailExact = Array.isArray(tabCols) && tabCols.length > 3;
+      this._emitAuxEvent(code, actorId, targetId,
+        tailExact ? tabCols.slice(3) : cols.slice(3), tailExact);
 
       // ── ADDITIVE (contract B + C6). Runs BEFORE the "no known actor" early
       //    return below, because SM5 has actor-less events (0209 warbot) — and
@@ -1464,6 +1822,12 @@ class Engine extends EventEmitter {
       if (gameState.mode && gameState.mode.family === FAMILIES.SM5) {
         if (this._applySm5Counters(code, actorId, targetId)) this._touch();
       }
+
+      // ── ADDITIVE. Verdacht „Hinterherlaufen" (docs/GAMEMODES.md). Runs
+      //    before the "no known actor" early return like the block above, is
+      //    gated on the DISPLAY PROFILE inside `_noteTag`, cannot throw and
+      //    only asks for a state push when the published list can have changed.
+      if (this._noteTag(code, actorId, targetId)) this._touch();
 
       let updateNeeded = false;
       if (!actorId || !gameState.players[actorId]) return;
@@ -1561,4 +1925,7 @@ class Engine extends EventEmitter {
   }
 }
 
-module.exports = { Engine, matchEndMs, MATCH_END_DEFAULTS, END_REASONS, END_SOURCES };
+module.exports = {
+  Engine, matchEndMs, MATCH_END_DEFAULTS, END_REASONS, END_SOURCES,
+  CHASE_TAG_CODES, CHASE_THRESHOLD_DEFAULT, CHASE_THRESHOLD_MAX, CHASE_PROFILES_DEFAULT,
+};

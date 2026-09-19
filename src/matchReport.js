@@ -124,6 +124,46 @@ const DEFAULT_PLAYER_FIELDS = {
 /** Player fields that are always there — the report is unusable without them. */
 const PLAYER_CORE = ['playerId', 'entityId', 'idKind', 'memberId', 'teamId', 'team', 'result'];
 
+/**
+ * ADDITIVE — split the arena's reported member id into the three numbers the
+ * Mongo `Member` schema of the receiving side uses (`countryCode`, `centerCode`,
+ * `memberCode`, all numeric there).
+ *
+ * MEASURED, not guessed. Four real recordings of the hall's own arena
+ * (19.09.2026, mode 7) carry a `memberId` column on every type-3 player line,
+ * always of the form `<zahl>-<zahl>-<zahl>`: 141 of 141 players, no exception,
+ * and no non-player entity had one (their column is empty). The type-0 header
+ * names the centre as `21-101`, and the first two parts matched it for 135 of
+ * those 141 players.
+ *
+ * THE SIX THAT DID NOT MATCH ARE THE POINT: two recordings contained three
+ * players each whose id began `21-103` while the arena's own centre was
+ * `21-101` — guests from another centre. `countryCode`/`centerCode` therefore
+ * belong to the PLAYER and must be read out of the player's own id; deriving
+ * them from the type-0 header would silently mis-file every visitor.
+ *
+ * Anything that does not match the three-number shape returns null, and the
+ * caller then simply omits the field — the raw string always stays in the
+ * report next to it and is never replaced by this.
+ *
+ * @param {string} raw e.g. '21-101-10001'
+ * @returns {{countryCode:number, centerCode:number, memberCode:number}|null}
+ */
+function splitMemberId(raw) {
+  try {
+    if (typeof raw !== 'string') return null;
+    const m = raw.trim().match(/^(\d{1,6})-(\d{1,6})-(\d{1,12})$/);
+    if (!m) return null;
+    const country = Number(m[1]);
+    const center = Number(m[2]);
+    const member = Number(m[3]);
+    if (!Number.isSafeInteger(country) || !Number.isSafeInteger(center) || !Number.isSafeInteger(member)) return null;
+    return { countryCode: country, centerCode: center, memberCode: member };
+  } catch (_err) {
+    return null;
+  }
+}
+
 // ---------------------------------------------------------------------------
 // small helpers
 // ---------------------------------------------------------------------------
@@ -488,6 +528,12 @@ function buildMatchReport(state, opts) {
     // which only late TDF 2.006 arenas send. Absent -> the key is left out.
     if (typeof p.memberId === 'string' && p.memberId.trim()) {
       block.memberIdReported = cleanText(p.memberId, 32);
+      // ADDITIVE, never instead of the raw string above: the three numbers the
+      // receiving Mongo `Member` schema is keyed by. Omitted when the id does
+      // not have the measured `<land>-<zentrum>-<mitglied>` shape — see
+      // splitMemberId() for what was measured and what the six visitors proved.
+      const parts = splitMemberId(block.memberIdReported);
+      if (parts) block.memberIdParts = parts;
     }
     if (includeNames) block.name = cleanText(String(p.name || ''), 64) || null;
 
@@ -881,6 +927,7 @@ module.exports = {
   ReportQueue,
   EntityIds,
   buildMatchReport,
+  splitMemberId,
   readReportConfig,
   optionalMqttSink,
   REPORT_SCHEMA,

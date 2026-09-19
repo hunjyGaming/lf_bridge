@@ -230,10 +230,25 @@ Stand heute:
 |---|---|---|---|---|---|---|
 | `5` | `sm5` | Space Marines 5 | `sm5` | `sm5` | `modes/sm5.json` | verified |
 | `28` | `laserball_ranked` | Laserball Ranked | `laserball` | `laserball` | `modes/laserball-ranked.json` | verified |
-| *(keine)* | `standard` | Standard | `sm5` | `standard` | `modes/standard.json` | **Nummer offen** |
+| `7` | `standard` | Standard | `sm5` | `standard` | `modes/standard.json` | **gemessen** (eigene Anlage, 19.09.2026) |
 
-Das ist die **gesamte** öffentlich belegte Modus-Nummerierung. Alles andere —
-„Standard", 7SM/Nexus, Junior, Zombies, VIP, Attack & Defend, Zone Control,
+`5` und `28` sind die **gesamte** öffentlich belegte Modus-Nummerierung. Die `7`
+steht hier aus einer anderen Quelle: **vier vollständige Roh-Mitschnitte der
+eigenen Anlage** vom 19.09.2026, die alle die Missionszeile
+`1 ⇥ 7 ⇥ | Standard LZ - 2 Teams |` tragen. Sie gilt damit für **diese** Halle und
+ist kein allgemeiner Standard — eine andere Anlage kann unter `7` etwas völlig
+anderes fahren.
+
+> **Warum der Registry-Name „Standard" heißt und nicht „| Standard LZ - 2 Teams |".**
+> Die Anlage schickt ihren eigenen Namen in der Typ-1-Zeile mit, und der
+> **gewinnt zur Laufzeit immer** (`label` kommt aus dem Stream, siehe
+> [Das `mode`-Objekt](#das-mode-objekt)). Im Betrieb steht also ohnehin
+> „| Standard LZ - 2 Teams |" auf dem Bildschirm. Der Registry-Name ist nur der
+> Rückfall für den Fall, dass die Anlage nichts mitschickt — und dafür ist der
+> Zierrahmen aus senkrechten Strichen Ballast. `schluessel` bleibt `standard`
+> und damit stabil für CSV-Dateien und API.
+
+Alles andere — 7SM/Nexus, Junior, Zombies, VIP, Attack & Defend, Zone Control,
 sämtliche Laserball-Varianten — hat Nummern, die nirgends dokumentiert sind. Sie
 zu ermitteln ist Sache des Hallenbetreibers, siehe
 [unten](#eigene-modus-nummern-ermitteln-und-eintragen).
@@ -259,7 +274,7 @@ Im Ordner **`modes/`** direkt im Programmverzeichnis von lf_live:
 lf_bridge/
 ├── modes/
 │   ├── _vorlage.json            ← Vorlage zum Kopieren. Wird NIE geladen.
-│   ├── standard.json            ← "Standard" — Nummer noch einzutragen
+│   ├── standard.json            ← "Standard", Nummer 7 (gemessen)
 │   ├── sm5.json                 ← Space Marines 5, Nummer 5
 │   ├── laserball-ranked.json    ← Laserball Ranked, Nummer 28
 │   └── profile/
@@ -530,41 +545,76 @@ damit Teil des Projektstands und geht bei einem Update nicht verloren.
 
 ## „Standard" eintragen — die eine Zahl
 
-Der Modus **„Standard"** hat ein fertiges Anzeigeprofil (`standard`), aber
-**seine Modus-Nummer ist unbekannt.** Sie wird an der Anlage gemessen; hier wird
-sie **nicht geraten**, weil ein falscher Eintrag schlechter ist als gar keiner
-(ein unbekannter Modus läuft ohnehin sauber als Familie `sm5`).
+**Erledigt: die Zahl ist `7`.** Vier vollständige Roh-Mitschnitte der eigenen
+Anlage vom 19.09.2026 tragen alle dieselbe Missionszeile:
 
-**Die Stelle:** [`modes/standard.json`](../modes/standard.json). Die Datei ist
-fertig — nur die Nummernliste ist leer:
-
-```json
-{
-  "beschreibung": "Standard — das normale Spiel Ihrer Anlage. Das Anzeigeprofil steht bereit, die Missionsnummer ist NICHT bekannt und wird hier bewusst NICHT geraten.",
-  "schluessel": "standard",
-  "anzeigename": "Standard",
-  "missionsnummern": [],
-  "familie": "sm5",
-  "profil": "standard",
-  "hinweis": "HIER DIE GEMESSENE NUMMER EINTRAGEN. …"
-}
+```
+1 ⇥ 7 ⇥ | Standard LZ - 2 Teams | ⇥ 20260919104649 ⇥ 480000 ⇥ -1000
 ```
 
-Sobald die Nummer per [`scripts/inspect.js`](../scripts/inspect.js) gemessen ist
-([Anleitung unten](#eigene-modus-nummern-ermitteln-und-eintragen)), wird aus der
-leeren Liste eine mit genau einer Zahl — angenommen, gemessen wurde `9`:
+[`modes/standard.json`](../modes/standard.json) steht deshalb jetzt so da:
 
 ```json
-  "missionsnummern": [9],
+  "missionsnummern": [7],
 ```
 
-Mehr ist nicht zu tun; Familie und Profil stehen schon richtig drin. Danach in
-der Konsole Einstellungen speichern (oder lf_live neu starten). Ab dann meldet
-sich der Modus als `known: true`, `key: "standard"`, `profile: "standard"` und
-zeigt den schlanken Spaltensatz.
+Damit meldet sich ein Standardspiel als `known: true`, `key: "standard"`,
+`family: "sm5"`, `profile: "standard"` und zeigt den schlanken Spaltensatz —
+nachgeprüft, indem alle vier Mitschnitte durch die Engine gespielt wurden.
 
-Solange die Liste **leer** bleibt, ist die Datei wirkungslos und ein
+**Das gilt für DIESE Halle.** Die Nummer ist keine Laserforce-Konstante; eine
+andere Anlage kann unter `7` etwas anderes fahren. Wer lf_live woanders
+aufsetzt, misst neu.
+
+**Weitere Standard-Varianten** brauchen keine eigene Datei — ihre gemessene
+Nummer kommt einfach zusätzlich in die Liste:
+
+```json
+  "missionsnummern": [7, 9],
+```
+
+Gemessen wird mit [`scripts/inspect.js`](../scripts/inspect.js)
+([Anleitung unten](#eigene-modus-nummern-ermitteln-und-eintragen)). Danach in
+der Konsole Einstellungen speichern (oder lf_live neu starten). Eine **leere**
+Liste ist übrigens kein Fehler: die Datei ist dann nur wirkungslos und ein
 Standardspiel läuft als unbekannter `sm5`-Modus — völlig in Ordnung.
+
+### Warum im Standardmodus Leben, Munition und Trefferquote leer bleiben
+
+**Das ist kein Fehler.** Die amtlichen Endzahlen einer Laserforce-Anlage kommen
+in einem eigenen Zeilentyp am Matchende, **Typ 7**. In vier vollständigen
+Mitschnitten echter Standardspiele — zusammen 42 870 Zeilen, 141 Spieler, jedes
+Spiel regulär beendet — steht **keine einzige Typ-7-Zeile**. Im Standardmodus
+schickt die Anlage diesen Block schlicht nicht.
+
+Dauerhaft leer bleiben deshalb:
+
+| Spalte | warum |
+|---|---|
+| **Leben übrig** (`livesLeft`) | gibt es nur im Typ-7-Block |
+| **Munition übrig** (`shotsLeft`) | gibt es nur im Typ-7-Block |
+| **amtliche Trefferquote** | die Anlage rechnet sie nur im Typ-7-Block |
+
+Was **stattdessen** angezeigt und in die CSV geschrieben wird, sind die
+**Live-Zähler**, die lf_live selbst aus dem Ereignisstrom zählt. Sie sind
+gekennzeichnet: `statsSource: "live"`, bei der Quote zusätzlich
+`accuracySource: "live"` und `accuracyIsEstimate: true`. Eine Korrektur am
+Matchende findet nicht statt — es gibt nichts, womit korrigiert werden könnte.
+
+Und weil Laserforce keinen eigenen Schuss-Event meldet, bleibt die Zahl der
+abgegebenen Schüsse eine **Untergrenze** (gezählt werden nur Schüsse, die als
+Treffer oder Fehlschuss sichtbar werden). Die Live-Quote fällt dadurch
+systematisch **zu hoch** aus — in SM5 räumt der Typ-7-Block das am Ende auf, im
+Standardmodus nicht. Ausführlich:
+[Die Trefferquote](#die-trefferquote--und-warum-sie-live-zu-hoch-ist).
+
+**Wer diese Spalten nicht sehen will**, nimmt sie aus dem Anzeigeprofil
+`modes/profile/standard.json` heraus — das Profil `standard` führt sie ohnehin
+nicht (es zeigt Punkte, Level, Schüsse, Treffer, Quote). Sie tauchen nur auf,
+wenn ein Standardspiel mangels eingetragener Nummer als Profil `sm5` läuft.
+
+Protokollseitig belegt in
+[LASERFORCE.md → Typ-7 im Detail](LASERFORCE.md#typ-7-sm5-endblock-im-detail).
 
 ---
 
@@ -1231,6 +1281,200 @@ starten). Ohne Eintrag funktioniert der Modus trotzdem — er heißt dann nur
 
 ---
 
+## Verdacht „Hinterherlaufen"
+
+In vielen Hallen gilt es als unsportlich, wenn ein Spieler einer bestimmten
+Person durch die Arena folgt und sie immer wieder abschießt („Camping",
+„Spawn-Killing"). lf_live kann das **vermuten** — mehr nicht. Es wird nichts
+bestraft, nichts am Spiel verändert und kein Wert einer Statistik angefasst.
+
+### Die Regel
+
+Betrachtet wird je Spieler die Folge seiner **erfolgreichen Treffer auf Gegner**,
+in zeitlicher Reihenfolge. Gelten die letzten **drei** demselben Ziel, taucht das
+Paar in der Liste auf.
+
+- **Fehlschüsse zählen nicht mit und unterbrechen die Serie nicht.** Sie sind
+  gar kein Teil der Folge.
+- **Ein Treffer auf jemand anderen unterbricht sie** und setzt sie auf 1 zurück.
+- Die Liste ist **kumulativ fürs Match**: wer die Schwelle einmal erreicht hat,
+  bleibt bis zum nächsten Missionsstart darin. Genannt wird seine **längste**
+  Serie, das Ziel dieser Serie, und wie oft überhaupt eine Serie zustande kam.
+- Beim **Missionsstart** wird alles zurückgesetzt.
+
+Warum kumulativ und nicht nur die gerade laufende Serie: eine Serie endet in dem
+Moment, in dem der Spieler jemand anderen trifft. An den vier echten
+Mitschnitten gemessen waren **nie mehr als fünf Spieler gleichzeitig** auf einer
+Serie und am Schlusspfiff meist gar keiner — eine rein momentane Liste wäre
+fast immer leer gewesen und hätte auch ein fast leeres Tagesprotokoll ergeben.
+
+### Was als „Taggen einer Person" zählt
+
+Entschieden an vier echten Mitschnitten von Modus 7 („Standard LZ - 2 Teams",
+je 480 s, 30–41 Spieler, 9 000–14 000 Zeilen).
+
+| Code | Häufigkeit je Match | zählt? | warum |
+|---|---|---|---|
+| `0206` Player Deactivate | 1085–1573 | **ja** | Der Normalfall im Standardmodus. Ohne ihn sähe die Erkennung praktisch nichts. |
+| `0205` Player Hit | 30–46 | **ja** | Seltener, aber dieselbe Zeilenform, dasselbe Verb, derselbe Vorgang. |
+| `0208` Eigenbeschuss | 5–20 | **nein** | Belegt: **6 von 6** Vorkommen zwischen Spielern **desselben Teams**, während `0205`/`0206` in **1120 von 1120** Fällen gegnerische Teams betrafen. Auf die eigene Mannschaft zu schießen ist kein Nachstellen. |
+| `0D06` „blastet" | ~14 | **nein** | Ein Actor, **mehrere Ziele im selben Zeitstempel** — eine Flächenwirkung. Drei davon hintereinander sind ein Knopfdruck, keine drei Verfolgungen. |
+| `0300` / `0306` Raketen | 1 bzw. 0 | **nein** | Eine Rakete braucht ein Aufschalten und wirkt über die ganze Arena — das Gegenteil von Hinterherlaufen. Im Standardmodus ohnehin gegenstandslos. |
+| `0201` `0202` Fehlschüsse | 4269 | **nein** | Ausdrücklich: sie sind kein Teil der Folge und unterbrechen sie auch nicht. |
+| `0203` `0204` Ziele | 49 / 18 | **nein** | Ein Ziel ist keine Person. |
+| `0209` Warbot | — | **nein** | Hat gar keinen Actor. |
+| Treffer im **eigenen Team** | — | **nein** | Zweiter Riegel neben `0208`: `_noteTag()` vergleicht die Team-Kennung von Actor und Ziel. |
+| Actor **ist** das Ziel | — | **nein** | Nie eine Verfolgung. |
+
+**Laserball wird nicht unterstützt.** Der Betreiber will die Ansicht
+ausdrücklich nur für Standardspiele, deshalb sind `1104` (Block) und `1103`
+(Ballabnahme) gar nicht erst aufgenommen — und die Familie `laserball` ist
+zusätzlich hart ausgeschlossen, selbst wenn jemand `laserball` in die
+Profilliste schreibt. Fachlich passt es auch nicht: eine Ballabnahme richtet
+sich immer gegen den, der gerade den Ball hat, und würde vor allem gute
+Ballträger anschwärzen.
+
+### Gesteuert wird über das **Anzeigeprofil**
+
+Nicht über die Missionsnummer und nicht über die Familie:
+
+```jsonc
+"engine": { "chase": { "threshold": 3, "profiles": ["standard"] } }
+```
+
+Sobald eine Modus-Nummer auf das Profil `standard` zeigt (siehe
+[„Standard" eintragen](#standard-eintragen--die-eine-zahl)), läuft die Erkennung
+dort von selbst — ohne Codeänderung. Das ist der ganze Sinn der Profile.
+
+> **Wenn Ihre Standard-Nummer noch nicht eingetragen ist:** Ein unbekannter
+> Modus fällt auf Familie `sm5` und damit auf Profil `sm5` zurück. Die
+> Erkennung bleibt dann **stumm**, und das ist kein Fehler. Entweder Sie tragen
+> die gemessene Nummer in `modes/standard.json` ein — der bessere Weg — oder
+> Sie nehmen übergangsweise `sm5` mit in die Profilliste auf
+> (`LF_CHASE_PROFILES=standard,sm5`). Dann schlägt die Erkennung allerdings auch
+> in echten SM5-Spielen an.
+
+`threshold` ist die Schwelle; **0 und 1 schalten die Erkennung ab** (eine Serie
+aus einem Treffer wäre keine Serie). Obergrenze 50.
+
+### Ehrlich: was die Zahl 3 an echten Daten bedeutet
+
+Gemessen an den vier Mitschnitten, je Match der Anteil der Spieler, die
+mindestens einmal gelistet wurden:
+
+| Schwelle | Match 1 (30 Sp.) | Match 2 (40 Sp.) | Match 3 (41 Sp.) | Match 4 (30 Sp.) |
+|---|---|---|---|---|
+| **3** (Vorgabe) | 19 (63 %) | 14 (35 %) | 13 (32 %) | 17 (57 %) |
+| 4 | 3 (10 %) | 1 (3 %) | 3 (7 %) | 6 (20 %) |
+| 5 | 1 (3 %) | 0 | 2 (5 %) | 1 (3 %) |
+| 6 | 0 | 0 | 1 (2 %) | 1 (3 %) |
+
+**Bei Schwelle 3 landet also ein Drittel bis fast zwei Drittel aller Spieler
+irgendwann in der Liste.** Ein einzelner Eintrag ist damit Alltag und kein
+Hinweis auf irgendetwas. Wer die Liste als Auffälligkeitsliste lesen will,
+sollte **4 oder 5** einstellen. Die Vorgabe bleibt bei 3, weil der Betreiber
+sie so bestellt hat und weil eine zu empfindliche Einstellung, die man sieht,
+besser ist als eine zu stumpfe, die man für kaputt hält.
+
+### Grenzen der Erkennung — was sie nicht sieht, und wann sie danebenliegt
+
+**Sie sieht nicht:**
+
+- **Verfolgen ohne zu treffen.** Wer jemandem hinterherrennt und nicht trifft,
+  taucht nirgends auf. Fehlschüsse sind für die Regel gar nicht vorhanden.
+- **Entfernung und Position.** Laserforce meldet keine Koordinaten. Drei Treffer
+  quer durch die Halle sehen genauso aus wie drei aus zwei Metern.
+- **Absicht.** Ob jemand jagt, sich verteidigt oder zufällig dreimal
+  hintereinander denselben vor die Nase bekommt, ist aus dem Datenstrom nicht
+  zu entscheiden.
+- **Raketen- und Flächentreffer** (`0306`, `0D06`) — bewusst ausgenommen.
+- **Eigenbeschuss** (`0208`, Treffer im eigenen Team) — bewusst ausgenommen.
+
+**Sie schlägt fälschlich an:**
+
+- **Bei wenigen Spielern.** Mit zwei Spielern gibt es genau einen Gegner, jede
+  Serie ist zwangsläufig auf dieselbe Person, und die Erkennung kann gar nichts
+  anderes sagen. Unter **sechs** Spielern markieren Konsole, API (`lowSignal`)
+  und Tagesdatei den Hinweis deshalb ausdrücklich als wenig aussagekräftig.
+- **Bei einem Duell.** Zwei Spieler, die sich gegenseitig jagen, stehen beide
+  drin. In den Mitschnitten ist das gut zu sehen: in einem Spiel standen gleich
+  zwei solche Paare gegenseitig auf der Liste — das ist ein Zweikampf und kein
+  Nachstellen. (Namen stehen hier bewusst nicht: die Mitschnitte enthalten echte
+  Spielernamen und weltweit eindeutige Mitglieds-IDs und gehören nicht ins
+  Repository.)
+- **Bei guten Spielern.** Wer viel trifft, erzeugt rein rechnerisch mehr Serien.
+- **In engen Arenen und bei Respawn-Punkten**, an denen sich Spieler ohnehin
+  ständig begegnen.
+
+Die Erkennung ist damit ein **Anlass hinzuschauen**, nicht mehr. Die Anzeige,
+die API und die Tagesdatei sind in Wortwahl und Gestaltung entsprechend
+zurückhaltend gehalten: keine Warnfarbe, kein Urteil, kein Begriff, der jemanden
+zum Betrüger erklärt.
+
+### Wo es zu sehen ist
+
+| Ort | Was |
+|---|---|
+| **Web-Konsole, Reiter LIVE** | Eigener Bereich unter den Spielerwerten: Spieler-Kennung, Spieler, „blieb dran an", längste Serie, Serien, zuletzt. Ist niemand auffällig, steht dort „Derzeit niemand auffällig." — eine leere Tabelle ohne Erklärung gibt es nicht. Läuft die Erkennung im aktuellen Modus nicht, sagt sie das ebenfalls. |
+| **`GET /api/chase`** | Nur der Verdacht, für eine externe Anzeige. |
+| **`GET /api/display` → `chase`** | Derselbe Datensatz im Anzeige-Datensatz. |
+| **`GET /api/state` / `/ws?feed=state`** | `chasing`, `chaseThreshold`, `chaseProfiles`, `chaseWatched`. |
+| **`data/chase/verfolger-JJJJ-MM-TT.md`** | Tagesprotokoll, nur angehängt — siehe unten. |
+
+### Das Tagesprotokoll
+
+Einmal je **Matchende** — nie im Ereignispfad — schreibt lf_live den Befund in
+eine Markdown-Datei. Eine Datei **je Tag**, über alle Matches hinweg angehängt,
+damit der Betreiber abends den Tagesüberblick hat:
+
+| Datei | Verhalten |
+|---|---|
+| `data/chase/verfolger-JJJJ-MM-TT.md` | **Nur angehängt, nie neu geschrieben.** Ein Absturz oder Neustart mitten am Tag verliert nichts. |
+| `data/chase/verfolger-JJJJ-MM-TT-uebersicht.md` | Tagesübersicht, nach jedem Match **neu geschrieben**. |
+
+Je Match ein Abschnitt mit Uhrzeit, Spielmodus, Match-Kennung, Spielerzahl,
+Dauer und Schwelle — ohne diesen Zusammenhang ist ein Befund später nicht
+einzuordnen, besonders die Spielerzahl. **Matches ohne Befund bekommen ihre
+Zeile ebenfalls** („Niemand war auffällig."), und ein nicht beobachteter
+Spielmodus wieder eine andere: sonst ließe sich hinterher nicht unterscheiden,
+ob niemand auffiel oder ob das Mitschreiben gar nicht lief.
+
+Die **Tagesübersicht** beantwortet die Frage, die die Aneinanderreihung der
+Matches nicht beantwortet: welcher Spieler kam an dem Tag in **mehreren**
+Matches vor und gegen wen. Ein wiederkehrender Name ist ein anderes Signal als
+ein einmaliger Eintrag. Sie enthält **Zahlen und keine Bewertung** — keine
+Punkte, keine Rangfolge nach „Schwere", nur Zählungen.
+
+Dass sie neu geschrieben wird, widerspricht dem „nur anhängen" nicht: sie wird
+**vollständig aus der Tagesdatei abgeleitet**, indem diese zurückgelesen wird —
+nicht aus irgendetwas, das im Speicher steht. Deshalb ist sie auch nach einem
+Neustart mitten am Tag vollständig, und wenn jemand sie löscht, entsteht sie
+beim nächsten Matchende neu. Maßgeblich ist immer die Tagesdatei.
+
+Im **Kopf der Tagesdatei** stehen die Grenzen der Erkennung noch einmal
+ausgeschrieben. Das ist Absicht: die Datei soll sie mitnehmen, wenn der
+Betreiber sie jemandem schickt.
+
+**Vorgabe: an** (`chaseLog.enabled: true`) — anders als beim Roh-Mitschnitt.
+Begründung: die Datei ist der eigentliche Zweck der Funktion, sie wächst um
+wenige Kilobyte am Tag statt um Megabyte, und geschrieben wird einmal je
+Matchende statt laufend. Sie enthält **Spielernamen** und liegt deshalb unter
+`data/` (nicht im Repo). Mitglieds-IDs enthält sie nicht.
+
+Ein Schreibfehler wird einmal gemeldet und danach verschwiegen; der Betrieb
+läuft weiter. Siehe `src/chaseLog.js` und
+[CONFIG.md](CONFIG.md#verdacht-hinterherlaufen).
+
+### Was es kostet
+
+Im heißen Ereignisstrom steht genau ein Aufruf: für einen Code, der kein Tag
+ist, eine Set-Abfrage und ein `return`. Für ein Tag zwei Map-Zugriffe und ein
+paar Ganzzahl-Schreibvorgänge. Je Spieler wird **ein** Eintrag fester Größe
+geführt — letztes Ziel, Zähler, längste Serie, Zeitstempel. **Keine
+Trefferhistorie.** Der Pfad ist vollständig in `try/catch` gekapselt und kann
+nie werfen. Die veröffentlichte Liste wird nur neu gebaut, wenn sich an ihr
+etwas geändert hat.
+
 ## Bekannte Lücken / unbestätigt
 
 Im Stil der übrigen Doku: hier steht ehrlich, was **nicht** belegt ist.
@@ -1247,7 +1491,9 @@ Im Stil der übrigen Doku: hier steht ehrlich, was **nicht** belegt ist.
 | **SM5-Live-Zähler ohne Typ-7-Pendant** | `misses`, `targetHits`, `targetDestroys`, `missileLocks`, `missileMisses`, `missileDestroys`, `rapidFires`, alle Resupply-Zähler, `beaconClaims`, `baseAwards`, `achievements`, `rewards`, `timesHit`, `timesHitByTeam` bleiben Untergrenzen — die Anlage liefert dafür keine offizielle Endzahl. | bekannte Grenze |
 | **`shotsFired` live** | Laserforce meldet keinen Schuss-Event. Die Live-Zahl ist systematisch zu niedrig. | bekannte Grenze |
 | **Trefferquote live** | Weil nur der Nenner unvollständig ist, fällt die Live-Quote systematisch **zu hoch** aus. Sie ist deshalb als Näherung gekennzeichnet (`accuracyIsEstimate`) und wird nach dem Typ-7-Block amtlich. Wie groß der Fehler an einer echten Anlage ist, ist **nicht** gemessen. | bekannte Grenze |
-| **Modus-Nummer „Standard"** | Nicht belegt. Wird an der Anlage gemessen; das Anzeigeprofil `standard` steht bereit, `modes/standard.json` liegt fertig da, die Nummernliste ist bewusst leer. | offen |
+| **Modus-Nummer „Standard"** | **Geschlossen für diese Halle:** `7`, gemessen an vier Roh-Mitschnitten vom 19.09.2026 und in `modes/standard.json` eingetragen. Für jede andere Anlage bleibt sie offen — die Nummer ist keine Laserforce-Konstante. | geschlossen (lokal) |
+| **Kein Typ-7-Block im Standardmodus** | Gemessen: in vier vollständigen Standardspielen kommt der amtliche Endblock nie. Leben, Munition und die amtliche Trefferquote bleiben dort dauerhaft leer; gezeigt werden die Live-Zähler (`statsSource: "live"`). → [eigener Abschnitt](#warum-im-standardmodus-leben-munition-und-trefferquote-leer-bleiben) | **gemessen, dauerhafte Grenze** |
+| **Teamstand im Standardmodus** | Gemessen: die Anlage schickt in Modus 7 keine Punktezeile auf eine Team-Kennung, nur je Spieler. Der Teamstand bleibt deshalb 0:0 und der Missionsbericht meldet `draw`. Die Spielerpunkte stimmen exakt. Ob der Teamstand die Summe der Spielerpunkte ist, ist **nicht belegt** und wird nicht gerechnet. | **offen, mit Auswirkung** |
 | **Profil-Spalten ohne Neustart** | Eine neue **Modus-Nummer** greift nach einem Speichern in der Konsole sofort. Ändert jemand dagegen die **Spalten** eines Profils in `modes/profile/*.json`, zeigt die Web-Konsole sie erst nach einem Neustart: `GET /api/modes` löst die Profilliste beim Programmstart einmal auf. | bekannte Grenze |
 | **Modus-Fehler in der Web-Konsole** | Beanstandungen an den Modus-Dateien stehen im Log und in `modeConfigStatus()`, aber noch nicht im Status-Endpunkt und damit nicht in der Konsolenoberfläche. Dafür müsste `/api/status` das Feld mitliefern. | offen |
 | **Bedeutung der elf amtlichen Typ-7-Felder** | `livesLeft` und `shotsLeft` sind aus den Namen klar. Für `medicHits`, `ownMedicHits`, `medicNukes`, `scoutRapid`, `lifeBoost`, `ammoBoost`, `nukesCancelled`, `ownNukeCancels`, `shot3Hit` ist die Bedeutung aus der lfstats-Spezifikation erschlossen und nicht gegen eine Anlage geprüft. Die Zahlen werden roh durchgereicht. | unbestätigt |
@@ -1256,6 +1502,10 @@ Im Stil der übrigen Doku: hier steht ehrlich, was **nicht** belegt ist.
 | **Matchende in Laserball** | Laserball hat keine Typ-7-Zeilen; die Erkennung der Endabrechnung hängt dort allein daran, dass am Ende **jede** Entity eine Typ-6-Zeile meldet. Dass sie das tut, ist Spezifikation, nicht Messung. Der Exit-Code taugt seit der [Beobachtung vom 17.09.2026](LASERFORCE.md#die-exit-codes-der-typ-6-zeile--unbestätigt) nicht mehr als Merkmal und wird nur noch protokolliert. Trifft die Annahme nicht zu, beendet der Watchdog das Match später — nie früher. | unbestätigt |
 | **Keine Typ-1-Zeile** | Sendet eine Anlage gar keine Typ-1-Zeile, bleibt der Modus dauerhaft `unknown`. Eine Möglichkeit, die Familie von Hand zu erzwingen, gibt es bewusst (noch) nicht. | bewusst offen |
 | **Beschreibung endet auf einer Zahl** | Kommt ein Stream **ohne** Tabulatoren **und ohne** Schema-Zeilen, und endet die Missionsbeschreibung auf einer Zahl, kann dieses letzte Token verlorengehen. Mit Tabulator oder mit Schema-Zeile korrekt. | bekannte Grenze |
+| **„Hinterherlaufen" ist ein Verdacht** | Die Erkennung sieht nur Treffer, keine Position, keine Entfernung und keine Absicht. Verfolgen ohne zu treffen bleibt unsichtbar; Duelle, gute Spieler und kleine Matches erzeugen Fehlalarme. → [eigener Abschnitt](#grenzen-der-erkennung--was-sie-nicht-sieht-und-wann-sie-danebenliegt) | **bekannte Grenze, gemessen** |
+| **Schwelle 3 ist empfindlich** | Gemessen an vier echten Standardspielen: 32–63 % aller Spieler erreichen sie mindestens einmal je Match. Als Auffälligkeitsliste taugt eher 4 oder 5. Die Vorgabe 3 ist die Bestellung des Betreibers, keine Messempfehlung. | **gemessen** |
+| **`0208` = Eigenbeschuss** | Erschlossen, nicht aus der Protokolldoku: 6 von 6 beobachteten Vorkommen waren teamintern, bei 1120 von 1120 gegnerischen `0205`/`0206`. Sechs Fälle sind eindeutig, aber wenige. Der zusätzliche Team-Vergleich in `_noteTag()` fängt den Fall auch dann ab, wenn die Deutung falsch sein sollte. | **erschlossen, klein belegt** |
+| **`0D06` „blastet"** | Als Flächenwirkung erkannt (ein Actor, mehrere Ziele im selben Zeitstempel), Bedeutung sonst unbelegt. Zählt für „Hinterherlaufen" nicht mit. | unbestätigt |
 
 ---
 

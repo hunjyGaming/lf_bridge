@@ -318,6 +318,47 @@ Eine Anzeige, die nur Punkte und Uhr zeigt, kommt also mit einem Dreißigstel
 aus. Der Datensatz enthält **keine** Ereignisliste, keine Rohwerte der Anlage
 und nur die Spalten des laufenden Modus.
 
+Zusätzlich enthält er `chase` — den Verdacht „Hinterherlaufen", in derselben
+Form wie [`GET /api/chase`](#get-apichase), nur ohne das Feld `log`. Er ist
+auch bei `?players=none` dabei: eine reine Punkteanzeige kostet das ein paar
+hundert Byte, und eine Anzeige, die ihn zeigen will, braucht dafür keine zweite
+Verbindung.
+
+### `GET /api/chase`
+
+**Der Verdacht „Hinterherlaufen"** allein, für eine Anzeige, die sonst nichts
+braucht. Inhaltlich identisch mit dem Feld `chase` aus `/api/display`, aus
+demselben Snapshot gebaut, plus der Angabe, wo der Tagesmitschrieb liegt.
+
+```jsonc
+{
+  "threshold": 3,                 // Treffer hintereinander auf dieselbe Person
+  "watched": true,                // läuft die Erkennung im gerade erkannten Modus?
+  "profiles": ["standard"],       // Anzeigeprofile, für die sie läuft
+  "count": 2,
+  "players": [
+    { "playerId": "cC3dD4eE", "playerName": "Cleo", "teamId": "1",
+      "targetId": "aA1bB2cC", "targetName": "Anna Lena", "targetTeamId": "0",
+      "streak": 4, "runs": 2, "lastAt": 1699999999999, "open": false }
+  ],
+  "lowSignal": false,             // true = zu wenige Spieler, der Hinweis sagt kaum etwas
+  "lowSignalBelow": 6,
+  "log": { "enabled": true, "summary": true, "dir": "data/chase",
+           "file": "…/data/chase/verfolger-2026-09-19.md",
+           "summaryFile": "…/data/chase/verfolger-2026-09-19-uebersicht.md" }
+}
+```
+
+**Wer das anzeigt, zeigt bitte auch `watched` und `lowSignal` an.** Ohne die
+beiden ist die Liste missverständlich: `watched: false` heißt „in diesem
+Spielmodus wird gar nicht geschaut" — das ist etwas völlig anderes als „niemand
+auffällig". Und `lowSignal: true` heißt, dass so wenige Spieler in der Arena
+sind, dass eine Serie auf dieselbe Person rechnerisch unvermeidlich ist.
+
+Was die Erkennung sieht und was nicht, und warum eine Schwelle von 3 an echten
+Daten ein Drittel bis die Hälfte aller Spieler listet:
+[GAMEMODES.md, „Hinterherlaufen"](GAMEMODES.md#verdacht-hinterherlaufen).
+
 ### `GET /api/modes`
 
 Die Modus-Registry und der gerade erkannte Modus. Read-only, dieselbe
@@ -816,6 +857,20 @@ ob ein Token gesetzt ist oder wie nah das gesendete dran war, steht nicht drin.
     }
   },
   "events": [ /* die letzten ~50, gleiche Form wie /api/events */ ],
+  // ---- Verdacht „Hinterherlaufen" (additiv) ----
+  // Ein VERDACHT, keine Feststellung. Kumulativ fürs laufende Match: wer die
+  // Schwelle einmal erreicht hat, bleibt bis zum nächsten Missionsstart drin.
+  "chaseThreshold": 3,           // Treffer hintereinander auf dieselbe Person; 0/1 = aus
+  "chaseProfiles": ["standard"], // Anzeigeprofile, für die überhaupt geschaut wird
+  "chaseWatched": true,          // läuft die Erkennung im GERADE erkannten Modus?
+  "chasing": [
+    { "playerId": "cC3dD4eE", "playerName": "Cleo", "teamId": "1",
+      "targetId": "aA1bB2cC", "targetName": "Anna Lena", "targetTeamId": "0",
+      "streak": 4,               // LÄNGSTE Serie dieses Matches, auf targetId
+      "runs": 2,                 // so oft kam in dem Match überhaupt eine Serie zustande
+      "lastAt": 1699999999999,   // wann eine gelistete Serie zuletzt weiterlief
+      "open": false }            // läuft gerade noch eine?
+  ],
   "updatedAt": 1699999999999
 }
 ```

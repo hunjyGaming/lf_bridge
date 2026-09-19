@@ -66,9 +66,21 @@ const EVENTS = {
     code: '0206', label: 'Player Deactivate', mode: 'sm5', category: 'combat', status: 'verified',
     desc: 'Treffer setzt die Trefferpunkte des Ziels auf 0 -> Deaktivierung + Respawn-Zyklus. Score wie 0205.',
   },
+  '0208': {
+    code: '0208', label: 'Player Hit (Eigenbeschuss)', mode: 'sm5', category: 'combat', status: 'verified',
+    desc: 'Eigenbeschuss: Actor und Ziel gehören demselben Team an. Belegt an vier echten Standardmitschnitten (Modus 7): 48 von 48 Vorkommen teamintern, während 0205/0206 dort in 5333 von 5333 Fällen gegnerische Teams betrafen. Actor -50 (48 von 48), das Ziel bekommt keine eigene Score-Zeile. Deaktiviert in der Regel NICHT: nur 11 von 48 Zielen wechselten binnen 1,5 s in einen Zustand != 0 (Vergleich 0205: 68/142, 0206: 4688/5191).',
+  },
   '0209': {
     code: '0209', label: 'Warbot Deactivate', mode: 'sm5', category: 'combat', status: 'verified',
     desc: 'Ein Warbot (Nicht-Spieler) deaktiviert einen Spieler: -1 Leben, Standard-Respawn. Zählt nicht als timesZapped. Kein Score.',
+  },
+  '0D05': {
+    code: '0D05', label: 'Blast (Treffer)', mode: 'sm5', category: 'combat', status: 'unverified',
+    desc: '(unbestätigt) Genau EIN Vorkommen in vier Standardmitschnitten. Gleicher Anlagentext "blastet" wie 0D06, Ziel im Gegnerteam, Actor +110, Ziel ohne Score-Zeile — anders als bei 0D06 wechselte das Ziel jedoch NICHT in einen Zustand != 0. Das legt dasselbe Verhältnis wie 0205:0206 nahe (Treffer ohne Deaktivierung), ist bei n=1 aber nicht belegt.',
+  },
+  '0D06': {
+    code: '0D06', label: 'Blast (Deaktivierung)', mode: 'sm5', category: 'combat', status: 'verified',
+    desc: 'Anlagentext "<Actor> blastet <Ziel>". 78 von 78 Vorkommen in vier Standardmitschnitten betrafen gegnerische Teams. Der Actor bekommt eine Score-Zeile im selben Bereich wie 0206 (gemessen +60 bis +140), das Ziel keine. In 75 von 78 Fällen wechselt das Ziel binnen 1,5 s in einen Zustand != 0, ist also deaktiviert. Mehrere Ziele auf DEMSELBEN Zeitstempel beobachtet (bis zu 2) — ein Mehrfach-/Flächentreffer.',
   },
 
   // ---------------------------------------------------------------------------
@@ -106,6 +118,14 @@ const EVENTS = {
     code: '0400', label: 'Rapid Fire Activate', mode: 'sm5', category: 'special', status: 'verified',
     desc: 'Scout aktiviert Dauerfeuer (10 SP). Kein explizites Ende-Event; endet, wenn ein Ammo Carrier den Scout auffüllt (0500).',
   },
+  '0402': {
+    code: '0402', label: 'Unverwundbarkeit aktiviert', mode: 'sm5', category: 'special', status: 'verified',
+    desc: 'Anlagentext "<Actor> aktiviert Unverwundbarkeit". Nur Actor, kein Ziel, keine Score-Zeile (38 von 38 in vier Standardmitschnitten, Modus 7). Die 11 verschiedenen Akteure verteilen sich über alle Login-Level 0-3 — also keine rollen- oder levelgebundene Fähigkeit. Bei 8 von 38 Vorkommen steht auf demselben Zeitstempel ein 0E00 "wird zum Held befördert" desselben Spielers; ob der Rang die Fähigkeit auslöst, ist damit NICHT belegt.',
+  },
+  '0408': {
+    code: '0408', label: 'Vergeltung aktiviert', mode: 'sm5', category: 'special', status: 'verified',
+    desc: 'Anlagentext "<Actor> aktiviert Vergeltung". Nur Actor, kein Ziel, keine Score-Zeile (31 von 31, und nur in zwei der vier Standardmitschnitte). Beide beobachteten Akteure hatten Login-Level 3 — bei genau zwei verschiedenen Spielern ist daraus keine Rollenbindung abzuleiten.',
+  },
   '0404': {
     code: '0404', label: 'Nuke Activate', mode: 'sm5', category: 'special', status: 'verified',
     desc: 'Commander startet die Nuke-Sequenz (20 SP). Detonation (0405) folgt, sofern der Commander nicht vorher in Status 3 geht.',
@@ -137,6 +157,26 @@ const EVENTS = {
   '0600': {
     code: '0600', label: 'Penalty', mode: 'sm5', category: 'player', status: 'verified',
     desc: 'Schiedsrichter-Strafe. Der Actor ist der bestrafte Spieler; er wird deaktiviert. Score-Abzug = Feld penalty aus Zeile 1 (meist 0). Erzeugt zusätzlich Zeile 5 und Zeile 9.',
+  },
+
+  // ---------------------------------------------------------------------------
+  // Generator / radiation and ranks — measured in mode 7 ("Standard LZ - 2 Teams")
+  // on the hall's own arena, 19.09.2026, four recordings. Not in any external
+  // source: the meanings below come from the German plain-text verbs the arena
+  // sends in the same line, cross-checked against frequency, actor/target teams,
+  // score lines and player-state lines. Numbers in `desc` are those counts.
+  // ---------------------------------------------------------------------------
+  '0700': {
+    code: '0700', label: 'Generator kritisch', mode: 'sm5', category: 'special', status: 'verified',
+    desc: 'Anlagentext "Zustand von <Ziel> ist kritisch". KEIN Actor — das erste Feld hinter dem Code ist Text, nicht eine Kennung. Das Ziel war in allen 13 Vorkommen der vier Standardmitschnitte dieselbe Nicht-Spieler-Entity @30 (type generator-target, Name "Generator", Team 2). Keine Score-Zeile. Genau 8 s später beginnt jedes Mal eine Serie von 0701.',
+  },
+  '0701': {
+    code: '0701', label: 'Verstrahlung', mode: 'sm5', category: 'combat', status: 'verified',
+    desc: 'Anlagentext "<Actor> wurde verstrahlt". Nur Actor, kein Ziel, keine Score-Zeile (212 von 212). Folgt immer auf ein 0700: der kleinste gemessene Abstand zur vorangehenden Generatorwarnung war 8025 ms, der größte 23933 ms, und jede der 13 Warnungen zog genau eine Serie nach sich (je rund 14 s lang, Wiederholung je Spieler im Median 5,4 s). In 193 von 212 Fällen wechselt der Spieler binnen 500 ms in einen Zustand != 0, wird also deaktiviert.',
+  },
+  '0E00': {
+    code: '0E00', label: 'Beförderung', mode: 'sm5', category: 'other', status: 'verified',
+    desc: 'Anlagentext "<Actor> wird zum <Rang> befördert"; der Rang steht als eigenes Feld zwischen den beiden Textteilen. Nur Actor, kein Ziel, keine Score-Zeile (25 von 25). Beobachtete Ränge: Schütze 9x, Held 7x, Unsterblicher 5x, Raketenliebhaber 4x. Welche Wirkung ein Rang hat, geben die Daten NICHT her.',
   },
 
   // ---------------------------------------------------------------------------
@@ -266,8 +306,69 @@ function scoreText(evt) {
 }
 
 /**
+ * ADDITIVE — build a sentence out of the arena's OWN words.
+ *
+ * A type-4 line is `4 <time> <code> <varies…>` (the `;4/event` schema literally
+ * names the tail `varies`), and a real Laserforce arena fills that tail with
+ * entity references and German plain text, interleaved:
+ *
+ *     4  0000196  0D06  #jJ9kK0lL  " blastet "  #mM1nN2oO
+ *     4  0109912  0E00  #gG7hH8iI  " wird zum "  Held  " befördert"
+ *     4  0002482  0700  "Zustand von "  @30  " ist kritisch"
+ *
+ * Every hall can define its own game modes, so the catalog will never be
+ * complete — but the arena ships the meaning of its own codes in that tail.
+ * Using it turns an unlabelled `lf_event` into a sentence an operator can read,
+ * WITHOUT guessing anything: the words are the arena's, not ours.
+ *
+ * Rules: a token starting with `#`/`@` is an entity reference and is replaced by
+ * the resolved name (or left as-is when unknown); everything else is text and is
+ * taken verbatim. The result is trimmed, whitespace-collapsed and length-bounded.
+ * Never throws; returns '' when nothing usable comes out.
+ *
+ * @param {string[]} fields      the tail fields of the type-4 line (after the code)
+ * @param {(id:string)=>(string|null)} [nameOf]  entity id (no prefix) -> display name
+ * @returns {string}
+ */
+function streamPhrase(fields, nameOf) {
+  try {
+    if (!Array.isArray(fields) || !fields.length) return '';
+    const parts = [];
+    for (const raw of fields) {
+      if (typeof raw !== 'string') continue;
+      const tok = raw.trim();
+      if (!tok) continue;
+      if (tok[0] === '#' || tok[0] === '@') {
+        let name = null;
+        if (typeof nameOf === 'function') {
+          try { name = nameOf(tok.slice(1)); } catch (_err) { name = null; }
+        }
+        parts.push(typeof name === 'string' && name.trim() ? name.trim() : tok);
+      } else {
+        parts.push(tok);
+      }
+    }
+    const out = parts.join(' ').replace(/\s+/g, ' ').trim();
+    // Keep it printable and bounded — this text comes straight off an
+    // unauthenticated TCP feed and ends up in logs, CSV and the web console.
+    let clean = '';
+    for (const ch of out) {
+      const c = ch.codePointAt(0);
+      clean += (c < 0x20 || c === 0x7f || (c >= 0x80 && c <= 0x9f)) ? ' ' : ch;
+    }
+    return clean.replace(/\s+/g, ' ').trim().slice(0, 160);
+  } catch (_err) {
+    return '';
+  }
+}
+
+/**
  * Turn a parsed event into a readable German sentence. Best effort — always falls
  * back to the catalog label (or a generic string) and never throws.
+ *
+ * ADDITIVE: when no case below knows the code, `evt.streamText` (built by
+ * `streamPhrase()` from the arena's own words) beats the generic
+ * "Event 0F00: A -> B" placeholder.
  *
  * Accepts a loose shape, e.g.:
  *   { code, actorName|actor, targetName|target, teamName, teamId, scores|score }
@@ -318,7 +419,26 @@ function phrase(evt) {
       case '0204': return `${A} zerstört ${T}`;
       case '0205': return target ? `${A} trifft ${T}` : `${A} trifft`;
       case '0206': return target ? `${A} deaktiviert ${T}` : `${A} deaktiviert einen Spieler`;
+      case '0208': return target ? `${A} trifft ${T} (Eigenbeschuss)` : `${A} trifft einen Mitspieler`;
       case '0209': return `Warbot deaktiviert ${T}`;
+      case '0D05': return target ? `${A} blastet ${T}` : `${A} blastet`;
+      case '0D06': return target ? `${A} blastet ${T}` : `${A} blastet`;
+      case '0402': return `${A} aktiviert Unverwundbarkeit`;
+      case '0408': return `${A} aktiviert Vergeltung`;
+      case '0700': {
+        // The target is a NON-player entity (`@30`, the generator), so the
+        // engine has no name for it. The arena's own sentence keeps the raw
+        // reference and reads better than "Zustand von 30 ist kritisch".
+        const st = typeof e.streamText === 'string' && e.streamText.trim() ? e.streamText.trim() : '';
+        if (e.targetName) return `Zustand von ${e.targetName} ist kritisch`;
+        if (st) return st;
+        return target ? `Zustand von ${T} ist kritisch` : 'Generator-Zustand kritisch';
+      }
+      case '0701': return `${A} wurde verstrahlt`;
+      case '0E00': {
+        const rank = firstStr(e.rank);
+        return rank ? `${A} wird zum ${rank} befördert` : `${A} wird befördert`;
+      }
       case '0300': return target ? `${A} schaltet auf ${T} auf` : `${A} schaltet auf`;
       case '0301':
       case '0304': return `${A} verfehlt ${T} mit einer Rakete`;
@@ -340,6 +460,9 @@ function phrase(evt) {
       case '0B03': return target ? `${T} wird ${A} zugesprochen` : `${A} erhält ein Ziel zugesprochen`;
 
       default: {
+        // The arena's own wording beats our placeholder — see streamPhrase().
+        const st = typeof e.streamText === 'string' ? e.streamText.trim() : '';
+        if (st) return st;
         const label = info.label || `Event ${info.code}`;
         if (actor && target) return `${label}: ${A} -> ${T}`;
         if (actor) return `${label}: ${A}`;
@@ -379,4 +502,4 @@ function readable(evt) {
   return `Event ${e.code || '?'}`;
 }
 
-module.exports = { EVENTS, describe, phrase, readable, categories };
+module.exports = { EVENTS, describe, phrase, readable, streamPhrase, categories };

@@ -110,6 +110,31 @@ Jeder Wert in **Sekunden**, `0` schaltet genau diesen Weg ab.
 |---|---|---|---|---|
 | `LF_EMIT_UNKNOWN_EVENTS` | `engine.emitUnknownEvents` | `true` | zusätzlich ein generisches `lf_event` für jeden Typ-4-Code, den der Parser nicht auswertet | Konsole |
 
+### Verdacht „Hinterherlaufen"
+
+Reine Beobachtung: wer mehrmals hintereinander dieselbe Person trifft, wird
+aufgelistet. Es wird nichts bestraft und nichts am Spiel verändert. Regel,
+gezählte Ereignisse und die **Grenzen der Erkennung**:
+[GAMEMODES.md](GAMEMODES.md#verdacht-hinterherlaufen).
+
+| `.env` | `config.json` | Vorgabe | Wirkung | gehört nach |
+|---|---|---|---|---|
+| `LF_CHASE_STREAK` | `engine.chase.threshold` | `3` | Treffer hintereinander auf dieselbe Person, bevor das Paar gelistet wird. **0 und 1 = aus** (0–50) | Konsole |
+| `LF_CHASE_PROFILES` | `engine.chase.profiles` | `standard` | Komma-Liste der **Anzeigeprofile**, für die die Erkennung läuft — nicht Modus-Nummer, nicht Familie | Konsole |
+| `LF_CHASE_LOG_ENABLED` | `chaseLog.enabled` | `true` | Tagesprotokoll als Markdown schreiben (einmal je Matchende) | Konsole |
+| `LF_CHASE_LOG_DIR` | `chaseLog.dir` | `data/chase` | Ordner dafür. Enthält **Spielernamen** | Konsole |
+| `LF_CHASE_LOG_SUMMARY` | `chaseLog.summary` | `true` | zusätzlich die Tagesübersicht (wird nach jedem Match neu geschrieben) | Konsole |
+
+> **Sie sehen nie einen Eintrag?** Dann läuft Ihr Standardspiel vermutlich als
+> Profil `sm5`, weil die Missionsnummer Ihrer Anlage noch nicht in
+> `modes/standard.json` steht. Entweder die Nummer eintragen (der bessere Weg,
+> siehe [GAMEMODES.md](GAMEMODES.md#standard-eintragen--die-eine-zahl)) oder
+> übergangsweise `LF_CHASE_PROFILES=standard,sm5` setzen.
+
+> **Schwelle 3 ist empfindlich.** An vier echten Standardspielen gemessen
+> erreichen 32–63 % aller Spieler sie mindestens einmal je Match. Wer die Liste
+> als Auffälligkeitsliste lesen will, stellt eher `4` oder `5` ein.
+
 ### Roher NDJSON-Strom hinaus
 
 | `.env` | `config.json` | Vorgabe | Wirkung | gehört nach |
@@ -293,6 +318,7 @@ eingebauten Vorgaben weiter. Anleitung:
 | `apiToken`, `cors`, `rateLimitPerMin`, `http.trustProxy` | sofort — sie werden bei jeder Anfrage neu gelesen |
 | `admin.sessionHours`, `admin.maxFailedLogins`, `admin.lockoutMinutes` | sofort beim Speichern |
 | `http.host` / `http.port` / `stateTickMs` | **erst nach einem Neustart** (das Log sagt es beim Speichern) |
+| `engine.chase.*`, `chaseLog.*` | sofort beim Speichern |
 | `eventLog.*` | **erst nach einem Neustart** |
 | jede `.env`-Zeile | **erst nach einem Neustart** |
 
@@ -339,7 +365,16 @@ eingebauten Vorgaben weiter. Anleitung:
     "streamLostSeconds": 30,                 // Verbindung weg und kommt nicht zurück
     "endBlockSeconds": 10                    // Endabrechnung (Typ 6/7) ohne folgendes 0101
   },                                         // je 0 = dieser Weg ist abgeschaltet
-  "engine": { "emitUnknownEvents": true },   // generisches lf_event für nicht ausgewertete Typ-4-Codes
+  "engine": {
+    "emitUnknownEvents": true,               // generisches lf_event für nicht ausgewertete Typ-4-Codes
+    "chase": {                               // Verdacht „Hinterherlaufen" — GAMEMODES.md
+      "threshold": 3,                        // Treffer hintereinander auf dieselbe Person; 0/1 = aus
+      "profiles": ["standard"]               // ANZEIGEPROFILE, nicht Nummern, nicht Familien
+    }
+  },
+  "chaseLog": {                              // Tagesprotokoll dazu, enthält Spielernamen
+    "enabled": true, "dir": "data/chase", "summary": true
+  },
   "csv": {
     "enabled": true, "dir": "data/stats", "delimiter": ";",
     "bom": true, "writeEvents": true, "writeLive": false

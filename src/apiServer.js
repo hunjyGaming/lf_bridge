@@ -11,6 +11,7 @@ const {
 } = require('./auth');
 const { reachability } = require('./netinfo');
 const { redactUrl } = require('./mqtt');
+const { ChaseLog } = require('./chaseLog');
 const {
   FAMILIES, DEFAULT_FAMILY, DEFAULT_PROFILE, PROFILE_LIST, FAMILY_DEFAULT_PROFILE,
   listModes, listProfiles, scoreboardColumns, metricLabels, metricGroups, profileLabel,
@@ -169,6 +170,22 @@ const FORMAT_UNIT = { percent: '%', int: null, text: null };
  * a duel, and one team with many players is a co-op game.
  */
 const FFA_MIN_TEAMS = 3;
+
+/**
+ * Below this many players in the match the "Hinterherlaufen" hint says almost
+ * nothing and is flagged as such (`chase.lowSignal`).
+ *
+ * The reasoning is plain arithmetic, not a feeling. A run of three tags on the
+ * same opponent is only remarkable if there were other opponents to tag. With
+ * two players there is exactly one opponent, so EVERY run of three is on the
+ * same person — the detection can only ever say "yes". With four players
+ * (2 v 2) there are two opponents and even completely random shooting produces
+ * a run of three on one of them one time in four. From six players on (three
+ * opponents, one in nine at random, and real players spread out over an arena)
+ * the hint starts to be worth looking at. Six is therefore the line, and it is
+ * a display caveat only: the list itself is built the same way at any headcount.
+ */
+const CHASE_LOW_SIGNAL_PLAYERS = 6;
 
 /** How often the same disallowed Origin produces a log line. */
 const ORIGIN_LOG_MS = 60000;
@@ -408,6 +425,23 @@ function buildDisplay(s, { withPlayers = true, now = Date.now() } = {}) {
         at: orNull(s.endedAt),
       },
     },
+    /**
+     * Verdacht „Hinterherlaufen" — a SUSPICION, never a finding. `players` is
+     * the list the engine keeps (empty when nobody is conspicuous, which is a
+     * statement in itself). `watched` says whether the detection runs for the
+     * mode on screen at all; `lowSignal` says the headcount is too small for
+     * the hint to mean much. A consumer that shows the list without those two
+     * flags is showing something it does not understand — see docs/API.md.
+     */
+    chase: {
+      threshold: num0(s.chaseThreshold),
+      watched: s.chaseWatched === true,
+      profiles: Array.isArray(s.chaseProfiles) ? s.chaseProfiles.slice() : [],
+      players: Array.isArray(s.chasing) ? s.chasing.map((c) => ({ ...c })) : [],
+      count: Array.isArray(s.chasing) ? s.chasing.length : 0,
+      lowSignal: Object.keys(s.players || {}).length < CHASE_LOW_SIGNAL_PLAYERS,
+      lowSignalBelow: CHASE_LOW_SIGNAL_PLAYERS,
+    },
     teams,
     teamCount: teams.length,
     /** teams that actually have a player in them right now */
@@ -483,6 +517,23 @@ class ApiServer {
       lockoutMs: (config.data.admin?.lockoutMinutes || 10) * 60000,
     });
     this.recovery = new RecoveryCode();
+    // The chase settings live in the config and are applied to the engine from
+    // here — this is the module that owns the console's config path, and it
+    // already re-reads its own settings after a save (`reconcileAuth`). Doing
+    // it at construction time means the engine has the operator's values from
+    // the first line of the first match on.
+    this.reconcileChase();
+    // Und der Mitschrieb der Beobachtung. Er hängt am `match_end` der Engine,
+    // schreibt einmal je Matchende und niemals im Ereignispfad (src/chaseLog.js).
+    this.chaseLog = new ChaseLog(config.data, logger);
+    try {
+      if (typeof this.engine?.on === 'function') {
+        this.engine.on('match_end', () => {
+          try { this.chaseLog.onMatchEnd(this.engine.snapshot()); }
+          catch (_err) { /* ein Logfile darf den Betrieb nie stören */ }
+        });
+      }
+    } catch (_err) { /* dito */ }
   }
 
   get cfg() { return this.config.data; }
@@ -495,6 +546,23 @@ class ApiServer {
       maxFails: this.cfg.admin?.maxFailedLogins || 8,
       lockoutMs: (this.cfg.admin?.lockoutMinutes || 10) * 60000,
     });
+  }
+
+  /**
+   * Hand the "Hinterherlaufen" settings to the engine. Best effort: an engine
+   * that does not know the method (an older one, a stub in a test) is simply
+   * left alone — the detection then runs on its own defaults and nothing else
+   * about the service changes.
+   */
+  reconcileChase() {
+    try {
+      if (this.chaseLog) this.chaseLog.configure(this.cfg);
+      if (typeof this.engine?.setChaseConfig !== 'function') return null;
+      const c = this.cfg.engine?.chase || {};
+      return this.engine.setChaseConfig({ threshold: c.threshold, profiles: c.profiles });
+    } catch (_err) {
+      return null;
+    }
   }
 
   start() {
@@ -1201,6 +1269,16 @@ class ApiServer {
       return this._json(res, 200, { data: this.engine.gameState.events.filter((e) => e.id > since).slice(-limit) });
     }
     if (p === '/api/status') return this._json(res, 200, { data: this.getStatus() });
+    // Verdacht „Hinterherlaufen" on its own, for a display that wants nothing
+    // else. Identical content to `display.chase`, built from the same snapshot.
+    if (p === '/api/chase') {
+      const s = this.engine.snapshot();
+      const data = buildDisplay(s, { withPlayers: false }).chase;
+      // Wo der Tagesmitschrieb liegt — damit der Betreiber die Datei findet,
+      // ohne in der Konfiguration nachzusehen.
+      data.log = this.chaseLog ? this.chaseLog.status() : null;
+      return this._json(res, 200, { data });
+    }
     // The display payload (docs/API.md "Der Anzeige-Datensatz"). Same auth,
     // CORS, token and rate-limit chain as every other GET. `?players=none`
     // leaves the player list out for a pure scoreboard.
@@ -1503,6 +1581,7 @@ class ApiServer {
       if (changed.length) {
         this.log.warn('audit', `config changed by ${ip}: ${changed.join(', ')}`);
         this.reconcileAuth();
+        this.reconcileChase();
         await this.onConfigChange();
       }
       return this._json(res, 200, { data: this._redactedConfig(), envPins: this.config.envPins });

@@ -76,6 +76,33 @@ function defaults() {
     // Match engine
     engine: {
       emitUnknownEvents: true,     // emit a generic lf_event for every type-4 code the parser does not act on
+
+      // Verdacht „Hinterherlaufen" (docs/GAMEMODES.md, Abschnitt
+      // „Hinterherlaufen"). Reine Beobachtung — es wird nichts bestraft,
+      // nichts gespeichert und nichts am Spiel verändert.
+      chase: {
+        // Wieviele Treffer hintereinander auf DIESELBE Person, bevor das Paar
+        // in der Liste auftaucht. 0 oder 1 = Erkennung aus.
+        threshold: 3,
+        // Für welche ANZEIGEPROFILE die Erkennung läuft — nicht nach
+        // Missionsnummer und nicht nach Familie. Die Standard-Nummer der
+        // Anlage ist noch unbekannt; bis sie in modes/standard.json steht,
+        // laufen Standardspiele als Profil `sm5`. Zum Ausprobieren so lange
+        // `sm5` mit aufnehmen.
+        profiles: ['standard'],
+      },
+    },
+
+    // Verdacht „Hinterherlaufen" mitschreiben (docs/GAMEMODES.md).
+    // Vorgabe AN — anders als beim Roh-Mitschnitt, und mit Absicht: die Datei
+    // ist der eigentliche Zweck der Funktion („erstmal nur für die
+    // Auswertung"), sie wächst um wenige Kilobyte am Tag statt um Megabyte, und
+    // geschrieben wird einmal je Matchende statt laufend. Sie enthält
+    // Spielernamen und liegt darum unter data/ (per .gitignore nicht im Repo).
+    chaseLog: {
+      enabled: true,
+      dir: 'data/chase',
+      summary: true,               // zusätzlich die Tagesübersicht schreiben
     },
 
     // Human-readable append-only event-log file (docs/LOGGING.md)
@@ -207,6 +234,12 @@ function applyEnv(cfg, pins) {
   if (Ei('LF_MATCH_END_BLOCK_SECONDS') !== undefined) { cfg.matchEnd.endBlockSeconds = Ei('LF_MATCH_END_BLOCK_SECONDS'); P('matchEnd.endBlockSeconds', 1); }
 
   if (Eb('LF_EMIT_UNKNOWN_EVENTS') !== undefined) { cfg.engine.emitUnknownEvents = Eb('LF_EMIT_UNKNOWN_EVENTS'); P('engine.emitUnknownEvents', 1); }
+
+  if (Ei('LF_CHASE_STREAK') !== undefined) { cfg.engine.chase.threshold = Ei('LF_CHASE_STREAK'); P('engine.chase.threshold', 1); }
+  if (E('LF_CHASE_PROFILES')) { cfg.engine.chase.profiles = E('LF_CHASE_PROFILES').split(',').map((s) => s.trim()).filter(Boolean); P('engine.chase.profiles', 1); }
+  if (Eb('LF_CHASE_LOG_ENABLED') !== undefined) { cfg.chaseLog.enabled = Eb('LF_CHASE_LOG_ENABLED'); P('chaseLog.enabled', 1); }
+  if (E('LF_CHASE_LOG_DIR')) { cfg.chaseLog.dir = E('LF_CHASE_LOG_DIR'); P('chaseLog.dir', 1); }
+  if (Eb('LF_CHASE_LOG_SUMMARY') !== undefined) { cfg.chaseLog.summary = Eb('LF_CHASE_LOG_SUMMARY'); P('chaseLog.summary', 1); }
 
   // ---- MQTT out (docs/MQTT.md) ----
   // LF_MQTT_USERNAME / LF_MQTT_PASSWORD are NOT read here on purpose: they must
@@ -371,6 +404,22 @@ function normalize(raw) {
   c.matchEnd.endBlockSeconds = clampInt(raw.matchEnd?.endBlockSeconds, d.matchEnd.endBlockSeconds, 0, 86400);
 
   c.engine.emitUnknownEvents = bool(raw.engine?.emitUnknownEvents, d.engine.emitUnknownEvents);
+
+  // 0 und 1 heißen beide „aus": eine Serie von einem Treffer wäre keine Serie.
+  c.engine.chase.threshold = clampInt(raw.engine?.chase?.threshold, d.engine.chase.threshold, 0, 50);
+  // Profilnamen sind kleingeschrieben und kurz (`standard`, `sm5`, `laserball`
+  // sowie eigene aus modes/). Alles andere fliegt raus, die Liste ist begrenzt.
+  c.engine.chase.profiles = Array.isArray(raw.engine?.chase?.profiles)
+    ? raw.engine.chase.profiles
+      .filter((s) => typeof s === 'string')
+      .map((s) => s.trim().toLowerCase().replace(/[^a-z0-9_-]/g, '').slice(0, 40))
+      .filter(Boolean)
+      .slice(0, 16)
+    : d.engine.chase.profiles.slice();
+
+  c.chaseLog.enabled = bool(raw.chaseLog?.enabled, d.chaseLog.enabled);
+  c.chaseLog.dir = str(raw.chaseLog?.dir, d.chaseLog.dir).trim() || d.chaseLog.dir;
+  c.chaseLog.summary = bool(raw.chaseLog?.summary, d.chaseLog.summary);
 
   c.eventLog.enabled = bool(raw.eventLog?.enabled, d.eventLog.enabled);
   c.eventLog.dir = str(raw.eventLog?.dir, d.eventLog.dir).trim() || d.eventLog.dir;

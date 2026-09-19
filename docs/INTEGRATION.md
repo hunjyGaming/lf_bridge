@@ -345,6 +345,8 @@ bemerkt, bis die Monatsauswertung nicht stimmt.
       "entityId": "#4108331",
       "idKind": "member",
       "memberId": "4108331",
+      "memberIdReported": "21-101-10001",
+      "memberIdParts": { "countryCode": 21, "centerCode": 101, "memberCode": 54254 },
       "teamId": "0",
       "team": "Rot Team",
       "result": "win",
@@ -395,8 +397,9 @@ bemerkt, bis die Monatsauswertung nicht stimmt.
 | `playerId` | Kennung **ohne** Präfix — derselbe Wert wie `player_id` in den CSV-Dateien. |
 | `entityId` | Die Kennung **genau so, wie die Anlage sie geschickt hat**, mit Präfix. `null`, wenn keine Anmeldezeile gesehen wurde. |
 | `idKind` | `member` · `guest` · `unknown`. **Siehe nächster Abschnitt.** |
-| `memberId` | Die weltweit eindeutige Laserforce-Mitglieds-ID, ohne `#`. **Nur hier**, und bei einem Gast `null`. |
-| `memberIdReported` | *(nur wenn vorhanden)* Dieselbe Angabe aus der `memberId`-Spalte der Anmeldezeile — die schicken nur späte TDF-2.006-Anlagen. Zweite, unabhängige Quelle. |
+| `memberId` | Die `id`-Spalte der Anmeldezeile ohne `#`. Bei einem Gast `null`. **Vorsicht:** an einer Anlage mit `memberId`-Spalte ist das nur ein alphanumerisches Kürzel (`"aA1bB2cC"`), nicht die Mitgliedsnummer — die steht in `memberIdReported`. Siehe [Die Zerlegung der Mitgliedsnummer](#die-zerlegung-der-mitgliedsnummer--gemessen-nicht-geraten). |
+| `memberIdReported` | *(nur wenn vorhanden)* Die `memberId`-Spalte der Anmeldezeile — die schicken nur späte TDF-2.006-Anlagen. **Das ist die eigentliche Mitgliedsnummer**, Form `<land>-<zentrum>-<mitglied>`, z. B. `"21-101-10001"`. |
+| `memberIdParts` | *(nur wenn `memberIdReported` diese Form hat)* Dieselbe Angabe zerlegt: `{ "countryCode": 21, "centerCode": 101, "memberCode": 54254 }` — drei **Zahlen**, benannt wie die Felder des Mongo-`Member`-Schemas. Steht **zusätzlich**, nie anstelle der Rohform. |
 | `teamId` / `team` | Team-Nummer und Teamname. |
 | `result` | `win` · `loss` · `draw` · `null` (keine Punkte gemeldet). |
 | `name` | Spielername. **Fehlt**, wenn Namen abgeschaltet sind (siehe Datenschutz). |
@@ -413,7 +416,7 @@ Der Wunsch, wie er gestellt wurde, und wie er heißt:
 
 | gewünscht | im Bericht |
 |---|---|
-| `memberID` | `memberId` (+ `entityId`, `idKind`) |
+| `memberID` | `memberIdReported` und `memberIdParts` wenn die Anlage die Spalte schickt, sonst `memberId` (dazu immer `entityId`, `idKind`) |
 | `score` | `score` |
 | `total_shots` | `shotsFired` |
 | `shots_hit` | `shotsHit` |
@@ -474,16 +477,68 @@ Die Anlage kennt **zwei** Arten von Kennung (docs/LASERFORCE.md):
 **Zuordnung im Backend:** `memberId` ist ein String und wird **unverändert**
 durchgereicht.
 
-> **Offen, und bewusst nicht geraten:** wie `#xxxxxxx` auf die Felder
-> `countryCode` / `centerCode` / `memberCode` des Mongo-`Member`-Schemas
-> abzubilden ist. Der Locationserver liest `dbo.Member` und schickt das Feld
-> `id` **unzerlegt** ans Backend (`util/laserforce-import.js`); nirgends im
-> Locationserver wird es in drei Teile zerlegt, und ob `cardNumber` dieselbe
-> Zahl trägt, ist ebenfalls nicht belegt. Eine Zerlegung wäre geraten —
-> stattdessen liefert lf_live die Kennung roh. **Wer die Aufteilung kennt (oder
-> ein Beispiel-Mitglied mit beiden Darstellungen hat), sollte sie beisteuern;
-> bis dahin ist der Vergleich mit dem importierten `id` der einzige belegbare
-> Weg.**
+### Die Zerlegung der Mitgliedsnummer — gemessen, nicht geraten
+
+Diese Frage war lange offen. Vier Roh-Mitschnitte der eigenen Anlage vom
+19.09.2026 beantworten sie.
+
+**Zwei verschiedene Kennungen, die man nicht verwechseln darf.** Die
+Anmeldezeile der Anlage führt beide nebeneinander:
+
+```
+;3/entity-start ⇥ time ⇥ id ⇥ type ⇥ desc ⇥ team ⇥ level ⇥ category ⇥ battlesuit ⇥ memberId
+3 ⇥ 0000001 ⇥ #aA1bB2cC ⇥ player ⇥ Anna Lena ⇥ 1 ⇥ 1 ⇥ 0 ⇥ Underground ⇥ 21-101-10001
+```
+
+| Spalte | Beispiel | Was es ist | Im Bericht |
+|---|---|---|---|
+| `id` | `#aA1bB2cC` | **Alphanumerisches Kürzel**, `#` plus acht Zeichen. **Keine Zahl** — darf nirgends numerisch behandelt, verglichen oder sortiert werden. | `entityId` (roh), `memberId` (ohne `#`) |
+| `memberId` | `21-101-10001` | Die **eigentliche Mitgliedsnummer**, drei Zahlen mit Bindestrich. | `memberIdReported` + `memberIdParts` |
+
+> **Achtung beim Feldnamen `memberId` im Bericht.** Der trägt aus historischen
+> Gründen die `id`-Spalte ohne `#` — an dieser Anlage also das Kürzel
+> `"aA1bB2cC"`, nicht die Mitgliedsnummer. Wer auf `countryCode` /
+> `centerCode` / `memberCode` abbilden will, nimmt `memberIdParts`, und wer die
+> Nummer als Text will, `memberIdReported`. `memberId` bleibt unverändert, damit
+> kein bestehender Verbraucher bricht.
+
+**Was gemessen wurde.** Über alle vier Mitschnitte:
+
+| Prüfung | Ergebnis |
+|---|---|
+| Spieler mit `memberId`-Spalte | **141 von 141** |
+| davon in der Form `<zahl>-<zahl>-<zahl>` | **141 von 141**, keine Ausnahme |
+| Nicht-Spieler-Entities (Ziele, Beacon, Generator) mit `memberId` | **0** — deren Spalte ist leer |
+| vorderer Teil identisch mit dem Zentrum aus der Typ-0-Zeile (`21-101`) | **135 von 141** |
+
+**Die sechs Abweichler sind der eigentliche Fund.** In zwei der vier Mitschnitte
+sitzen je drei Spieler mit `21-103-…`, während die Anlage sich im Kopf als
+`21-101` ausweist — Gäste aus einem anderen Zentrum, die in dieser Halle
+mitspielen.
+
+> **Daraus folgt eine Regel:** `countryCode` und `centerCode` gehören zum
+> **Spieler**, nicht zur Anlage. Sie müssen aus der Mitgliedsnummer des Spielers
+> gelesen werden. Wer sie stattdessen aus der Typ-0-Kopfzeile ableitet, legt
+> jeden auswärtigen Gast unter dem falschen Zentrum ab — und genau das wäre der
+> naheliegende Fehler gewesen.
+
+**Was lf_live daraus macht.** `memberIdParts` steht **zusätzlich** im
+Spielerblock, nie anstelle der Rohform:
+
+```json
+"memberIdReported": "21-103-90412",
+"memberIdParts": { "countryCode": 21, "centerCode": 103, "memberCode": 90412 }
+```
+
+Passt eine Nummer nicht auf das Muster, **fehlt `memberIdParts` einfach** —
+geraten wird nicht, und `memberIdReported` steht in jedem Fall da.
+
+> **Was weiterhin offen ist:** ob `memberCode` dieselbe Zahl ist wie das Feld
+> `cardNumber` in `dbo.Member`, und ob der Locationserver-Import
+> (`util/laserforce-import.js`, der `id` **unzerlegt** durchreicht) auf
+> `memberCode` oder auf die zusammengesetzte Nummer abzubilden ist. Dafür
+> braucht es ein Beispiel-Mitglied in beiden Darstellungen. Bis dahin bleibt der
+> Abgleich über `memberIdReported` als ganzen String der sichere Weg.
 
 ### Datenschutz
 
